@@ -40,7 +40,7 @@ class FMNPScreen(QWidget):
         title.setObjectName("screen_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("Record Farmers Market Nutrition Program (FMNP) checks received by vendors")
+        subtitle = QLabel("Track FMNP check details for reconciliation — FMNP payments are processed via Payment screen")
         subtitle.setObjectName("subtitle")
         layout.addWidget(subtitle)
 

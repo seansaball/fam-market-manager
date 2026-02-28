@@ -6,7 +6,7 @@ from .connection import get_connection
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
@@ -330,6 +330,21 @@ def _migrate_v6_to_v7(conn):
     logger.info("Migration v6->v7 complete: zip_code column added")
 
 
+def _migrate_v7_to_v8(conn):
+    """Add FMNP as a default payment method (100% match)."""
+    logger.info("Running migration v7 to v8: add FMNP payment method")
+    try:
+        conn.execute(
+            "INSERT INTO payment_methods (name, match_percent, is_active, sort_order)"
+            " VALUES ('FMNP', 100.0, 1, 6)"
+        )
+    except Exception as e:
+        # FMNP may already exist if user added it manually
+        logger.warning("FMNP payment method may already exist: %s", e)
+    conn.commit()
+    logger.info("Migration v7->v8 complete: FMNP payment method added")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -384,6 +399,10 @@ def initialize_database():
     if current_version < 7:
         _migrate_v6_to_v7(conn)
         current_version = 7
+
+    if current_version < 8:
+        _migrate_v7_to_v8(conn)
+        current_version = 8
 
     # Record the final version
     conn.execute(

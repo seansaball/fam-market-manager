@@ -36,6 +36,7 @@ def seed_if_empty():
         ("Tokens", 25.0, 1, 3),
         ("Food Bucks", 100.0, 1, 4),
         ("Food RX", 75.0, 1, 5),
+        ("FMNP", 100.0, 1, 6),
     ]
     cursor.executemany(
         "INSERT INTO payment_methods (name, match_percent, is_active, sort_order) VALUES (?, ?, ?, ?)",

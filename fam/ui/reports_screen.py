@@ -116,7 +116,7 @@ class ReportsScreen(QWidget):
         self.summary_row.add_card("total_receipts", "Total Receipts")
         self.summary_row.add_card("customer_paid", "Customer Paid")
         self.summary_row.add_card("fam_match", "FAM Match", highlight=True)
-        self.summary_row.add_card("fmnp_total", "FMNP Total", highlight=True)
+        self.summary_row.add_card("fmnp_total", "FMNP Match", highlight=True)
 
         layout.addWidget(self.summary_row)
 
@@ -127,7 +127,7 @@ class ReportsScreen(QWidget):
         self.vendor_table = QTableWidget()
         self.vendor_table.setColumnCount(6)
         self.vendor_table.setHorizontalHeaderLabels(
-            ["Vendor", "Customer(s)", "Date(s)", "Gross Sales", "FMNP", "Total Reimbursement"]
+            ["Vendor", "Customer(s)", "Date(s)", "Gross Sales", "FMNP Match", "Total Reimbursement"]
         )
         configure_table(self.vendor_table)
 
@@ -386,37 +386,6 @@ class ReportsScreen(QWidget):
         where = "WHERE " + " AND ".join(clauses)
         return where, params
 
-    def _build_fmnp_where(self):
-        """Return (where_sql, params) for the FMNP sub-query.
-
-        FMNP entries link to market_days (not transactions), so
-        Date, Market, and Vendor filters apply here.
-        """
-        clauses = []
-        params = []
-
-        from_date, to_date = self.date_range.get_date_range()
-        if from_date and to_date:
-            clauses.append("md.date BETWEEN ? AND ?")
-            params.extend([from_date, to_date])
-
-        market_ids = self.market_combo.checked_data()
-        if market_ids:
-            sql, p = self._in_clause("md.market_id", market_ids)
-            clauses.append(sql)
-            params.extend(p)
-
-        vendor_ids = self.vendor_combo.checked_data()
-        if vendor_ids:
-            sql, p = self._in_clause("f.vendor_id", vendor_ids)
-            clauses.append(sql)
-            params.extend(p)
-
-        if clauses:
-            where = "WHERE " + " AND ".join(clauses)
-        else:
-            where = ""
-        return where, params
 
     # ------------------------------------------------------------------
     # Generate all three reports
@@ -440,23 +409,21 @@ class ReportsScreen(QWidget):
             ORDER BY v.name
         """, params).fetchall()
 
-        # FMNP sub-query (separate table — Date/Market/Vendor apply)
-        fmnp_where, fmnp_params = self._build_fmnp_where()
-        dr_from, _ = self.date_range.get_date_range()
-        needs_md_join = bool(dr_from or self.market_combo.checked_data())
-        fmnp_join = "JOIN market_days md ON f.market_day_id = md.id" if needs_md_join else ""
-
+        # FMNP match amounts from payment_line_items (FMNP is now a payment method)
         fmnp_rows = conn.execute(f"""
             SELECT v.name as vendor,
-                   COALESCE(SUM(f.amount), 0) as fmnp_total
-            FROM fmnp_entries f
-            JOIN vendors v ON f.vendor_id = v.id
-            {fmnp_join}
-            {fmnp_where}
+                   COALESCE(SUM(pl.match_amount), 0) as fmnp_match
+            FROM payment_line_items pl
+            JOIN transactions t ON pl.transaction_id = t.id
+            JOIN vendors v ON t.vendor_id = v.id
+            JOIN market_days md ON t.market_day_id = md.id
+            LEFT JOIN customer_orders co ON t.customer_order_id = co.id
+            {where}
+            AND pl.method_name_snapshot = 'FMNP'
             GROUP BY v.id, v.name
-        """, fmnp_params).fetchall()
+        """, params).fetchall()
 
-        fmnp_by_vendor = {r['vendor']: r['fmnp_total'] for r in fmnp_rows}
+        fmnp_by_vendor = {r['vendor']: r['fmnp_match'] for r in fmnp_rows}
 
         self._vendor_data = []
         self.vendor_table.setSortingEnabled(False)
@@ -482,7 +449,7 @@ class ReportsScreen(QWidget):
             self._vendor_data.append({
                 'Vendor': r['vendor'], 'Customer(s)': customers_str,
                 'Date(s)': dates_str,
-                'Gross Sales': gross, 'FMNP': fmnp_amt,
+                'Gross Sales': gross, 'FMNP Match': fmnp_amt,
                 'Total Reimbursement': total_reimburse
             })
         self.vendor_table.setSortingEnabled(True)
@@ -604,20 +571,22 @@ class ReportsScreen(QWidget):
             for r in trend_rows
         ]
 
-        # FMNP time-series
+        # FMNP match time-series (from payment_line_items)
         fmnp_trend = conn.execute(f"""
             SELECT md.date,
-                   COALESCE(SUM(f.amount), 0) AS fmnp_total
-            FROM fmnp_entries f
-            JOIN market_days md ON f.market_day_id = md.id
-            JOIN vendors v ON f.vendor_id = v.id
-            {fmnp_where}
+                   COALESCE(SUM(pl.match_amount), 0) AS fmnp_match
+            FROM payment_line_items pl
+            JOIN transactions t ON pl.transaction_id = t.id
+            JOIN market_days md ON t.market_day_id = md.id
+            LEFT JOIN customer_orders co ON t.customer_order_id = co.id
+            {where}
+            AND pl.method_name_snapshot = 'FMNP'
             GROUP BY md.date
             ORDER BY md.date
-        """, fmnp_params).fetchall()
+        """, params).fetchall()
 
         self._chart_fmnp_data = [
-            {'date': r['date'], 'fmnp': r['fmnp_total']}
+            {'date': r['date'], 'fmnp': r['fmnp_match']}
             for r in fmnp_trend
         ]
 
@@ -934,7 +903,7 @@ class ReportsScreen(QWidget):
         ax.plot(dates, match, color=HARVEST_GOLD, marker='s', markersize=5,
                 linewidth=2, label='FAM Match', solid_capstyle='round')
         ax.plot(dates, fmnp, color=ACCENT_GREEN, marker='^', markersize=5,
-                linewidth=2, linestyle='--', label='FMNP', solid_capstyle='round')
+                linewidth=2, linestyle='--', label='FMNP Match', solid_capstyle='round')
 
         # Formatting
         ax.set_title('Totals & FAM Match Over Time', fontsize=12,
