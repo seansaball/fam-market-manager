@@ -19,7 +19,7 @@ from fam.database.connection import get_connection
 from fam.ui.styles import (
     PRIMARY_GREEN, WHITE, LIGHT_GRAY, HARVEST_GOLD, ERROR_COLOR,
     FIELD_LABEL_BG, ACCENT_GREEN, BACKGROUND, SUBTITLE_GRAY, ERROR_BG,
-    WARNING_COLOR, WARNING_BG
+    WARNING_COLOR, WARNING_BG, CARD_FRAME_STYLE
 )
 from fam.ui.helpers import make_field_label, make_item, make_action_btn, configure_table
 
@@ -71,14 +71,7 @@ class ReceiptIntakeScreen(QWidget):
 
         # ── Customer / Market info bar ──────────────────────────────
         self.customer_frame = QFrame()
-        self.customer_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 12px 16px;
-            }}
-        """)
+        self.customer_frame.setStyleSheet(CARD_FRAME_STYLE)
         cust_layout = QHBoxLayout(self.customer_frame)
         cust_layout.setSpacing(12)
         cust_layout.setContentsMargins(0, 0, 0, 0)
@@ -87,8 +80,8 @@ class ReceiptIntakeScreen(QWidget):
         self.customer_label = QLabel("—")
         self.customer_label.setStyleSheet(
             f"font-size: 16px; font-weight: bold; color: {HARVEST_GOLD};"
-            f" min-height: 20px; max-height: 20px;"
-            f" padding: 8px 12px; border: 2px solid transparent;"
+            f" min-height: 22px; max-height: 38px;"
+            f" padding: 10px 14px; border: 2px solid transparent;"
         )
         cust_layout.addWidget(self.customer_label)
 
@@ -97,7 +90,7 @@ class ReceiptIntakeScreen(QWidget):
         self.market_label.setStyleSheet(
             f"font-weight: bold; font-size: 13px; color: #555555;"
             f" background-color: {FIELD_LABEL_BG}; border: 2px solid #D5D2CB; border-radius: 6px;"
-            f" min-height: 20px; max-height: 20px; padding: 8px 12px;"
+            f" min-height: 22px; max-height: 38px; padding: 10px 14px;"
         )
         cust_layout.addWidget(self.market_label, 1)
 
@@ -107,7 +100,7 @@ class ReceiptIntakeScreen(QWidget):
         self.zip_code_input.setMaximumWidth(90)
         self.zip_code_input.setMaxLength(5)
         self.zip_code_input.setStyleSheet(
-            f"min-height: 20px; max-height: 20px; padding: 8px 8px;"
+            f"min-height: 22px; max-height: 38px; padding: 10px 8px;"
             f" border: 2px solid #D5D2CB; border-radius: 6px;"
         )
         self.zip_code_input.editingFinished.connect(self._on_zip_code_changed)
@@ -118,15 +111,15 @@ class ReceiptIntakeScreen(QWidget):
         self.status_msg_label.setVisible(False)
         self.status_msg_label.setStyleSheet(
             f"font-size: 12px; font-weight: bold; color: {PRIMARY_GREEN};"
-            f" min-height: 20px; max-height: 20px;"
-            f" padding: 8px 8px; border: 2px solid transparent;"
+            f" min-height: 22px; max-height: 38px;"
+            f" padding: 10px 8px; border: 2px solid transparent;"
         )
         cust_layout.addWidget(self.status_msg_label)
 
         self.new_customer_btn = QPushButton("New Customer")
         self.new_customer_btn.setObjectName("secondary_btn")
         self.new_customer_btn.setStyleSheet(
-            "min-height: 20px; max-height: 20px; padding: 8px 16px;"
+            "min-height: 22px; max-height: 38px; padding: 10px 16px;"
         )
         self.new_customer_btn.clicked.connect(self._start_new_customer)
         cust_layout.addWidget(self.new_customer_btn)
@@ -151,14 +144,7 @@ class ReceiptIntakeScreen(QWidget):
 
         # ── Receipt entry form ──────────────────────────────────────
         form_frame = QFrame()
-        form_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 12px 16px;
-            }}
-        """)
+        form_frame.setStyleSheet(CARD_FRAME_STYLE)
         form_layout = QVBoxLayout(form_frame)
         form_layout.setSpacing(8)
 
@@ -188,6 +174,7 @@ class ReceiptIntakeScreen(QWidget):
         row_bottom.addWidget(make_field_label("Notes"))
         self.notes_input = QLineEdit()
         self.notes_input.setPlaceholderText("Optional")
+        self.notes_input.setMaximumWidth(500)
         row_bottom.addWidget(self.notes_input, 1)
 
         self.add_receipt_btn = QPushButton("Add Receipt to Order")
@@ -214,14 +201,7 @@ class ReceiptIntakeScreen(QWidget):
 
         # ── Receipts table for this customer ────────────────────────
         self.receipts_frame = QFrame()
-        self.receipts_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 12px 16px;
-            }}
-        """)
+        self.receipts_frame.setStyleSheet(CARD_FRAME_STYLE)
         receipts_inner = QVBoxLayout(self.receipts_frame)
         receipts_inner.setSpacing(8)
 
@@ -268,14 +248,7 @@ class ReceiptIntakeScreen(QWidget):
 
         # ── Pending Orders table ──────────────────────────────────
         self.pending_frame = QFrame()
-        self.pending_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 12px 16px;
-            }}
-        """)
+        self.pending_frame.setStyleSheet(CARD_FRAME_STYLE)
         pending_inner = QVBoxLayout(self.pending_frame)
         pending_inner.setSpacing(8)
 
@@ -576,7 +549,7 @@ class ReceiptIntakeScreen(QWidget):
                 lambda checked, idx=i: self._remove_receipt(idx)
             )
             self.receipts_table.setCellWidget(i, 4, remove_btn)
-            self.receipts_table.setRowHeight(i, 32)
+            self.receipts_table.setRowHeight(i, 36)
             running_total += r['receipt_total']
 
         self.receipts_table.setSortingEnabled(True)

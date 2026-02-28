@@ -17,18 +17,17 @@ class SummaryCard(QFrame):
             SummaryCard {{
                 background-color: {WHITE};
                 border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 6px;
+                border-radius: 10px;
             }}
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(2)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(4)
 
         self.title_label = QLabel(title)
         self.title_label.setStyleSheet(f"""
-            font-size: 11px;
+            font-size: 12px;
             color: {SUBTITLE_GRAY};
             font-weight: bold;
             text-transform: uppercase;
@@ -37,7 +36,7 @@ class SummaryCard(QFrame):
         self.value_label = QLabel(value)
         color = HARVEST_GOLD if highlight else PRIMARY_GREEN
         self.value_label.setStyleSheet(f"""
-            font-size: 18px;
+            font-size: 20px;
             font-weight: bold;
             color: {color};
         """)
@@ -51,7 +50,7 @@ class SummaryCard(QFrame):
     def set_value_color(self, color: str):
         """Dynamically change the value text color."""
         self.value_label.setStyleSheet(f"""
-            font-size: 18px;
+            font-size: 20px;
             font-weight: bold;
             color: {color};
         """)
@@ -67,7 +66,7 @@ class SummaryRow(QFrame):
         super().__init__(parent)
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(12)
+        self.layout.setSpacing(16)
         self.cards = {}
 
     def add_card(self, key, title, value="$0.00", highlight=False):

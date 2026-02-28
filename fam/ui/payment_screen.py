@@ -26,7 +26,7 @@ from fam.ui.widgets.summary_card import SummaryRow
 from fam.ui.styles import (
     PRIMARY_GREEN, WHITE, LIGHT_GRAY, HARVEST_GOLD, ERROR_COLOR, ACCENT_GREEN,
     BACKGROUND, FIELD_LABEL_BG, MEDIUM_GRAY, SUBTITLE_GRAY, SUCCESS_BG,
-    ERROR_BG, WARNING_BG, WARNING_COLOR
+    ERROR_BG, WARNING_BG, WARNING_COLOR, CARD_FRAME_STYLE
 )
 from fam.ui.helpers import make_field_label, make_item, configure_table
 
@@ -59,7 +59,7 @@ class PaymentScreen(QWidget):
         inner_widget = QWidget()
         layout = QVBoxLayout(inner_widget)
         layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(12)
+        layout.setSpacing(16)
 
         # Title
         title = QLabel("Payment Processing")
@@ -72,14 +72,7 @@ class PaymentScreen(QWidget):
 
         # ── Customer order info bar ─────────────────────────────────
         self.order_info_frame = QFrame()
-        self.order_info_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 12px 16px;
-            }}
-        """)
+        self.order_info_frame.setStyleSheet(CARD_FRAME_STYLE)
         info_layout = QHBoxLayout(self.order_info_frame)
 
         self.customer_id_label = QLabel("No order loaded")
@@ -181,7 +174,7 @@ class PaymentScreen(QWidget):
         pay_scroll.setWidgetResizable(True)
         pay_scroll.setWidget(self.rows_container)
         pay_scroll.setMinimumHeight(120)
-        pay_scroll.setMaximumHeight(350)
+        pay_scroll.setMaximumHeight(500)
         pay_scroll.setStyleSheet(f"""
             QScrollArea {{
                 background-color: {BACKGROUND};
@@ -215,14 +208,7 @@ class PaymentScreen(QWidget):
 
         # ── Bottom area: collection checklist + action buttons ──────
         bottom_frame = QFrame()
-        bottom_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 12px 16px;
-            }}
-        """)
+        bottom_frame.setStyleSheet(CARD_FRAME_STYLE)
         bottom_layout = QHBoxLayout(bottom_frame)
         bottom_layout.setSpacing(20)
 
@@ -271,8 +257,8 @@ class PaymentScreen(QWidget):
             QFrame {{
                 background-color: {SUCCESS_BG};
                 border: 1px solid {ACCENT_GREEN};
-                border-radius: 8px;
-                padding: 12px 16px;
+                border-radius: 10px;
+                padding: 16px 20px;
             }}
         """)
         self.success_frame.setVisible(False)
@@ -424,7 +410,7 @@ class PaymentScreen(QWidget):
         for i, (vname, vtotal) in enumerate(rows):
             self.vendor_table.setItem(i, 0, make_item(vname))
             self.vendor_table.setItem(i, 1, make_item(f"${vtotal:.2f}", vtotal))
-            self.vendor_table.setRowHeight(i, 28)
+            self.vendor_table.setRowHeight(i, 36)
         self.vendor_table.setSortingEnabled(True)
 
         has_vendors = len(rows) > 0

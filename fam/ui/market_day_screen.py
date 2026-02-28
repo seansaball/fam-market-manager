@@ -15,7 +15,7 @@ from fam.models.market_day import (
     get_open_market_day, find_market_day
 )
 from fam.models.transaction import get_draft_transactions
-from fam.ui.styles import PRIMARY_GREEN, HARVEST_GOLD, WHITE, LIGHT_GRAY, FIELD_LABEL_BG
+from fam.ui.styles import PRIMARY_GREEN, HARVEST_GOLD, WHITE, LIGHT_GRAY, FIELD_LABEL_BG, CARD_FRAME_STYLE
 from fam.ui.helpers import make_field_label as _make_field_label_fn, make_item, configure_table
 
 
@@ -49,14 +49,7 @@ class MarketDayScreen(QWidget):
 
         # Create / select area
         create_frame = QFrame()
-        create_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 16px;
-            }}
-        """)
+        create_frame.setStyleSheet(CARD_FRAME_STYLE)
         create_layout = QVBoxLayout(create_frame)
 
         row1 = QHBoxLayout()
@@ -73,6 +66,7 @@ class MarketDayScreen(QWidget):
         self.volunteer_input = QLineEdit()
         self.volunteer_input.setPlaceholderText("Enter your name")
         self.volunteer_input.setMinimumWidth(200)
+        self.volunteer_input.setMaximumWidth(400)
         self.volunteer_input.setText("Volunteer")
         row_vol.addWidget(self.volunteer_input)
         row_vol.addStretch()
@@ -90,14 +84,7 @@ class MarketDayScreen(QWidget):
 
         # Current market day status
         self.status_frame = QFrame()
-        self.status_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 16px;
-            }}
-        """)
+        self.status_frame.setStyleSheet(CARD_FRAME_STYLE)
         status_layout = QVBoxLayout(self.status_frame)
 
         self.status_header = QLabel("No Active Market Day")

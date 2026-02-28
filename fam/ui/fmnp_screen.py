@@ -16,7 +16,7 @@ from fam.models.fmnp import (
     get_fmnp_entry_by_id
 )
 from fam.models.audit import log_action
-from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG
+from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG, CARD_FRAME_STYLE
 from fam.ui.helpers import make_field_label, make_item, make_action_btn, configure_table
 
 logger = logging.getLogger('fam.ui.fmnp_screen')
@@ -46,14 +46,7 @@ class FMNPScreen(QWidget):
 
         # Form
         form_frame = QFrame()
-        form_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 16px;
-            }}
-        """)
+        form_frame.setStyleSheet(CARD_FRAME_STYLE)
         form_layout = QVBoxLayout(form_frame)
         form_layout.setSpacing(10)
 
@@ -98,6 +91,7 @@ class FMNPScreen(QWidget):
         row3.addWidget(make_field_label("Notes"))
         self.notes_input = QLineEdit()
         self.notes_input.setPlaceholderText("Optional notes")
+        self.notes_input.setMaximumWidth(500)
         row3.addWidget(self.notes_input)
         form_layout.addLayout(row3)
 
@@ -220,7 +214,7 @@ class FMNPScreen(QWidget):
             action_layout.addWidget(del_btn)
 
             self.table.setCellWidget(i, 6, action_widget)
-            self.table.setRowHeight(i, 32)
+            self.table.setRowHeight(i, 36)
 
         self.table.setSortingEnabled(True)
 

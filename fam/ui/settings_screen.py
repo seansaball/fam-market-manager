@@ -21,7 +21,8 @@ from fam.models.payment_method import (
     get_all_payment_methods, create_payment_method, update_payment_method
 )
 from fam.ui.styles import (
-    WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, BACKGROUND, TEXT_COLOR
+    WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, BACKGROUND, TEXT_COLOR,
+    CARD_FRAME_STYLE
 )
 from fam.ui.helpers import make_field_label, make_item, make_action_btn, configure_table
 
@@ -246,7 +247,7 @@ class SettingsScreen(QWidget):
         layout = QVBoxLayout(tab)
 
         form = QFrame()
-        form.setStyleSheet(f"QFrame {{ background-color: {WHITE}; border: 1px solid {LIGHT_GRAY}; border-radius: 8px; padding: 12px 16px; }}")
+        form.setStyleSheet(CARD_FRAME_STYLE)
         fl = QHBoxLayout(form)
         fl.addWidget(make_field_label("Market Name"))
         self.market_name_input = QLineEdit()
@@ -267,7 +268,7 @@ class SettingsScreen(QWidget):
         self.markets_table.setHorizontalHeaderLabels(
             ["ID", "Name", "Address", "Match Limit", "Active", "Actions"]
         )
-        configure_table(self.markets_table, actions_col=5, actions_width=350)
+        configure_table(self.markets_table, actions_col=5, actions_width=380)
         layout.addWidget(self.markets_table)
 
         return tab
@@ -279,7 +280,7 @@ class SettingsScreen(QWidget):
         layout = QVBoxLayout(tab)
 
         form = QFrame()
-        form.setStyleSheet(f"QFrame {{ background-color: {WHITE}; border: 1px solid {LIGHT_GRAY}; border-radius: 8px; padding: 12px 16px; }}")
+        form.setStyleSheet(CARD_FRAME_STYLE)
         fl = QHBoxLayout(form)
         fl.addWidget(make_field_label("Vendor Name"))
         self.vendor_name_input = QLineEdit()
@@ -310,7 +311,7 @@ class SettingsScreen(QWidget):
         layout = QVBoxLayout(tab)
 
         form = QFrame()
-        form.setStyleSheet(f"QFrame {{ background-color: {WHITE}; border: 1px solid {LIGHT_GRAY}; border-radius: 8px; padding: 12px 16px; }}")
+        form.setStyleSheet(CARD_FRAME_STYLE)
         fl = QHBoxLayout(form)
         fl.addWidget(make_field_label("Name"))
         self.pm_name_input = QLineEdit()
@@ -404,22 +405,22 @@ class SettingsScreen(QWidget):
             al.setSpacing(3)
             mid = r['id']
 
-            edit_btn = make_action_btn("Edit", 45)
+            edit_btn = make_action_btn("Edit", 50)
             edit_btn.clicked.connect(lambda checked, mid=mid: self._edit_market(mid))
             al.addWidget(edit_btn)
 
-            assign_btn = make_action_btn("Vendors", 55)
+            assign_btn = make_action_btn("Vendors", 60)
             assign_btn.setToolTip("Assign Vendors to this Market")
             assign_btn.clicked.connect(lambda checked, mid=mid: self._assign_vendors(mid))
             al.addWidget(assign_btn)
 
-            limit_btn = make_action_btn("Match Limit", 70)
+            limit_btn = make_action_btn("Match Limit", 75)
             limit_btn.setToolTip("Set daily FAM match limit per customer")
             limit_btn.clicked.connect(lambda checked, mid=mid: self._edit_match_limit(mid))
             al.addWidget(limit_btn)
 
             limit_on = bool(limit_active)
-            limit_toggle = make_action_btn("Limit On" if limit_on else "Limit Off", 60)
+            limit_toggle = make_action_btn("Limit On" if limit_on else "Limit Off", 65)
             limit_toggle.clicked.connect(
                 lambda checked, mid=mid, active=limit_on: self._toggle_match_limit(mid, active)
             )
@@ -433,7 +434,7 @@ class SettingsScreen(QWidget):
             al.addWidget(toggle_btn)
 
             self.markets_table.setCellWidget(i, 5, action_widget)
-            self.markets_table.setRowHeight(i, 32)
+            self.markets_table.setRowHeight(i, 36)
         self.markets_table.setSortingEnabled(True)
 
     def _load_vendors(self):
@@ -464,7 +465,7 @@ class SettingsScreen(QWidget):
             al.addWidget(toggle_btn)
 
             self.vendors_table.setCellWidget(i, 4, action_widget)
-            self.vendors_table.setRowHeight(i, 32)
+            self.vendors_table.setRowHeight(i, 36)
         self.vendors_table.setSortingEnabled(True)
 
     def _load_payment_methods(self):
@@ -506,7 +507,7 @@ class SettingsScreen(QWidget):
             al.addWidget(toggle_btn)
 
             self.pm_table.setCellWidget(i, 4, action_widget)
-            self.pm_table.setRowHeight(i, 32)
+            self.pm_table.setRowHeight(i, 36)
         self.pm_table.setSortingEnabled(True)
 
     # ── Market Actions ───────────────────────────────────────

@@ -100,8 +100,9 @@ class MainWindow(QMainWindow):
             )
         sidebar_layout.addWidget(logo_label)
 
-        sub_label = QLabel("Market Day Transactions")
+        sub_label = QLabel("FAM Market Manager")
         sub_label.setObjectName("sidebar_subtitle")
+        sub_label.setAlignment(Qt.AlignCenter)
         sidebar_layout.addWidget(sub_label)
 
         # Navigation buttons

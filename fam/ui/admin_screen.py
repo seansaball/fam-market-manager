@@ -19,7 +19,7 @@ from fam.models.transaction import (
 from fam.models.audit import log_action, get_audit_log
 from fam.ui.styles import (
     WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, WARNING_COLOR,
-    BACKGROUND, TEXT_COLOR
+    BACKGROUND, TEXT_COLOR, CARD_FRAME_STYLE
 )
 from fam.ui.helpers import make_field_label, make_item, make_action_btn, configure_table
 
@@ -115,14 +115,7 @@ class AdminScreen(QWidget):
 
         # Filter bar
         filter_frame = QFrame()
-        filter_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 12px 16px;
-            }}
-        """)
+        filter_frame.setStyleSheet(CARD_FRAME_STYLE)
         filter_layout = QHBoxLayout(filter_frame)
 
         filter_layout.addWidget(make_field_label("Market"))
@@ -168,7 +161,7 @@ class AdminScreen(QWidget):
              "Field", "Old Value", "New Value"]
         )
         configure_table(self.audit_table)
-        self.audit_table.setMaximumHeight(200)
+        self.audit_table.setMaximumHeight(300)
         layout.addWidget(self.audit_table)
 
         layout.addStretch()
@@ -223,7 +216,7 @@ class AdminScreen(QWidget):
                 action_layout.addWidget(void_btn)
 
             self.table.setCellWidget(i, 7, action_widget)
-            self.table.setRowHeight(i, 32)
+            self.table.setRowHeight(i, 36)
 
         self.table.setSortingEnabled(True)
 

@@ -20,14 +20,13 @@ class PaymentRow(QFrame):
             PaymentRow {{
                 background-color: {WHITE};
                 border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 6px 8px;
+                border-radius: 10px;
             }}
         """)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(10)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(12)
 
         # Payment method combo
         self.method_combo = QComboBox()

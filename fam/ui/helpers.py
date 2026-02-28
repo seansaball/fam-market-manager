@@ -12,7 +12,7 @@ from fam.ui.styles import (
 )
 
 # Style override for small action buttons inside table cells
-ACTION_BTN_STYLE = "min-height: 0px; max-height: 24px; padding: 2px 4px; font-size: 11px;"
+ACTION_BTN_STYLE = "min-height: 0px; max-height: 28px; padding: 4px 6px; font-size: 11px; border-radius: 4px;"
 
 
 class SortableTableItem(QTableWidgetItem):
@@ -79,15 +79,18 @@ class CheckableComboBox(QComboBox):
             QListView {
                 background-color: #F7F7F7;
                 outline: none;
+                border-radius: 6px;
+                padding: 4px;
             }
             QListView::item {
                 background-color: #F7F7F7;
                 border: none;
-                padding: 4px 6px;
-                min-height: 22px;
+                padding: 5px 8px;
+                min-height: 24px;
+                border-radius: 4px;
             }
             QListView::item:hover {
-                background-color: #EDEDEE;
+                background-color: #E8E8EA;
             }
             QListView::indicator {
                 width: 16px;
@@ -511,12 +514,12 @@ def make_field_label(text):
         background-color: {FIELD_LABEL_BG};
         border: 2px solid #D5D2CB;
         border-radius: 6px;
-        padding: 8px 12px;
+        padding: 10px 14px;
         font-weight: bold;
         font-size: 13px;
         color: #555555;
-        min-height: 20px;
-        max-height: 20px;
+        min-height: 22px;
+        max-height: 38px;
     """)
     return lbl
 
@@ -530,7 +533,7 @@ def make_action_btn(text, width=50, danger=False):
         danger: If True, style with red text/border.
     """
     btn = QPushButton(text)
-    btn.setFixedSize(width, 24)
+    btn.setFixedSize(width, 28)
     if danger:
         btn.setStyleSheet(
             ACTION_BTN_STYLE + f" color: {ERROR_COLOR}; border: 1px solid {ERROR_COLOR};"
@@ -560,7 +563,7 @@ def configure_table(table, actions_col=None, actions_width=140):
     header = table.horizontalHeader()
     header.setStretchLastSection(False)
     header.setSortIndicatorShown(True)
-    header.setFixedHeight(40)
+    header.setFixedHeight(44)
 
     # Explicit header style — overrides any inherited QFrame padding/border
     # that cascades from parent frame stylesheets (QHeaderView is a QFrame
@@ -575,10 +578,10 @@ def configure_table(table, actions_col=None, actions_width=140):
             background-color: #F5F5F5;
             color: {TEXT_COLOR};
             font-weight: bold;
-            padding: 8px 10px;
+            padding: 8px 12px;
             border: none;
             border-bottom: 2px solid {LIGHT_GRAY};
-            border-right: 1px solid {LIGHT_GRAY};
+            border-right: 1px solid #ECECEC;
         }}
         QHeaderView::section:vertical {{
             background-color: {WHITE};

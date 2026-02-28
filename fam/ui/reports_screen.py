@@ -27,8 +27,10 @@ from fam.utils.export import (
 )
 from fam.ui.styles import (
     WHITE, LIGHT_GRAY, PRIMARY_GREEN, HARVEST_GOLD, SUBTITLE_GRAY,
-    ACCENT_GREEN, BACKGROUND, TEXT_COLOR, MEDIUM_GRAY, WARNING_COLOR, ERROR_COLOR
+    ACCENT_GREEN, BACKGROUND, TEXT_COLOR, MEDIUM_GRAY, WARNING_COLOR, ERROR_COLOR,
+    CARD_FRAME_STYLE, FIELD_LABEL_BG
 )
+from fam.ui.widgets.summary_card import SummaryCard, SummaryRow
 from fam.ui.helpers import make_field_label, make_item, configure_table, CheckableComboBox, DateRangeWidget
 
 
@@ -60,22 +62,15 @@ class ReportsScreen(QWidget):
 
         # ── Filter bar — 4 checkable dropdowns ───────────────────
         filter_frame = QFrame()
-        filter_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 12px 16px;
-            }}
-        """)
+        filter_frame.setStyleSheet(CARD_FRAME_STYLE)
         filter_layout = QHBoxLayout(filter_frame)
         filter_layout.setSpacing(6)
 
         # Compact label style for the filter row
         _filter_label_ss = (
-            f"background-color: {LIGHT_GRAY}; border: 1px solid #C8C8C8;"
-            " border-radius: 4px; padding: 3px 6px;"
-            " font-weight: bold; font-size: 11px; color: #555;"
+            f"background-color: {FIELD_LABEL_BG}; border: 1px solid #D5D2CB;"
+            " border-radius: 6px; padding: 4px 8px;"
+            " font-weight: bold; font-size: 12px; color: #555;"
         )
         # Compact combo style
         _filter_combo_ss = "font-size: 11px;"
@@ -116,30 +111,13 @@ class ReportsScreen(QWidget):
         layout.addWidget(filter_frame)
 
         # ── Summary cards ────────────────────────────────────────
-        self.summary_frame = QFrame()
-        self.summary_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {WHITE};
-                border: 1px solid {LIGHT_GRAY};
-                border-radius: 8px;
-                padding: 16px;
-            }}
-        """)
-        summary_layout = QHBoxLayout(self.summary_frame)
+        self.summary_row = SummaryRow()
+        self.summary_row.add_card("total_receipts", "Total Receipts")
+        self.summary_row.add_card("customer_paid", "Customer Paid")
+        self.summary_row.add_card("fam_match", "FAM Match", highlight=True)
+        self.summary_row.add_card("fmnp_total", "FMNP Total", highlight=True)
 
-        self.total_receipts_label = self._make_summary("Total Receipts", "$0.00")
-        summary_layout.addWidget(self.total_receipts_label)
-
-        self.total_customer_label = self._make_summary("Customer Paid", "$0.00")
-        summary_layout.addWidget(self.total_customer_label)
-
-        self.total_match_label = self._make_summary("FAM Match", "$0.00")
-        summary_layout.addWidget(self.total_match_label)
-
-        self.total_fmnp_label = self._make_summary("FMNP Total", "$0.00")
-        summary_layout.addWidget(self.total_fmnp_label)
-
-        layout.addWidget(self.summary_frame)
+        layout.addWidget(self.summary_row)
 
         # ── Tabs for reports ─────────────────────────────────────
         self.tabs = QTabWidget()
@@ -245,9 +223,9 @@ class ReportsScreen(QWidget):
         geo_chart_header.setObjectName("section_header")
         geo_layout.addWidget(geo_chart_header)
 
-        self._geo_figure = Figure(figsize=(9, 4), dpi=100, facecolor=BACKGROUND)
+        self._geo_figure = Figure(figsize=(12, 5), dpi=100, facecolor=BACKGROUND)
         self._geo_canvas = FigureCanvasQTAgg(self._geo_figure)
-        self._geo_canvas.setMinimumHeight(350)
+        self._geo_canvas.setMinimumHeight(420)
         geo_layout.addWidget(self._geo_canvas)
 
         geo_layout.addStretch()
@@ -291,9 +269,9 @@ class ReportsScreen(QWidget):
         pie_header.setObjectName("section_header")
         chart_layout.addWidget(pie_header)
 
-        self._pie_figure = Figure(figsize=(9, 4), dpi=100, facecolor=BACKGROUND)
+        self._pie_figure = Figure(figsize=(12, 5), dpi=100, facecolor=BACKGROUND)
         self._pie_canvas = FigureCanvasQTAgg(self._pie_figure)
-        self._pie_canvas.setMinimumHeight(350)
+        self._pie_canvas.setMinimumHeight(420)
         chart_layout.addWidget(self._pie_canvas)
 
         # Line chart
@@ -301,9 +279,9 @@ class ReportsScreen(QWidget):
         line_header.setObjectName("section_header")
         chart_layout.addWidget(line_header)
 
-        self._line_figure = Figure(figsize=(9, 4), dpi=100, facecolor=BACKGROUND)
+        self._line_figure = Figure(figsize=(12, 5), dpi=100, facecolor=BACKGROUND)
         self._line_canvas = FigureCanvasQTAgg(self._line_figure)
-        self._line_canvas.setMinimumHeight(350)
+        self._line_canvas.setMinimumHeight(420)
         chart_layout.addWidget(self._line_canvas)
 
         chart_layout.addStretch()
@@ -318,23 +296,6 @@ class ReportsScreen(QWidget):
         self.tabs.addTab(charts_tab, "Charts")
 
         layout.addWidget(self.tabs)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-    def _make_summary(self, label_text, value_text):
-        frame = QFrame()
-        frame.setStyleSheet("background-color: transparent;")
-        fl = QVBoxLayout(frame)
-        fl.setContentsMargins(12, 8, 12, 8)
-        lbl = QLabel(label_text)
-        lbl.setStyleSheet(f"font-size: 12px; color: {SUBTITLE_GRAY}; font-weight: bold; text-transform: uppercase;")
-        fl.addWidget(lbl)
-        val = QLabel(value_text)
-        val.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {PRIMARY_GREEN};")
-        fl.addWidget(val)
-        frame._value_label = val
-        return frame
 
     # ------------------------------------------------------------------
     # Populate filters
@@ -573,10 +534,10 @@ class ReportsScreen(QWidget):
         self.match_table.setSortingEnabled(True)
 
         # Update summary cards
-        self.total_receipts_label._value_label.setText(f"${total_gross:.2f}")
-        self.total_customer_label._value_label.setText(f"${total_customer:.2f}")
-        self.total_match_label._value_label.setText(f"${total_fam_match:.2f}")
-        self.total_fmnp_label._value_label.setText(f"${total_fmnp:.2f}")
+        self.summary_row.update_value("total_receipts", f"${total_gross:.2f}")
+        self.summary_row.update_value("customer_paid", f"${total_customer:.2f}")
+        self.summary_row.update_value("fam_match", f"${total_fam_match:.2f}")
+        self.summary_row.update_value("fmnp_total", f"${total_fmnp:.2f}")
 
         # ── Detailed ledger ──────────────────────────────────────
         ledger_rows = conn.execute(f"""
