@@ -402,10 +402,19 @@ When the database is created for the first time, `seed.py` populates:
 - **`make_field_label()`** — Height-matched field labels
 - **`configure_table()`** — Standard table setup (sort, stretch, alternating rows)
 
-### Button Heights
-Primary and secondary buttons are height-matched to input fields for visual
-consistency. Primary buttons use `HARVEST_GOLD` (dark orange), secondary
-buttons use white with green border.
+### UI Design Standards (v3 Polish Pass)
+- **CARD_FRAME_STYLE** — Canonical card constant in `styles.py`: white bg, #E2E2E2 border, 10px radius, 16px 20px padding. Use this everywhere instead of inline QFrame stylesheets.
+- **Button sizes** — Primary/secondary/danger: min-height 36px, padding 10px 24px. Default: min-height 32px.
+- **Input fields** — padding 10px 14px, min-height 22px, focus adds #FEFFFE background tint
+- **Field labels** — max-height 38px (prevents text clipping), padding 10px 14px
+- **Table rows** — Standardized to 36px height, header 44px, gridlines #ECECEC
+- **Sidebar** — 240px wide, pill-shaped buttons (6px radius, 8px margin), checked state has 3px left accent bar
+- **Scrollbars** — macOS-style thin (8px), transparent background, semi-transparent handle with hover darken
+- **Tabs** — padding 10px 24px, hover background #EFEFEF, selected text uses brand green
+- **Action buttons** (table cells) — height 28px, padding 4px 6px, 4px border-radius
+- **All buttons** have pressed states (darker shade) for tactile feedback
+- **Charts** — figsize 12×5, min-height 420px for comfortable 1080p viewing
+- **Reports summary cards** use `SummaryCard` widget (same as Payment screen) for consistency
 
 ---
 
@@ -580,6 +589,8 @@ PySide6 signals are used for cross-screen communication:
 |---------|------------|----------|---------|
 | v1      | 2026-02-26 | d1f7253  | Initial commit — core app structure |
 | v2      | 2026-02-27 | 5b03751  | Fix match formula (1:1 semantics), add zip code geolocation report, rename discount→match, add 107 tests |
+| v2.1    | 2026-02-27 | 3d1e1e3  | Add PROJECT_INSTRUCTIONS.md living spec |
+| v3      | 2026-02-27 | 3583043  | UI polish pass — pixel-perfect modern professional aesthetic across 12 files |
 
 ---
 
