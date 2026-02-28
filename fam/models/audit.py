@@ -1,12 +1,19 @@
 """Audit log operations (append-only)."""
 
+import logging
+
 from fam.database.connection import get_connection
+
+logger = logging.getLogger('fam.models.audit')
 
 
 def log_action(table_name, record_id, action, changed_by,
                field_name=None, old_value=None, new_value=None,
-               reason_code=None, notes=None):
-    """Write an entry to the audit log. Append-only."""
+               reason_code=None, notes=None, commit=True):
+    """Write an entry to the audit log. Append-only.
+
+    When *commit* is False the caller is responsible for committing.
+    """
     conn = get_connection()
     conn.execute(
         """INSERT INTO audit_log
@@ -18,7 +25,9 @@ def log_action(table_name, record_id, action, changed_by,
          str(new_value) if new_value is not None else None,
          reason_code, notes, changed_by)
     )
-    conn.commit()
+    if commit:
+        conn.commit()
+    logger.info("audit: %s %s id=%s by=%s", action, table_name, record_id, changed_by)
 
 
 def get_audit_log(table_name=None, record_id=None, limit=100):

@@ -97,12 +97,12 @@ class CheckableComboBox(QComboBox):
                 border-radius: 3px;
             }
             QListView::indicator:checked {
-                background-color: #4CAF50;
-                border: 1px solid #388E3C;
+                background-color: #469a45;
+                border: 1px solid #2b493b;
             }
             QListView::indicator:indeterminate {
-                background-color: #A5D6A7;
-                border: 1px solid #66BB6A;
+                background-color: #8dc08c;
+                border: 1px solid #469a45;
             }
         """)
 

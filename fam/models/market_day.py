@@ -1,7 +1,11 @@
 """Market day CRUD operations."""
 
+import logging
 from datetime import datetime
 from fam.database.connection import get_connection
+from fam.models.audit import log_action
+
+logger = logging.getLogger('fam.models.market_day')
 
 
 def get_all_markets():
@@ -65,7 +69,13 @@ def create_market_day(market_id, date_str, opened_by="System"):
         (market_id, date_str, opened_by)
     )
     conn.commit()
-    return cursor.lastrowid
+    md_id = cursor.lastrowid
+
+    log_action('market_days', md_id, 'OPEN', opened_by,
+               notes=f"Market day opened for market={market_id} date={date_str}")
+    logger.info("Market day opened: id=%s market=%s date=%s by=%s",
+                md_id, market_id, date_str, opened_by)
+    return md_id
 
 
 def close_market_day(market_day_id, closed_by="System"):
@@ -76,6 +86,10 @@ def close_market_day(market_day_id, closed_by="System"):
         (closed_by, now, market_day_id)
     )
     conn.commit()
+
+    log_action('market_days', market_day_id, 'CLOSE', closed_by,
+               notes='Market day closed')
+    logger.info("Market day closed: id=%s by=%s", market_day_id, closed_by)
 
 
 def reopen_market_day(market_day_id, opened_by=None):
@@ -91,6 +105,11 @@ def reopen_market_day(market_day_id, opened_by=None):
             (market_day_id,)
         )
     conn.commit()
+
+    who = opened_by or 'System'
+    log_action('market_days', market_day_id, 'REOPEN', who,
+               notes='Market day reopened')
+    logger.info("Market day reopened: id=%s by=%s", market_day_id, who)
 
 
 def get_market_day_transactions_summary(market_day_id):

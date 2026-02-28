@@ -1,7 +1,11 @@
 """Transaction and payment line item CRUD operations."""
 
+import logging
 from datetime import datetime
 from fam.database.connection import get_connection
+from fam.models.audit import log_action
+
+logger = logging.getLogger('fam.models.transaction')
 
 
 def generate_transaction_id(market_day_date: str) -> str:
@@ -44,7 +48,12 @@ def create_transaction(market_day_id, vendor_id, receipt_total, receipt_number=N
          customer_order_id)
     )
     conn.commit()
-    return cursor.lastrowid, fam_tid
+    txn_id = cursor.lastrowid
+
+    log_action('transactions', txn_id, 'CREATE', 'System',
+               notes=f"Created {fam_tid} total=${receipt_total:.2f} vendor={vendor_id}")
+    logger.info("Transaction created: %s id=%s total=$%.2f", fam_tid, txn_id, receipt_total)
+    return txn_id, fam_tid
 
 
 def get_transaction_by_id(txn_id):
@@ -75,8 +84,12 @@ def get_transaction_by_fam_id(fam_transaction_id):
     return dict(row) if row else None
 
 
-def update_transaction(txn_id, **kwargs):
-    """Update transaction fields. Supports: receipt_total, vendor_id, receipt_number, status, snap_reference_code, notes."""
+def update_transaction(txn_id, commit=True, **kwargs):
+    """Update transaction fields. Supports: receipt_total, vendor_id, receipt_number,
+    status, snap_reference_code, notes.
+
+    When *commit* is False the caller is responsible for committing.
+    """
     conn = get_connection()
     allowed = {'receipt_total', 'vendor_id', 'receipt_number', 'status',
                'snap_reference_code', 'notes', 'confirmed_by', 'confirmed_at',
@@ -91,13 +104,18 @@ def update_transaction(txn_id, **kwargs):
         return
     values.append(txn_id)
     conn.execute(f"UPDATE transactions SET {', '.join(fields)} WHERE id=?", values)
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def confirm_transaction(txn_id, confirmed_by="Volunteer"):
+def confirm_transaction(txn_id, confirmed_by="Volunteer", commit=True):
     """Set transaction status to Confirmed."""
     now = datetime.now().isoformat()
-    update_transaction(txn_id, status='Confirmed', confirmed_by=confirmed_by, confirmed_at=now)
+    update_transaction(txn_id, commit=commit, status='Confirmed',
+                       confirmed_by=confirmed_by, confirmed_at=now)
+    log_action('transactions', txn_id, 'CONFIRM', confirmed_by,
+               notes='Payment confirmed', commit=commit)
+    logger.info("Transaction confirmed: id=%s by=%s", txn_id, confirmed_by)
 
 
 def void_transaction(txn_id):
@@ -152,27 +170,38 @@ def search_transactions(market_day_id=None, vendor_id=None, status=None, fam_id_
 
 # --- Payment line items ---
 
-def save_payment_line_items(transaction_id, line_items):
-    """Save payment line items for a transaction. Replaces existing items."""
+def save_payment_line_items(transaction_id, line_items, commit=True):
+    """Save payment line items for a transaction. Replaces existing items.
+
+    When *commit* is False the caller is responsible for committing.
+    """
     conn = get_connection()
     conn.execute("DELETE FROM payment_line_items WHERE transaction_id=?", (transaction_id,))
     for item in line_items:
         conn.execute(
             """INSERT INTO payment_line_items
-               (transaction_id, payment_method_id, method_name_snapshot, discount_percent_snapshot,
-                method_amount, discount_amount, customer_charged)
+               (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
+                method_amount, match_amount, customer_charged)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 transaction_id,
                 item['payment_method_id'],
                 item['method_name_snapshot'],
-                item['discount_percent_snapshot'],
+                item['match_percent_snapshot'],
                 item['method_amount'],
-                item['discount_amount'],
+                item['match_amount'],
                 item['customer_charged'],
             )
         )
-    conn.commit()
+    if commit:
+        conn.commit()
+
+    methods_summary = ", ".join(
+        f"{it['method_name_snapshot']}=${it['method_amount']:.2f}" for it in line_items
+    )
+    log_action('payment_line_items', transaction_id, 'PAYMENT_SAVED', 'System',
+               notes=methods_summary, commit=commit)
+    logger.info("Payment lines saved: txn=%s items=%d", transaction_id, len(line_items))
 
 
 def get_payment_line_items(transaction_id):

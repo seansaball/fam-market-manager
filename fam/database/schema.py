@@ -1,15 +1,21 @@
 """Database schema creation and migrations."""
 
+import logging
+
 from .connection import get_connection
 
-CURRENT_SCHEMA_VERSION = 3
+logger = logging.getLogger('fam.database.schema')
+
+CURRENT_SCHEMA_VERSION = 7
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     address TEXT,
-    is_active BOOLEAN DEFAULT 1
+    is_active BOOLEAN DEFAULT 1,
+    daily_match_limit REAL DEFAULT 100.00,
+    match_limit_active BOOLEAN DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS vendors (
@@ -22,7 +28,7 @@ CREATE TABLE IF NOT EXISTS vendors (
 CREATE TABLE IF NOT EXISTS payment_methods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    discount_percent REAL NOT NULL,
+    match_percent REAL NOT NULL,
     is_active BOOLEAN DEFAULT 1,
     sort_order INTEGER DEFAULT 0
 );
@@ -43,6 +49,7 @@ CREATE TABLE IF NOT EXISTS customer_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_day_id INTEGER NOT NULL,
     customer_label TEXT NOT NULL,
+    zip_code TEXT,
     status TEXT DEFAULT 'Draft',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (market_day_id) REFERENCES market_days(id)
@@ -72,9 +79,9 @@ CREATE TABLE IF NOT EXISTS payment_line_items (
     transaction_id INTEGER NOT NULL,
     payment_method_id INTEGER NOT NULL,
     method_name_snapshot TEXT NOT NULL,
-    discount_percent_snapshot REAL NOT NULL,
+    match_percent_snapshot REAL NOT NULL,
     method_amount REAL NOT NULL,
-    discount_amount REAL NOT NULL,
+    match_amount REAL NOT NULL,
     customer_charged REAL NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (transaction_id) REFERENCES transactions(id),
@@ -163,6 +170,166 @@ def _migrate_v2_to_v3(conn):
     conn.commit()
 
 
+def _migrate_v3_to_v4(conn):
+    """Add CHECK-constraint triggers, performance indexes, and audit indexes.
+
+    SQLite cannot ALTER TABLE ADD CHECK, so we use BEFORE INSERT/UPDATE
+    triggers to enforce constraints on monetary and percentage fields.
+    """
+    logger.info("Running migration v3 to v4: triggers + indexes")
+
+    trigger_sql = """
+    -- receipt_total must be > 0
+    CREATE TRIGGER IF NOT EXISTS chk_transaction_amount_insert
+    BEFORE INSERT ON transactions
+    BEGIN
+        SELECT RAISE(ABORT, 'receipt_total must be > 0')
+        WHERE NEW.receipt_total <= 0;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS chk_transaction_amount_update
+    BEFORE UPDATE OF receipt_total ON transactions
+    BEGIN
+        SELECT RAISE(ABORT, 'receipt_total must be > 0')
+        WHERE NEW.receipt_total <= 0;
+    END;
+
+    -- payment_line_items amounts must be >= 0
+    CREATE TRIGGER IF NOT EXISTS chk_payment_amount_insert
+    BEFORE INSERT ON payment_line_items
+    BEGIN
+        SELECT RAISE(ABORT, 'method_amount must be >= 0')
+        WHERE NEW.method_amount < 0;
+        SELECT RAISE(ABORT, 'match_amount must be >= 0')
+        WHERE NEW.match_amount < 0;
+    END;
+
+    -- FMNP amount must be > 0
+    CREATE TRIGGER IF NOT EXISTS chk_fmnp_amount_insert
+    BEFORE INSERT ON fmnp_entries
+    BEGIN
+        SELECT RAISE(ABORT, 'FMNP amount must be > 0')
+        WHERE NEW.amount <= 0;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS chk_fmnp_amount_update
+    BEFORE UPDATE OF amount ON fmnp_entries
+    BEGIN
+        SELECT RAISE(ABORT, 'FMNP amount must be > 0')
+        WHERE NEW.amount <= 0;
+    END;
+
+    -- match_percent must be between 0 and 999
+    CREATE TRIGGER IF NOT EXISTS chk_match_percent_insert
+    BEFORE INSERT ON payment_methods
+    BEGIN
+        SELECT RAISE(ABORT, 'match_percent must be between 0 and 999')
+        WHERE NEW.match_percent < 0 OR NEW.match_percent > 999;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS chk_match_percent_update
+    BEFORE UPDATE OF match_percent ON payment_methods
+    BEGIN
+        SELECT RAISE(ABORT, 'match_percent must be between 0 and 999')
+        WHERE NEW.match_percent < 0 OR NEW.match_percent > 999;
+    END;
+
+    -- Performance indexes
+    CREATE INDEX IF NOT EXISTS idx_transactions_market_day ON transactions(market_day_id);
+    CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
+    CREATE INDEX IF NOT EXISTS idx_transactions_fam_id ON transactions(fam_transaction_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_items_txn ON payment_line_items(transaction_id);
+    CREATE INDEX IF NOT EXISTS idx_fmnp_market_day ON fmnp_entries(market_day_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_changed_at ON audit_log(changed_at);
+    """
+
+    conn.executescript(trigger_sql)
+    conn.commit()
+    logger.info("Migration v3->v4 complete: 8 triggers + 6 indexes created")
+
+
+def _migrate_v4_to_v5(conn):
+    """Add daily_match_limit and match_limit_active to markets table."""
+    logger.info("Running migration v4 to v5: daily match limit columns")
+    try:
+        conn.execute(
+            "ALTER TABLE markets ADD COLUMN daily_match_limit REAL DEFAULT 100.00"
+        )
+    except Exception:
+        pass  # Column already exists
+    try:
+        conn.execute(
+            "ALTER TABLE markets ADD COLUMN match_limit_active BOOLEAN DEFAULT 1"
+        )
+    except Exception:
+        pass  # Column already exists
+    conn.commit()
+    logger.info("Migration v4->v5 complete: daily_match_limit + match_limit_active added")
+
+
+def _migrate_v5_to_v6(conn):
+    """Rename discount columns to match columns; widen percent range to 0-999."""
+    logger.info("Running migration v5 to v6: discount -> match rename")
+
+    # Rename columns (requires SQLite 3.25.0+; Python 3.12 bundles 3.41+)
+    conn.execute(
+        "ALTER TABLE payment_methods RENAME COLUMN discount_percent TO match_percent"
+    )
+    conn.execute(
+        "ALTER TABLE payment_line_items"
+        " RENAME COLUMN discount_percent_snapshot TO match_percent_snapshot"
+    )
+    conn.execute(
+        "ALTER TABLE payment_line_items"
+        " RENAME COLUMN discount_amount TO match_amount"
+    )
+
+    # Drop old triggers
+    conn.execute("DROP TRIGGER IF EXISTS chk_discount_percent_insert")
+    conn.execute("DROP TRIGGER IF EXISTS chk_discount_percent_update")
+    conn.execute("DROP TRIGGER IF EXISTS chk_payment_amount_insert")
+
+    # Recreate triggers with new column names and expanded range
+    conn.executescript("""
+        CREATE TRIGGER IF NOT EXISTS chk_match_percent_insert
+        BEFORE INSERT ON payment_methods
+        BEGIN
+            SELECT RAISE(ABORT, 'match_percent must be between 0 and 999')
+            WHERE NEW.match_percent < 0 OR NEW.match_percent > 999;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS chk_match_percent_update
+        BEFORE UPDATE OF match_percent ON payment_methods
+        BEGIN
+            SELECT RAISE(ABORT, 'match_percent must be between 0 and 999')
+            WHERE NEW.match_percent < 0 OR NEW.match_percent > 999;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS chk_payment_amount_insert
+        BEFORE INSERT ON payment_line_items
+        BEGIN
+            SELECT RAISE(ABORT, 'method_amount must be >= 0')
+            WHERE NEW.method_amount < 0;
+            SELECT RAISE(ABORT, 'match_amount must be >= 0')
+            WHERE NEW.match_amount < 0;
+        END;
+    """)
+
+    conn.commit()
+    logger.info("Migration v5->v6 complete: discount -> match rename done")
+
+
+def _migrate_v6_to_v7(conn):
+    """Add zip_code column to customer_orders for geolocation tracking."""
+    logger.info("Running migration v6 to v7: add zip_code to customer_orders")
+    try:
+        conn.execute("ALTER TABLE customer_orders ADD COLUMN zip_code TEXT")
+    except Exception as e:
+        logger.warning("zip_code column may already exist: %s", e)
+    conn.commit()
+    logger.info("Migration v6->v7 complete: zip_code column added")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -182,13 +349,16 @@ def initialize_database():
         current_version = 0
 
     if current_version < 1:
-        # Fresh install — create all tables
+        # Fresh install — create all tables + triggers/indexes
         conn.executescript(TABLES_SQL)
+        _migrate_v3_to_v4(conn)
+        # v5 columns already in TABLES_SQL for fresh installs
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)",
             (CURRENT_SCHEMA_VERSION,)
         )
         conn.commit()
+        logger.info("Fresh install: schema at version %s", CURRENT_SCHEMA_VERSION)
         return True
 
     if current_version < 2:
@@ -199,12 +369,27 @@ def initialize_database():
         _migrate_v2_to_v3(conn)
         current_version = 3
 
-    if current_version >= 2:
-        conn.execute(
-            "INSERT INTO schema_version (version) VALUES (?)",
-            (CURRENT_SCHEMA_VERSION,)
-        )
-        conn.commit()
-        return True
+    if current_version < 4:
+        _migrate_v3_to_v4(conn)
+        current_version = 4
 
-    return False
+    if current_version < 5:
+        _migrate_v4_to_v5(conn)
+        current_version = 5
+
+    if current_version < 6:
+        _migrate_v5_to_v6(conn)
+        current_version = 6
+
+    if current_version < 7:
+        _migrate_v6_to_v7(conn)
+        current_version = 7
+
+    # Record the final version
+    conn.execute(
+        "INSERT INTO schema_version (version) VALUES (?)",
+        (CURRENT_SCHEMA_VERSION,)
+    )
+    conn.commit()
+    logger.info("Schema at version %s", CURRENT_SCHEMA_VERSION)
+    return True

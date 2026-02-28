@@ -1,5 +1,7 @@
 """Settings screen for managing markets, vendors, and payment methods."""
 
+import logging
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
@@ -9,6 +11,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from fam.database.connection import get_connection
+
+logger = logging.getLogger('fam.ui.settings_screen')
 from fam.models.vendor import (
     get_all_vendors, create_vendor, update_vendor,
     get_market_vendor_ids, assign_vendor_to_market, unassign_vendor_from_market
@@ -81,7 +85,7 @@ class EditVendorDialog(QDialog):
 
 
 class EditPaymentMethodDialog(QDialog):
-    """Dialog for editing a payment method's name and discount %."""
+    """Dialog for editing a payment method's name and match %."""
 
     def __init__(self, method, parent=None):
         super().__init__(parent)
@@ -98,12 +102,45 @@ class EditPaymentMethodDialog(QDialog):
         self.name_input.setText(method['name'])
         layout.addRow("Method Name:", self.name_input)
 
-        self.discount_spin = QDoubleSpinBox()
-        self.discount_spin.setRange(0, 100)
-        self.discount_spin.setDecimals(1)
-        self.discount_spin.setSuffix("%")
-        self.discount_spin.setValue(method['discount_percent'])
-        layout.addRow("Discount %:", self.discount_spin)
+        self.match_spin = QDoubleSpinBox()
+        self.match_spin.setRange(0, 999)
+        self.match_spin.setDecimals(1)
+        self.match_spin.setSuffix("%")
+        self.match_spin.setValue(method['match_percent'])
+        layout.addRow("Match %:", self.match_spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class MatchLimitDialog(QDialog):
+    """Dialog for setting a market's daily match limit."""
+
+    def __init__(self, market, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Match Limit: {market['name']}")
+        self.setMinimumWidth(350)
+        self.market = market
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {BACKGROUND}; }}
+            QLabel {{ background-color: transparent; color: {TEXT_COLOR}; }}
+        """)
+
+        layout = QFormLayout(self)
+
+        info = QLabel("Set the maximum FAM match per customer per market day.")
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size: 12px; padding-bottom: 8px;")
+        layout.addRow(info)
+
+        self.limit_spin = QDoubleSpinBox()
+        self.limit_spin.setRange(0.01, 99999.99)
+        self.limit_spin.setDecimals(2)
+        self.limit_spin.setPrefix("$")
+        self.limit_spin.setValue(market.get('daily_match_limit') or 100.00)
+        layout.addRow("Daily Match Limit:", self.limit_spin)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -226,9 +263,11 @@ class SettingsScreen(QWidget):
         layout.addWidget(form)
 
         self.markets_table = QTableWidget()
-        self.markets_table.setColumnCount(5)
-        self.markets_table.setHorizontalHeaderLabels(["ID", "Name", "Address", "Active", "Actions"])
-        configure_table(self.markets_table, actions_col=4, actions_width=230)
+        self.markets_table.setColumnCount(6)
+        self.markets_table.setHorizontalHeaderLabels(
+            ["ID", "Name", "Address", "Match Limit", "Active", "Actions"]
+        )
+        configure_table(self.markets_table, actions_col=5, actions_width=350)
         layout.addWidget(self.markets_table)
 
         return tab
@@ -277,12 +316,12 @@ class SettingsScreen(QWidget):
         self.pm_name_input = QLineEdit()
         self.pm_name_input.setPlaceholderText("e.g., SNAP")
         fl.addWidget(self.pm_name_input)
-        fl.addWidget(make_field_label("Discount %"))
-        self.pm_discount_spin = QDoubleSpinBox()
-        self.pm_discount_spin.setRange(0, 100)
-        self.pm_discount_spin.setDecimals(1)
-        self.pm_discount_spin.setSuffix("%")
-        fl.addWidget(self.pm_discount_spin)
+        fl.addWidget(make_field_label("Match %"))
+        self.pm_match_spin = QDoubleSpinBox()
+        self.pm_match_spin.setRange(0, 999)
+        self.pm_match_spin.setDecimals(1)
+        self.pm_match_spin.setSuffix("%")
+        fl.addWidget(self.pm_match_spin)
         add_btn = QPushButton("Add Payment Method")
         add_btn.setObjectName("primary_btn")
         add_btn.clicked.connect(self._add_payment_method)
@@ -292,7 +331,7 @@ class SettingsScreen(QWidget):
         self.pm_table = QTableWidget()
         self.pm_table.setColumnCount(5)
         self.pm_table.setHorizontalHeaderLabels(
-            ["ID", "Name", "Discount %", "Active", "Actions"]
+            ["ID", "Name", "Match %", "Active", "Actions"]
         )
         configure_table(self.pm_table, actions_col=4, actions_width=200)
         layout.addWidget(self.pm_table)
@@ -348,7 +387,16 @@ class SettingsScreen(QWidget):
             self.markets_table.setItem(i, 0, make_item(str(r['id']), r['id']))
             self.markets_table.setItem(i, 1, make_item(r['name']))
             self.markets_table.setItem(i, 2, make_item(r['address'] or ''))
-            self.markets_table.setItem(i, 3, make_item("Yes" if r['is_active'] else "No"))
+
+            # Match Limit column
+            limit_active = r['match_limit_active']
+            limit_val = r['daily_match_limit'] or 100.00
+            if limit_active:
+                self.markets_table.setItem(i, 3, make_item(f"${limit_val:.2f}", limit_val))
+            else:
+                self.markets_table.setItem(i, 3, make_item("Off"))
+
+            self.markets_table.setItem(i, 4, make_item("Yes" if r['is_active'] else "No"))
 
             action_widget = QWidget()
             al = QHBoxLayout(action_widget)
@@ -365,6 +413,18 @@ class SettingsScreen(QWidget):
             assign_btn.clicked.connect(lambda checked, mid=mid: self._assign_vendors(mid))
             al.addWidget(assign_btn)
 
+            limit_btn = make_action_btn("Match Limit", 70)
+            limit_btn.setToolTip("Set daily FAM match limit per customer")
+            limit_btn.clicked.connect(lambda checked, mid=mid: self._edit_match_limit(mid))
+            al.addWidget(limit_btn)
+
+            limit_on = bool(limit_active)
+            limit_toggle = make_action_btn("Limit On" if limit_on else "Limit Off", 60)
+            limit_toggle.clicked.connect(
+                lambda checked, mid=mid, active=limit_on: self._toggle_match_limit(mid, active)
+            )
+            al.addWidget(limit_toggle)
+
             is_active = r['is_active']
             toggle_btn = make_action_btn("Deactivate" if is_active else "Activate", 70)
             toggle_btn.clicked.connect(
@@ -372,7 +432,7 @@ class SettingsScreen(QWidget):
             )
             al.addWidget(toggle_btn)
 
-            self.markets_table.setCellWidget(i, 4, action_widget)
+            self.markets_table.setCellWidget(i, 5, action_widget)
             self.markets_table.setRowHeight(i, 32)
         self.markets_table.setSortingEnabled(True)
 
@@ -414,7 +474,7 @@ class SettingsScreen(QWidget):
         for i, m in enumerate(methods):
             self.pm_table.setItem(i, 0, make_item(str(m['id']), m['id']))
             self.pm_table.setItem(i, 1, make_item(m['name']))
-            self.pm_table.setItem(i, 2, make_item(f"{m['discount_percent']}%", m['discount_percent']))
+            self.pm_table.setItem(i, 2, make_item(f"{m['match_percent']}%", m['match_percent']))
             self.pm_table.setItem(i, 3, make_item("Yes" if m['is_active'] else "No"))
 
             action_widget = QWidget()
@@ -465,7 +525,11 @@ class SettingsScreen(QWidget):
             self.market_address_input.clear()
             self._load_markets()
         except Exception as e:
-            QMessageBox.warning(self, "Error", str(e))
+            logger.exception("Failed to add market '%s'", name)
+            msg = str(e)
+            if 'UNIQUE' in msg.upper():
+                msg = f"A market with the name \"{name}\" already exists."
+            QMessageBox.warning(self, "Error", msg)
 
     def _edit_market(self, market_id):
         conn = get_connection()
@@ -488,12 +552,49 @@ class SettingsScreen(QWidget):
                 conn.commit()
                 self._load_markets()
             except Exception as e:
-                QMessageBox.warning(self, "Error", str(e))
+                logger.exception("Failed to edit market %s", market_id)
+                msg = str(e)
+                if 'UNIQUE' in msg.upper():
+                    msg = f"A market with the name \"{new_name}\" already exists."
+                QMessageBox.warning(self, "Error", msg)
 
     def _toggle_market(self, market_id, current_active):
         conn = get_connection()
         conn.execute("UPDATE markets SET is_active=? WHERE id=?",
                      (0 if current_active else 1, market_id))
+        conn.commit()
+        self._load_markets()
+
+    def _edit_match_limit(self, market_id):
+        """Open dialog to adjust a market's daily match limit."""
+        conn = get_connection()
+        row = conn.execute("SELECT * FROM markets WHERE id=?", (market_id,)).fetchone()
+        if not row:
+            return
+        market = dict(row)
+
+        dialog = MatchLimitDialog(market, self)
+        if dialog.exec() == QDialog.Accepted:
+            new_limit = dialog.limit_spin.value()
+            try:
+                conn = get_connection()
+                conn.execute(
+                    "UPDATE markets SET daily_match_limit=? WHERE id=?",
+                    (new_limit, market_id)
+                )
+                conn.commit()
+                self._load_markets()
+            except Exception as e:
+                logger.exception("Failed to update match limit for market %s", market_id)
+                QMessageBox.warning(self, "Error", f"Could not update match limit: {e}")
+
+    def _toggle_match_limit(self, market_id, current_active):
+        """Toggle the match limit on/off for a market."""
+        conn = get_connection()
+        conn.execute(
+            "UPDATE markets SET match_limit_active=? WHERE id=?",
+            (0 if current_active else 1, market_id)
+        )
         conn.commit()
         self._load_markets()
 
@@ -526,10 +627,14 @@ class SettingsScreen(QWidget):
         if not name:
             QMessageBox.warning(self, "Error", "Vendor name is required.")
             return
-        create_vendor(name, contact)
-        self.vendor_name_input.clear()
-        self.vendor_contact_input.clear()
-        self._load_vendors()
+        try:
+            create_vendor(name, contact)
+            self.vendor_name_input.clear()
+            self.vendor_contact_input.clear()
+            self._load_vendors()
+        except Exception as e:
+            logger.exception("Failed to add vendor '%s'", name)
+            QMessageBox.warning(self, "Error", f"Could not add vendor: {e}")
 
     def _edit_vendor(self, vendor_id):
         from fam.models.vendor import get_vendor_by_id
@@ -544,8 +649,12 @@ class SettingsScreen(QWidget):
             if not new_name:
                 QMessageBox.warning(self, "Error", "Vendor name is required.")
                 return
-            update_vendor(vendor_id, name=new_name, contact_info=new_contact)
-            self._load_vendors()
+            try:
+                update_vendor(vendor_id, name=new_name, contact_info=new_contact)
+                self._load_vendors()
+            except Exception as e:
+                logger.exception("Failed to edit vendor %s", vendor_id)
+                QMessageBox.warning(self, "Error", f"Could not update vendor: {e}")
 
     def _toggle_vendor(self, vid, current_active):
         update_vendor(vid, is_active=not current_active)
@@ -555,19 +664,23 @@ class SettingsScreen(QWidget):
 
     def _add_payment_method(self):
         name = self.pm_name_input.text().strip()
-        discount = self.pm_discount_spin.value()
+        match_pct = self.pm_match_spin.value()
         if not name:
             QMessageBox.warning(self, "Error", "Payment method name is required.")
             return
         try:
             methods = get_all_payment_methods()
             max_sort = max((m['sort_order'] for m in methods), default=0)
-            create_payment_method(name, discount, max_sort + 1)
+            create_payment_method(name, match_pct, max_sort + 1)
             self.pm_name_input.clear()
-            self.pm_discount_spin.setValue(0)
+            self.pm_match_spin.setValue(0)
             self._load_payment_methods()
         except Exception as e:
-            QMessageBox.warning(self, "Error", str(e))
+            logger.exception("Failed to add payment method '%s'", name)
+            msg = str(e)
+            if 'UNIQUE' in msg.upper():
+                msg = f"A payment method with the name \"{name}\" already exists."
+            QMessageBox.warning(self, "Error", msg)
 
     def _edit_pm(self, pm_id):
         from fam.models.payment_method import get_payment_method_by_id
@@ -578,11 +691,11 @@ class SettingsScreen(QWidget):
         dialog = EditPaymentMethodDialog(method, self)
         if dialog.exec() == QDialog.Accepted:
             new_name = dialog.name_input.text().strip()
-            new_discount = dialog.discount_spin.value()
+            new_match_pct = dialog.match_spin.value()
             if not new_name:
                 QMessageBox.warning(self, "Error", "Payment method name is required.")
                 return
-            update_payment_method(pm_id, name=new_name, discount_percent=new_discount)
+            update_payment_method(pm_id, name=new_name, match_percent=new_match_pct)
             self._load_payment_methods()
 
     def _move_pm(self, pm_id, current_sort, direction):

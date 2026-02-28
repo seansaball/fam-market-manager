@@ -1,19 +1,25 @@
 """Global QSS stylesheet and theme constants."""
 
 import os as _os
+import sys as _sys
 
-# Path to the dropdown arrow image (generated alongside this file)
-_ARROW_PATH = _os.path.join(
-    _os.path.dirname(_os.path.abspath(__file__)), "_dropdown_arrow.png"
-).replace("\\", "/")
+# Path to the dropdown arrow image — handle both dev and PyInstaller frozen mode
+if getattr(_sys, 'frozen', False):
+    _ARROW_PATH = _os.path.join(
+        _sys._MEIPASS, "fam", "ui", "_dropdown_arrow.png"
+    ).replace("\\", "/")
+else:
+    _ARROW_PATH = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)), "_dropdown_arrow.png"
+    ).replace("\\", "/")
 
-# Color palette
-PRIMARY_GREEN = "#2E7D32"
-ACCENT_GREEN = "#4CAF50"
-HARVEST_GOLD = "#F4B400"
+# Color palette — FAM official brand colors
+PRIMARY_GREEN = "#2b493b"   # Dark Green
+ACCENT_GREEN = "#469a45"    # Light Green
+HARVEST_GOLD = "#e68a3e"    # Dark Orange
 BACKGROUND = "#F7F6F2"
 TEXT_COLOR = "#2C2C2C"
-WARNING_COLOR = "#FB8C00"
+WARNING_COLOR = "#f79841"   # Light Orange
 ERROR_COLOR = "#D32F2F"
 WHITE = "#FFFFFF"
 LIGHT_GRAY = "#E0E0E0"
@@ -23,9 +29,9 @@ CARD_SHADOW = "#22000000"
 FIELD_LABEL_BG = "#ECEAE4"  # Warm tinted label background
 
 # Semantic background tints
-SUCCESS_BG = "#E8F5E9"
+SUCCESS_BG = "#e4ede8"
 ERROR_BG = "#FFEBEE"
-WARNING_BG = "#FFF3E0"
+WARNING_BG = "#fef2e6"
 
 # Font stacks
 FONT_FAMILY = "'Inter', 'Source Sans Pro', 'Segoe UI', 'Arial', sans-serif"
@@ -59,7 +65,7 @@ QMessageBox QLabel {{
 
 /* ===== SIDEBAR ===== */
 #sidebar {{
-    background-color: {PRIMARY_GREEN};
+    background-color: transparent;
     min-width: 220px;
     max-width: 220px;
 }}
@@ -152,22 +158,24 @@ QTableCornerButton::section {{
 
 /* ===== PRIMARY BUTTON ===== */
 QPushButton#primary_btn, QPushButton.primary {{
-    background-color: {PRIMARY_GREEN};
+    background-color: {HARVEST_GOLD};
     color: white;
-    border: none;
+    border: 2px solid {HARVEST_GOLD};
     border-radius: 6px;
     padding: 8px 20px;
     font-size: 14px;
     font-weight: bold;
-    min-height: 36px;
+    min-height: 20px;
 }}
 
 QPushButton#primary_btn:hover, QPushButton.primary:hover {{
-    background-color: #1B5E20;
+    background-color: #c97430;
+    border-color: #c97430;
 }}
 
 QPushButton#primary_btn:disabled, QPushButton.primary:disabled {{
     background-color: {MEDIUM_GRAY};
+    border-color: {MEDIUM_GRAY};
 }}
 
 /* ===== SECONDARY BUTTON ===== */
@@ -179,7 +187,7 @@ QPushButton#secondary_btn, QPushButton.secondary {{
     padding: 8px 20px;
     font-size: 14px;
     font-weight: bold;
-    min-height: 36px;
+    min-height: 20px;
 }}
 
 QPushButton#secondary_btn:hover, QPushButton.secondary:hover {{
@@ -190,16 +198,17 @@ QPushButton#secondary_btn:hover, QPushButton.secondary:hover {{
 QPushButton#danger_btn, QPushButton.danger {{
     background-color: {ERROR_COLOR};
     color: white;
-    border: none;
+    border: 2px solid {ERROR_COLOR};
     border-radius: 6px;
     padding: 8px 20px;
     font-size: 14px;
     font-weight: bold;
-    min-height: 36px;
+    min-height: 20px;
 }}
 
 QPushButton#danger_btn:hover, QPushButton.danger:hover {{
     background-color: #B71C1C;
+    border-color: #B71C1C;
 }}
 
 /* ===== DEFAULT BUTTON ===== */
@@ -350,8 +359,8 @@ QLabel#status_open {{
 }}
 
 QLabel#status_closed {{
-    background-color: #FFECB3;
-    color: #E65100;
+    background-color: {WARNING_BG};
+    color: {HARVEST_GOLD};
     border-radius: 10px;
     padding: 4px 12px;
     font-weight: bold;

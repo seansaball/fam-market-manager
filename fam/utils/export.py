@@ -42,3 +42,9 @@ def export_activity_log(data: list[dict], filepath: str) -> str:
     """Export full activity / audit log to CSV."""
     df = pd.DataFrame(data)
     return export_dataframe_to_csv(df, filepath)
+
+
+def export_geolocation_report(data: list[dict], filepath: str) -> str:
+    """Export geolocation zip code report to CSV."""
+    df = pd.DataFrame(data)
+    return export_dataframe_to_csv(df, filepath)

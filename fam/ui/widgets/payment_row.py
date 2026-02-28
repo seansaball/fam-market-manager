@@ -36,11 +36,11 @@ class PaymentRow(QFrame):
         self.method_combo.currentIndexChanged.connect(self._on_changed)
         layout.addWidget(self.method_combo)
 
-        # Discount label
-        self.discount_label = QLabel("0%")
-        self.discount_label.setMinimumWidth(50)
-        self.discount_label.setStyleSheet(f"font-weight: bold; color: {SUBTITLE_GRAY};")
-        layout.addWidget(self.discount_label)
+        # Match percent label
+        self.match_label = QLabel("0%")
+        self.match_label.setMinimumWidth(50)
+        self.match_label.setStyleSheet(f"font-weight: bold; color: {SUBTITLE_GRAY};")
+        layout.addWidget(self.match_label)
 
         # Amount input
         layout.addWidget(QLabel("Amount: $"))
@@ -53,11 +53,11 @@ class PaymentRow(QFrame):
         layout.addWidget(self.amount_spin)
 
         # Computed fields
-        layout.addWidget(QLabel("Discount:"))
-        self.discount_amount_label = QLabel("$0.00")
-        self.discount_amount_label.setStyleSheet("font-weight: bold;")
-        self.discount_amount_label.setMinimumWidth(70)
-        layout.addWidget(self.discount_amount_label)
+        layout.addWidget(QLabel("FAM Match:"))
+        self.match_amount_label = QLabel("$0.00")
+        self.match_amount_label.setStyleSheet("font-weight: bold;")
+        self.match_amount_label.setMinimumWidth(70)
+        layout.addWidget(self.match_amount_label)
 
         layout.addWidget(QLabel("Customer Pays:"))
         self.customer_charged_label = QLabel("$0.00")
@@ -82,26 +82,26 @@ class PaymentRow(QFrame):
         self.remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
         layout.addWidget(self.remove_btn)
 
-        self._update_discount_label()
+        self._update_match_label()
 
     def _load_methods(self):
         self.method_combo.clear()
         methods = get_all_payment_methods(active_only=True)
         for m in methods:
             self.method_combo.addItem(
-                f"{m['name']} ({m['discount_percent']:.0f}% off)",
+                f"{m['name']} ({m['match_percent']:.0f}% match)",
                 userData=m
             )
 
-    def _update_discount_label(self):
+    def _update_match_label(self):
         method = self.get_selected_method()
         if method:
-            self.discount_label.setText(f"{method['discount_percent']:.0f}% off")
+            self.match_label.setText(f"{method['match_percent']:.0f}% match")
         else:
-            self.discount_label.setText("--")
+            self.match_label.setText("--")
 
     def _on_changed(self):
-        self._update_discount_label()
+        self._update_match_label()
         self._recompute()
         self.changed.emit()
 
@@ -109,12 +109,12 @@ class PaymentRow(QFrame):
         method = self.get_selected_method()
         amount = self.amount_spin.value()
         if method:
-            discount_pct = method['discount_percent']
+            match_pct = method['match_percent']
         else:
-            discount_pct = 0.0
-        discount = round(amount * (discount_pct / 100.0), 2)
-        charged = round(amount - discount, 2)
-        self.discount_amount_label.setText(f"${discount:.2f}")
+            match_pct = 0.0
+        match_amt = round(amount * (match_pct / (100.0 + match_pct)), 2)
+        charged = round(amount - match_amt, 2)
+        self.match_amount_label.setText(f"${match_amt:.2f}")
         self.customer_charged_label.setText(f"${charged:.2f}")
 
     def get_selected_method(self):
@@ -125,16 +125,16 @@ class PaymentRow(QFrame):
         if not method:
             return None
         amount = self.amount_spin.value()
-        discount_pct = method['discount_percent']
-        discount_amount = round(amount * (discount_pct / 100.0), 2)
-        customer_charged = round(amount - discount_amount, 2)
+        match_pct = method['match_percent']
+        match_amount = round(amount * (match_pct / (100.0 + match_pct)), 2)
+        customer_charged = round(amount - match_amount, 2)
         return {
             'payment_method_id': method['id'],
             'method_name_snapshot': method['name'],
-            'discount_percent_snapshot': discount_pct,
+            'match_percent_snapshot': match_pct,
             'method_amount': amount,
-            'discount_percent': discount_pct,
-            'discount_amount': discount_amount,
+            'match_percent': match_pct,
+            'match_amount': match_amount,
             'customer_charged': customer_charged,
         }
 

@@ -1,5 +1,7 @@
 """Screen D: FMNP Entry."""
 
+import logging
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit,
     QDoubleSpinBox, QSpinBox, QPushButton, QFrame, QTableWidget,
@@ -16,6 +18,8 @@ from fam.models.fmnp import (
 from fam.models.audit import log_action
 from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG
 from fam.ui.helpers import make_field_label, make_item, make_action_btn, configure_table
+
+logger = logging.getLogger('fam.ui.fmnp_screen')
 
 
 class FMNPScreen(QWidget):
@@ -238,23 +242,30 @@ class FMNPScreen(QWidget):
         if not entered_by:
             self._show_error("Please enter your name.")
             return
+        if amount <= 0:
+            self._show_error("Amount must be greater than $0.00.")
+            return
 
-        if self._editing_id:
-            old = get_fmnp_entry_by_id(self._editing_id)
-            update_fmnp_entry(self._editing_id, amount=amount, vendor_id=vendor_id,
-                              check_count=check_count, notes=notes)
-            log_action('fmnp_entries', self._editing_id, 'UPDATE', entered_by,
-                        field_name='amount', old_value=old.get('amount'),
-                        new_value=amount, reason_code='edit', notes='FMNP entry updated')
-            self._cancel_edit()
-        else:
-            entry_id = create_fmnp_entry(md_id, vendor_id, amount, entered_by, check_count, notes)
-            log_action('fmnp_entries', entry_id, 'INSERT', entered_by, notes='FMNP entry created')
+        try:
+            if self._editing_id:
+                old = get_fmnp_entry_by_id(self._editing_id)
+                update_fmnp_entry(self._editing_id, amount=amount, vendor_id=vendor_id,
+                                  check_count=check_count, notes=notes)
+                log_action('fmnp_entries', self._editing_id, 'UPDATE', entered_by,
+                            field_name='amount', old_value=old.get('amount'),
+                            new_value=amount, reason_code='edit', notes='FMNP entry updated')
+                self._cancel_edit()
+            else:
+                entry_id = create_fmnp_entry(md_id, vendor_id, amount, entered_by, check_count, notes)
+                log_action('fmnp_entries', entry_id, 'INSERT', entered_by, notes='FMNP entry created')
 
-        self.amount_spin.setValue(0.01)
-        self.check_count_spin.setValue(0)
-        self.notes_input.clear()
-        self._load_entries()
+            self.amount_spin.setValue(0.01)
+            self.check_count_spin.setValue(0)
+            self.notes_input.clear()
+            self._load_entries()
+        except Exception as e:
+            logger.exception("Failed to save FMNP entry")
+            self._show_error(f"Error saving entry: {e}")
 
     def _edit_entry(self, entry_id):
         entry = get_fmnp_entry_by_id(entry_id)
@@ -286,11 +297,15 @@ class FMNPScreen(QWidget):
             QMessageBox.Yes | QMessageBox.No
         )
         if result == QMessageBox.Yes:
-            entered_by = self.entered_by_input.text().strip() or "System"
-            log_action('fmnp_entries', entry_id, 'DELETE', entered_by,
-                        notes='FMNP entry deleted')
-            delete_fmnp_entry(entry_id)
-            self._load_entries()
+            try:
+                entered_by = self.entered_by_input.text().strip() or "System"
+                log_action('fmnp_entries', entry_id, 'DELETE', entered_by,
+                            notes='FMNP entry deleted')
+                delete_fmnp_entry(entry_id)
+                self._load_entries()
+            except Exception as e:
+                logger.exception("Failed to delete FMNP entry %s", entry_id)
+                self._show_error(f"Error deleting entry: {e}")
 
     def _show_error(self, msg):
         self.error_label.setText(msg)

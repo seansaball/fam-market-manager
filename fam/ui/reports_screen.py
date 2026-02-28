@@ -1,7 +1,10 @@
 """Screen F: Reports and Exports."""
 
 import os
+import tempfile
+import webbrowser
 
+import pandas as pd
 import matplotlib
 matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -20,7 +23,7 @@ from fam.models.vendor import get_all_vendors
 from fam.models.payment_method import get_all_payment_methods
 from fam.utils.export import (
     export_vendor_reimbursement, export_fam_match_report, export_detailed_ledger,
-    export_activity_log, generate_export_filename
+    export_activity_log, export_geolocation_report, generate_export_filename
 )
 from fam.ui.styles import (
     WHITE, LIGHT_GRAY, PRIMARY_GREEN, HARVEST_GOLD, SUBTITLE_GRAY,
@@ -38,6 +41,7 @@ class ReportsScreen(QWidget):
         self._match_data = []
         self._ledger_data = []
         self._activity_data = []
+        self._geo_data = []
         self._chart_pie_data = []
         self._chart_trend_data = []
         self._chart_fmnp_data = []
@@ -161,7 +165,7 @@ class ReportsScreen(QWidget):
         self.match_table = QTableWidget()
         self.match_table.setColumnCount(3)
         self.match_table.setHorizontalHeaderLabels(
-            ["Payment Method", "Total Allocated", "Total Discount"]
+            ["Payment Method", "Total Allocated", "Total FAM Match"]
         )
         configure_table(self.match_table)
 
@@ -209,6 +213,62 @@ class ReportsScreen(QWidget):
         export_btn4.clicked.connect(lambda: self._export("activity_log"))
         al.addWidget(export_btn4)
         self.tabs.addTab(activity_tab, "Activity Log")
+
+        # Geolocation Report tab
+        geo_tab = QWidget()
+        geo_outer = QVBoxLayout(geo_tab)
+        geo_outer.setContentsMargins(0, 0, 0, 0)
+        geo_outer.setSpacing(8)
+
+        geo_scroll = QScrollArea()
+        geo_scroll.setWidgetResizable(True)
+        geo_scroll.setFrameShape(QFrame.NoFrame)
+        geo_scroll.setStyleSheet(
+            f"QScrollArea {{ border: none; background: {BACKGROUND}; }}"
+        )
+
+        geo_content = QWidget()
+        geo_layout = QVBoxLayout(geo_content)
+        geo_layout.setContentsMargins(8, 8, 8, 8)
+        geo_layout.setSpacing(12)
+
+        self.geo_table = QTableWidget()
+        self.geo_table.setColumnCount(5)
+        self.geo_table.setHorizontalHeaderLabels(
+            ["Zip Code", "# Customers", "# Receipts",
+             "Total Spend", "Total FAM Match"]
+        )
+        configure_table(self.geo_table)
+        geo_layout.addWidget(self.geo_table)
+
+        geo_chart_header = QLabel("Customer Distribution by Zip Code")
+        geo_chart_header.setObjectName("section_header")
+        geo_layout.addWidget(geo_chart_header)
+
+        self._geo_figure = Figure(figsize=(9, 4), dpi=100, facecolor=BACKGROUND)
+        self._geo_canvas = FigureCanvasQTAgg(self._geo_figure)
+        self._geo_canvas.setMinimumHeight(350)
+        geo_layout.addWidget(self._geo_canvas)
+
+        geo_layout.addStretch()
+        geo_scroll.setWidget(geo_content)
+        geo_outer.addWidget(geo_scroll)
+
+        geo_btn_row = QHBoxLayout()
+        export_geo_btn = QPushButton("Export Geolocation CSV")
+        export_geo_btn.setObjectName("secondary_btn")
+        export_geo_btn.clicked.connect(lambda: self._export("geolocation"))
+        geo_btn_row.addWidget(export_geo_btn)
+
+        heatmap_btn = QPushButton("View Heat Map in Browser")
+        heatmap_btn.setObjectName("secondary_btn")
+        heatmap_btn.clicked.connect(self._open_heatmap)
+        geo_btn_row.addWidget(heatmap_btn)
+
+        geo_btn_row.addStretch()
+        geo_outer.addLayout(geo_btn_row)
+
+        self.tabs.addTab(geo_tab, "Geolocation")
 
         # Charts tab
         charts_tab = QWidget()
@@ -481,7 +541,7 @@ class ReportsScreen(QWidget):
         match_rows = conn.execute(f"""
             SELECT pl.method_name_snapshot as method,
                    SUM(pl.method_amount) as total_allocated,
-                   SUM(pl.discount_amount) as total_discount
+                   SUM(pl.match_amount) as total_fam_match
             FROM payment_line_items pl
             JOIN transactions t ON pl.transaction_id = t.id
             JOIN market_days md ON t.market_day_id = md.id
@@ -494,28 +554,28 @@ class ReportsScreen(QWidget):
         self.match_table.setSortingEnabled(False)
         self.match_table.setRowCount(len(match_rows))
         total_customer = 0
-        total_discount = 0
+        total_fam_match = 0
         for i, r in enumerate(match_rows):
             allocated = r['total_allocated']
-            discount = r['total_discount']
-            total_customer += (allocated - discount)
-            total_discount += discount
+            fam_match = r['total_fam_match']
+            total_customer += (allocated - fam_match)
+            total_fam_match += fam_match
 
             self.match_table.setItem(i, 0, make_item(r['method']))
             self.match_table.setItem(i, 1, make_item(f"${allocated:.2f}", allocated))
-            self.match_table.setItem(i, 2, make_item(f"${discount:.2f}", discount))
+            self.match_table.setItem(i, 2, make_item(f"${fam_match:.2f}", fam_match))
 
             self._match_data.append({
                 'Payment Method': r['method'],
                 'Total Allocated': allocated,
-                'Total Discount': discount
+                'Total FAM Match': fam_match
             })
         self.match_table.setSortingEnabled(True)
 
         # Update summary cards
         self.total_receipts_label._value_label.setText(f"${total_gross:.2f}")
         self.total_customer_label._value_label.setText(f"${total_customer:.2f}")
-        self.total_match_label._value_label.setText(f"${total_discount:.2f}")
+        self.total_match_label._value_label.setText(f"${total_fam_match:.2f}")
         self.total_fmnp_label._value_label.setText(f"${total_fmnp:.2f}")
 
         # ── Detailed ledger ──────────────────────────────────────
@@ -524,7 +584,7 @@ class ReportsScreen(QWidget):
                    t.receipt_total, t.status,
                    COALESCE(co.customer_label, '') as customer_id,
                    COALESCE(SUM(pl.customer_charged), 0) as customer_paid,
-                   COALESCE(SUM(pl.discount_amount), 0) as fam_match,
+                   COALESCE(SUM(pl.match_amount), 0) as fam_match,
                    GROUP_CONCAT(pl.method_name_snapshot || ': $' ||
                        PRINTF('%.2f', pl.method_amount), ', ') as methods
             FROM transactions t
@@ -566,7 +626,7 @@ class ReportsScreen(QWidget):
         trend_rows = conn.execute(f"""
             SELECT md.date,
                    COALESCE(SUM(t.receipt_total), 0)   AS gross_total,
-                   COALESCE(SUM(pl.discount_amount), 0) AS fam_match_total,
+                   COALESCE(SUM(pl.match_amount), 0) AS fam_match_total,
                    COALESCE(SUM(pl.customer_charged), 0) AS customer_paid_total
             FROM transactions t
             JOIN market_days md ON t.market_day_id = md.id
@@ -606,6 +666,9 @@ class ReportsScreen(QWidget):
         ]
 
         self._update_charts()
+
+        # ── Geolocation report ─────────────────────────────────────
+        self._load_geolocation_report(conn, where, params)
 
         # ── Activity log (full extract — no filters) ──────────────
         self._load_activity_log(conn)
@@ -650,6 +713,167 @@ class ReportsScreen(QWidget):
                 'Changed By': r['changed_by'] or '',
             })
         self.activity_table.setSortingEnabled(True)
+
+    # ------------------------------------------------------------------
+    # Geolocation
+    # ------------------------------------------------------------------
+    def _load_geolocation_report(self, conn, where, params):
+        """Load zip code aggregated data into the Geolocation tab."""
+        geo_rows = conn.execute(f"""
+            SELECT co.zip_code,
+                   COUNT(DISTINCT co.customer_label) as customer_count,
+                   COUNT(t.id) as receipt_count,
+                   COALESCE(SUM(t.receipt_total), 0) as total_spend,
+                   COALESCE(SUM(pli.match_amount), 0) as total_match
+            FROM customer_orders co
+            JOIN transactions t ON t.customer_order_id = co.id
+            JOIN market_days md ON t.market_day_id = md.id
+            JOIN vendors v ON t.vendor_id = v.id
+            LEFT JOIN payment_line_items pli ON pli.transaction_id = t.id
+            {where}
+              AND co.zip_code IS NOT NULL AND co.zip_code != ''
+            GROUP BY co.zip_code
+            ORDER BY customer_count DESC
+        """, params).fetchall()
+
+        self._geo_data = []
+        self.geo_table.setSortingEnabled(False)
+        self.geo_table.setRowCount(len(geo_rows))
+        for i, r in enumerate(geo_rows):
+            self.geo_table.setItem(i, 0, make_item(r['zip_code']))
+            self.geo_table.setItem(
+                i, 1, make_item(str(r['customer_count']), r['customer_count'])
+            )
+            self.geo_table.setItem(
+                i, 2, make_item(str(r['receipt_count']), r['receipt_count'])
+            )
+            self.geo_table.setItem(
+                i, 3, make_item(f"${r['total_spend']:.2f}", r['total_spend'])
+            )
+            self.geo_table.setItem(
+                i, 4, make_item(f"${r['total_match']:.2f}", r['total_match'])
+            )
+
+            self._geo_data.append({
+                'Zip Code': r['zip_code'],
+                '# Customers': r['customer_count'],
+                '# Receipts': r['receipt_count'],
+                'Total Spend': r['total_spend'],
+                'Total FAM Match': r['total_match'],
+            })
+        self.geo_table.setSortingEnabled(True)
+
+        self._draw_geo_chart()
+
+    def _draw_geo_chart(self):
+        """Draw a horizontal bar chart of customer count by zip code."""
+        self._geo_figure.clear()
+        ax = self._geo_figure.add_subplot(111)
+        ax.set_facecolor(WHITE)
+
+        if not self._geo_data:
+            self._show_no_data(ax, "No zip code data available")
+            self._geo_canvas.draw()
+            return
+
+        # Show top 15 zip codes
+        display_data = self._geo_data[:15]
+        zips = [d['Zip Code'] for d in display_data][::-1]
+        counts = [d['# Customers'] for d in display_data][::-1]
+
+        colors = [ACCENT_GREEN if c > 1 else PRIMARY_GREEN for c in counts]
+        ax.barh(zips, counts, color=colors, edgecolor=WHITE, linewidth=0.5)
+
+        ax.set_title('Top Zip Codes by Customer Count', fontsize=12,
+                      fontweight='bold', color=TEXT_COLOR, pad=12)
+        ax.set_xlabel('# Customers', fontsize=10, color=TEXT_COLOR)
+        ax.tick_params(axis='y', labelsize=9, colors=TEXT_COLOR)
+        ax.tick_params(axis='x', labelsize=9, colors=TEXT_COLOR)
+        ax.grid(True, axis='x', linestyle='--', alpha=0.3, color=MEDIUM_GRAY)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color(LIGHT_GRAY)
+        ax.spines['bottom'].set_color(LIGHT_GRAY)
+
+        self._geo_figure.tight_layout()
+        self._geo_canvas.draw()
+
+    def _open_heatmap(self):
+        """Generate a folium heat map HTML file and open it in the browser."""
+        if not self._geo_data:
+            QMessageBox.information(
+                self, "No Data", "No zip code data to map."
+            )
+            return
+
+        try:
+            import pgeocode
+            import folium
+            from folium.plugins import HeatMap
+        except ImportError:
+            QMessageBox.warning(
+                self, "Missing Libraries",
+                "The folium and pgeocode libraries are required for "
+                "heat map visualization.\n\n"
+                "Install them with:\n  pip install folium pgeocode"
+            )
+            return
+
+        nomi = pgeocode.Nominatim('us')
+        points = []
+        for row in self._geo_data:
+            result = nomi.query_postal_code(row['Zip Code'])
+            if result is not None and not pd.isna(result.latitude):
+                points.append({
+                    'lat': result.latitude,
+                    'lon': result.longitude,
+                    'zip': row['Zip Code'],
+                    'customers': row['# Customers'],
+                    'spend': row['Total Spend'],
+                    'match': row['Total FAM Match'],
+                })
+
+        if not points:
+            QMessageBox.information(
+                self, "No Geocoded Data",
+                "Could not geocode any of the zip codes.\n"
+                "The bar chart above shows the distribution."
+            )
+            return
+
+        # Center map on the mean of all points
+        avg_lat = sum(p['lat'] for p in points) / len(points)
+        avg_lon = sum(p['lon'] for p in points) / len(points)
+
+        m = folium.Map(location=[avg_lat, avg_lon], zoom_start=10)
+
+        # Heat map layer (weighted by customer count)
+        heat_data = [[p['lat'], p['lon'], p['customers']] for p in points]
+        HeatMap(heat_data, radius=25, blur=15).add_to(m)
+
+        # Markers with popup info
+        for p in points:
+            folium.CircleMarker(
+                location=[p['lat'], p['lon']],
+                radius=max(5, p['customers'] * 3),
+                color=PRIMARY_GREEN,
+                fill=True,
+                fill_opacity=0.7,
+                popup=(
+                    f"Zip: {p['zip']}<br>"
+                    f"Customers: {p['customers']}<br>"
+                    f"Spend: ${p['spend']:.2f}<br>"
+                    f"FAM Match: ${p['match']:.2f}"
+                ),
+            ).add_to(m)
+
+        # Save to temp file and open in browser
+        tmp = tempfile.NamedTemporaryFile(
+            suffix='.html', delete=False, prefix='fam_heatmap_'
+        )
+        m.save(tmp.name)
+        tmp.close()
+        webbrowser.open(f'file://{tmp.name}')
 
     # ------------------------------------------------------------------
     # Charts
@@ -813,6 +1037,8 @@ class ReportsScreen(QWidget):
                 export_detailed_ledger(self._ledger_data, filepath)
             elif report_type == "activity_log":
                 export_activity_log(self._activity_data, filepath)
+            elif report_type == "geolocation":
+                export_geolocation_report(self._geo_data, filepath)
             QMessageBox.information(self, "Export Complete", f"Report saved to:\n{filepath}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")

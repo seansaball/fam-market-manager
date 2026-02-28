@@ -11,6 +11,7 @@ build/
 venv/
 .venv/
 env/
+build_venv/
 
 # Database (local data — never commit)
 *.db
@@ -32,6 +33,13 @@ desktop.ini
 # Claude Code session data
 .claude/
 
+# PyInstaller
+*.manifest
+*.spec.bak
+
 # Exports / generated files
 *.csv
 *.png
+
+# Log files
+*.log

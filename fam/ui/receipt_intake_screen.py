@@ -11,9 +11,11 @@ from fam.models.market_day import get_open_market_day
 from fam.models.vendor import get_all_vendors, get_vendors_for_market
 from fam.models.transaction import create_transaction, void_transaction
 from fam.models.customer_order import (
-    create_customer_order, get_order_transactions, get_order_total,
-    void_customer_order
+    create_customer_order, get_customer_order, get_order_transactions,
+    get_order_total, void_customer_order, get_draft_orders_for_market_day,
+    get_confirmed_customers_for_market_day, update_customer_order_zip_code
 )
+from fam.database.connection import get_connection
 from fam.ui.styles import (
     PRIMARY_GREEN, WHITE, LIGHT_GRAY, HARVEST_GOLD, ERROR_COLOR,
     FIELD_LABEL_BG, ACCENT_GREEN, BACKGROUND, SUBTITLE_GRAY, ERROR_BG,
@@ -99,6 +101,18 @@ class ReceiptIntakeScreen(QWidget):
         )
         cust_layout.addWidget(self.market_label, 1)
 
+        cust_layout.addWidget(make_field_label("Zip"))
+        self.zip_code_input = QLineEdit()
+        self.zip_code_input.setPlaceholderText("Zip Code")
+        self.zip_code_input.setMaximumWidth(90)
+        self.zip_code_input.setMaxLength(5)
+        self.zip_code_input.setStyleSheet(
+            f"min-height: 20px; max-height: 20px; padding: 8px 8px;"
+            f" border: 2px solid #D5D2CB; border-radius: 6px;"
+        )
+        self.zip_code_input.editingFinished.connect(self._on_zip_code_changed)
+        cust_layout.addWidget(self.zip_code_input)
+
         # Status message (top-right, hidden by default)
         self.status_msg_label = QLabel("")
         self.status_msg_label.setVisible(False)
@@ -118,6 +132,22 @@ class ReceiptIntakeScreen(QWidget):
         cust_layout.addWidget(self.new_customer_btn)
 
         layout.addWidget(self.customer_frame)
+
+        # ── Customer action row (New / Returning) ─────────────────
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(12)
+
+        action_row.addWidget(QLabel("Returning customer?"))
+
+        self.returning_combo = QComboBox()
+        self.returning_combo.setMinimumWidth(320)
+        self.returning_combo.activated.connect(self._on_returning_customer_selected)
+        action_row.addWidget(self.returning_combo)
+
+        action_row.addStretch()
+
+        layout.addLayout(action_row)
 
         # ── Receipt entry form ──────────────────────────────────────
         form_frame = QFrame()
@@ -236,6 +266,37 @@ class ReceiptIntakeScreen(QWidget):
         self.receipts_frame.setVisible(False)
         layout.addWidget(self.receipts_frame)
 
+        # ── Pending Orders table ──────────────────────────────────
+        self.pending_frame = QFrame()
+        self.pending_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {WHITE};
+                border: 1px solid {LIGHT_GRAY};
+                border-radius: 8px;
+                padding: 12px 16px;
+            }}
+        """)
+        pending_inner = QVBoxLayout(self.pending_frame)
+        pending_inner.setSpacing(8)
+
+        self.pending_header = QLabel("Pending Orders")
+        self.pending_header.setStyleSheet(
+            f"font-weight: bold; font-size: 14px; color: {HARVEST_GOLD};"
+        )
+        pending_inner.addWidget(self.pending_header)
+
+        self.pending_table = QTableWidget()
+        self.pending_table.setColumnCount(5)
+        self.pending_table.setHorizontalHeaderLabels(
+            ["Customer", "# Receipts", "Order Total", "Status", "Actions"]
+        )
+        configure_table(self.pending_table, actions_col=4, actions_width=250)
+        self.pending_table.setMinimumHeight(100)
+        pending_inner.addWidget(self.pending_table)
+
+        self.pending_frame.setVisible(False)
+        layout.addWidget(self.pending_frame)
+
         layout.addStretch()
 
         scroll.setWidget(inner_widget)
@@ -285,7 +346,7 @@ class ReceiptIntakeScreen(QWidget):
                 "Please open a market day first from the Market screen."
             )
             self.status_label.setStyleSheet(f"""
-                background-color: {WARNING_BG}; color: #E65100;
+                background-color: {WARNING_BG}; color: {HARVEST_GOLD};
                 border: 1px solid {WARNING_COLOR}; border-radius: 8px;
                 padding: 10px 16px; font-weight: bold;
             """)
@@ -295,11 +356,24 @@ class ReceiptIntakeScreen(QWidget):
     # ------------------------------------------------------------------
     # Customer session management
     # ------------------------------------------------------------------
+    def _on_zip_code_changed(self):
+        """Persist zip code to the current customer order when the field loses focus."""
+        if not self._current_order_id:
+            return
+        zip_text = self.zip_code_input.text().strip()
+        # Basic validation: empty or exactly 5 digits
+        if zip_text and (len(zip_text) != 5 or not zip_text.isdigit()):
+            return
+        update_customer_order_zip_code(
+            self._current_order_id, zip_text if zip_text else None
+        )
+
     def _reset_customer_session(self):
         self._current_order_id = None
         self._current_customer_label = None
         self._order_receipts = []
         self.customer_label.setText("—")
+        self.zip_code_input.clear()
         self.receipts_frame.setVisible(False)
         self.status_msg_label.setVisible(False)
         self.error_label.setVisible(False)
@@ -307,13 +381,18 @@ class ReceiptIntakeScreen(QWidget):
         self.receipt_total_spin.setValue(0.00)
         self.notes_input.clear()
         self._refresh_receipts_table()
+        self._refresh_pending_orders()
+        self._refresh_returning_customers()
 
     def _ensure_customer_order(self):
         if self._current_order_id is not None:
             return
         if not self._active_market_day:
             return
-        order_id, label = create_customer_order(self._active_market_day['id'])
+        zip_text = self.zip_code_input.text().strip() or None
+        order_id, label = create_customer_order(
+            self._active_market_day['id'], zip_code=zip_text
+        )
         self._current_order_id = order_id
         self._current_customer_label = label
         self.customer_label.setText(label)
@@ -332,6 +411,83 @@ class ReceiptIntakeScreen(QWidget):
             if self._current_order_id:
                 void_customer_order(self._current_order_id)
         self._reset_customer_session()
+
+    # ------------------------------------------------------------------
+    # Returning customer
+    # ------------------------------------------------------------------
+    def _refresh_returning_customers(self):
+        """Reload the Returning Customer combo with confirmed customers from today."""
+        self.returning_combo.clear()
+        self.returning_combo.addItem("Returning Customer\u2026", userData=None)
+
+        if self._active_market_day:
+            customers = get_confirmed_customers_for_market_day(
+                self._active_market_day['id']
+            )
+            for c in customers:
+                label = c['customer_label']
+                match_str = f"${c['total_match']:.2f}"
+                display = f"{label}  \u2014  {c['receipt_count']} receipt(s), {match_str} matched"
+                self.returning_combo.addItem(display, userData=label)
+
+    def _on_returning_customer_selected(self, index):
+        """Handle selection of a returning customer from the dropdown."""
+        if index <= 0:
+            return  # Placeholder item selected
+
+        customer_label = self.returning_combo.currentData()
+        if not customer_label:
+            return
+
+        # Confirm if there's already work in progress
+        if self._order_receipts:
+            answer = QMessageBox.question(
+                self, "Switch to Returning Customer?",
+                f"You have {len(self._order_receipts)} receipt(s) in progress "
+                f"for {self._current_customer_label}.\n\n"
+                f"Switch to returning customer {customer_label}? "
+                f"Your current order will remain as a draft.",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if answer != QMessageBox.Yes:
+                self.returning_combo.setCurrentIndex(0)
+                return
+
+        # Create a new order for this returning customer (reuses their label)
+        if not self._active_market_day:
+            return
+
+        # Look up zip code from previous orders for this customer
+        conn = get_connection()
+        prev_zip_row = conn.execute(
+            "SELECT zip_code FROM customer_orders"
+            " WHERE customer_label=? AND market_day_id=? AND zip_code IS NOT NULL"
+            " ORDER BY created_at DESC LIMIT 1",
+            (customer_label, self._active_market_day['id'])
+        ).fetchone()
+        prev_zip = prev_zip_row['zip_code'] if prev_zip_row else None
+
+        order_id, label = create_customer_order(
+            self._active_market_day['id'],
+            customer_label=customer_label,
+            zip_code=prev_zip
+        )
+        self._current_order_id = order_id
+        self._current_customer_label = label
+        self._order_receipts = []
+        self.customer_label.setText(f"{label} (returning)")
+        self.zip_code_input.setText(prev_zip or '')
+        self.receipts_frame.setVisible(False)
+        self.error_label.setVisible(False)
+
+        self.status_msg_label.setText(f"Returning customer {label} — add receipts below")
+        self.status_msg_label.setVisible(True)
+
+        # Reset combo back to placeholder
+        self.returning_combo.setCurrentIndex(0)
+
+        self._refresh_receipts_table()
+        self._refresh_pending_orders()
 
     # ------------------------------------------------------------------
     # Receipt CRUD
@@ -386,6 +542,7 @@ class ReceiptIntakeScreen(QWidget):
 
             self._refresh_receipts_table()
             self.receipts_frame.setVisible(True)
+            self._refresh_pending_orders()
 
         except Exception as e:
             self._show_error(f"Error saving receipt: {str(e)}")
@@ -460,6 +617,139 @@ class ReceiptIntakeScreen(QWidget):
         self._reset_customer_session()
         self._update_market_status()
         self._load_vendors()
+
+    # ------------------------------------------------------------------
+    # Pending orders (draft queue)
+    # ------------------------------------------------------------------
+    def _refresh_pending_orders(self):
+        """Reload the Pending Orders table with draft orders for this market day."""
+        if not self._active_market_day:
+            self.pending_frame.setVisible(False)
+            return
+
+        orders = get_draft_orders_for_market_day(self._active_market_day['id'])
+
+        # Exclude the currently-active order and empty abandoned drafts
+        orders = [
+            o for o in orders
+            if o['id'] != self._current_order_id and o['receipt_count'] > 0
+        ]
+
+        if not orders:
+            self.pending_frame.setVisible(False)
+            return
+
+        self.pending_frame.setVisible(True)
+        self.pending_table.setSortingEnabled(False)
+        self.pending_table.setRowCount(len(orders))
+
+        for i, order in enumerate(orders):
+            self.pending_table.setItem(i, 0, make_item(order['customer_label']))
+            self.pending_table.setItem(i, 1, make_item(
+                str(order['receipt_count']), order['receipt_count']
+            ))
+            self.pending_table.setItem(i, 2, make_item(
+                f"${order['order_total']:.2f}", order['order_total']
+            ))
+            self.pending_table.setItem(i, 3, make_item(order['status']))
+
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            actions_layout.setSpacing(4)
+
+            resume_btn = make_action_btn("Resume Payment", 95)
+            resume_btn.clicked.connect(
+                lambda checked, oid=order['id']: self._resume_payment(oid)
+            )
+            actions_layout.addWidget(resume_btn)
+
+            add_btn = make_action_btn("Add Receipt", 80)
+            add_btn.clicked.connect(
+                lambda checked, oid=order['id'], lbl=order['customer_label']:
+                    self._load_existing_order(oid, lbl)
+            )
+            actions_layout.addWidget(add_btn)
+
+            del_btn = make_action_btn("Delete", 50, danger=True)
+            del_btn.clicked.connect(
+                lambda checked, oid=order['id'], lbl=order['customer_label']:
+                    self._delete_pending_order(oid, lbl)
+            )
+            actions_layout.addWidget(del_btn)
+
+            self.pending_table.setCellWidget(i, 4, actions_widget)
+            self.pending_table.setRowHeight(i, 36)
+
+        self.pending_table.setSortingEnabled(True)
+        self.pending_header.setText(
+            f"Pending Orders  ({len(orders)} draft{'s' if len(orders) != 1 else ''})"
+        )
+
+    def _resume_payment(self, order_id):
+        """Navigate to Payment screen to resume payment for a pending order."""
+        self.customer_order_ready.emit(order_id)
+
+    def _delete_pending_order(self, order_id, customer_label):
+        """Void and remove a pending draft order after confirmation."""
+        answer = QMessageBox.warning(
+            self, "Delete Pending Order?",
+            f"This will void all receipts for customer {customer_label} "
+            f"and remove the order.\n\nThis cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            void_customer_order(order_id)
+            self._refresh_pending_orders()
+        except Exception as e:
+            self._show_error(f"Error deleting order: {e}")
+
+    def _load_existing_order(self, order_id, customer_label):
+        """Load an existing draft order into the receipt form for adding more receipts."""
+        if self._order_receipts:
+            answer = QMessageBox.question(
+                self, "Switch to Existing Order?",
+                f"You have {len(self._order_receipts)} receipt(s) in progress "
+                f"for {self._current_customer_label}.\n\n"
+                f"Switch to order {customer_label}? "
+                f"Your current order will remain as a draft.",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        # Load the existing order's transactions into local state
+        self._current_order_id = order_id
+        self._current_customer_label = customer_label
+        self.customer_label.setText(customer_label)
+
+        # Populate zip code from order data
+        order_data = get_customer_order(order_id)
+        if order_data and order_data.get('zip_code'):
+            self.zip_code_input.setText(order_data['zip_code'])
+        else:
+            self.zip_code_input.clear()
+
+        txns = get_order_transactions(order_id)
+        self._order_receipts = []
+        for t in txns:
+            self._order_receipts.append({
+                'txn_id': t['id'],
+                'fam_txn_id': t['fam_transaction_id'],
+                'vendor_name': t['vendor_name'],
+                'receipt_total': t['receipt_total'],
+                'notes': t.get('notes') or '',
+            })
+
+        self._refresh_receipts_table()
+        self.receipts_frame.setVisible(bool(self._order_receipts))
+        self._refresh_pending_orders()
+
+        self.error_label.setVisible(False)
+        self.status_msg_label.setText(f"Loaded order {customer_label}")
+        self.status_msg_label.setVisible(True)
 
     # ------------------------------------------------------------------
     def _show_error(self, msg):

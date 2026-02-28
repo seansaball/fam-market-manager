@@ -1,5 +1,7 @@
 """Screen E: Admin Adjustments."""
 
+import logging
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit,
     QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
@@ -20,6 +22,8 @@ from fam.ui.styles import (
     BACKGROUND, TEXT_COLOR
 )
 from fam.ui.helpers import make_field_label, make_item, make_action_btn, configure_table
+
+logger = logging.getLogger('fam.ui.admin_screen')
 
 
 REASON_CODES = [
@@ -242,25 +246,34 @@ class AdminScreen(QWidget):
             new_total = dialog.receipt_spin.value()
             new_vendor = dialog.vendor_combo.currentData()
 
-            if new_total != txn['receipt_total']:
-                log_action('transactions', txn_id, 'ADJUST', adjusted_by,
-                            field_name='receipt_total',
-                            old_value=txn['receipt_total'],
-                            new_value=new_total,
-                            reason_code=reason, notes=notes)
-                update_transaction(txn_id, receipt_total=new_total)
+            if new_total <= 0:
+                QMessageBox.warning(self, "Error",
+                                    "Receipt total must be greater than $0.00.")
+                return
 
-            if new_vendor != txn['vendor_id']:
-                log_action('transactions', txn_id, 'ADJUST', adjusted_by,
-                            field_name='vendor_id',
-                            old_value=txn['vendor_id'],
-                            new_value=new_vendor,
-                            reason_code=reason, notes=notes)
-                update_transaction(txn_id, vendor_id=new_vendor)
+            try:
+                if new_total != txn['receipt_total']:
+                    log_action('transactions', txn_id, 'ADJUST', adjusted_by,
+                                field_name='receipt_total',
+                                old_value=txn['receipt_total'],
+                                new_value=new_total,
+                                reason_code=reason, notes=notes)
+                    update_transaction(txn_id, receipt_total=new_total)
 
-            update_transaction(txn_id, status='Adjusted')
-            self._search()
-            self._load_audit_log()
+                if new_vendor != txn['vendor_id']:
+                    log_action('transactions', txn_id, 'ADJUST', adjusted_by,
+                                field_name='vendor_id',
+                                old_value=txn['vendor_id'],
+                                new_value=new_vendor,
+                                reason_code=reason, notes=notes)
+                    update_transaction(txn_id, vendor_id=new_vendor)
+
+                update_transaction(txn_id, status='Adjusted')
+                self._search()
+                self._load_audit_log()
+            except Exception as e:
+                logger.exception("Failed to adjust transaction %s", txn_id)
+                QMessageBox.critical(self, "Error", f"Adjustment failed: {e}")
 
     def _void_transaction(self, txn_id):
         txn = get_transaction_by_id(txn_id)
@@ -274,14 +287,18 @@ class AdminScreen(QWidget):
             QMessageBox.Yes | QMessageBox.No
         )
         if result == QMessageBox.Yes:
-            # Use the open market day volunteer's name as changed_by
-            open_md = get_open_market_day()
-            changed_by = (open_md.get('opened_by') if open_md else None) or 'Admin'
-            log_action('transactions', txn_id, 'VOID', changed_by,
-                        reason_code='admin_adjustment', notes='Transaction voided')
-            void_transaction(txn_id)
-            self._search()
-            self._load_audit_log()
+            try:
+                # Use the open market day volunteer's name as changed_by
+                open_md = get_open_market_day()
+                changed_by = (open_md.get('opened_by') if open_md else None) or 'Admin'
+                log_action('transactions', txn_id, 'VOID', changed_by,
+                            reason_code='admin_adjustment', notes='Transaction voided')
+                void_transaction(txn_id)
+                self._search()
+                self._load_audit_log()
+            except Exception as e:
+                logger.exception("Failed to void transaction %s", txn_id)
+                QMessageBox.critical(self, "Error", f"Void failed: {e}")
 
     def _load_audit_log(self):
         entries = get_audit_log(limit=20)

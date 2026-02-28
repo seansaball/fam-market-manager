@@ -22,26 +22,26 @@ def get_payment_method_by_id(pm_id):
     return dict(row) if row else None
 
 
-def create_payment_method(name, discount_percent, sort_order=0):
+def create_payment_method(name, match_percent, sort_order=0):
     conn = get_connection()
     cursor = conn.execute(
-        "INSERT INTO payment_methods (name, discount_percent, sort_order) VALUES (?, ?, ?)",
-        (name, discount_percent, sort_order)
+        "INSERT INTO payment_methods (name, match_percent, sort_order) VALUES (?, ?, ?)",
+        (name, match_percent, sort_order)
     )
     conn.commit()
     return cursor.lastrowid
 
 
-def update_payment_method(pm_id, name=None, discount_percent=None, is_active=None, sort_order=None):
+def update_payment_method(pm_id, name=None, match_percent=None, is_active=None, sort_order=None):
     conn = get_connection()
     fields = []
     values = []
     if name is not None:
         fields.append("name=?")
         values.append(name)
-    if discount_percent is not None:
-        fields.append("discount_percent=?")
-        values.append(discount_percent)
+    if match_percent is not None:
+        fields.append("match_percent=?")
+        values.append(match_percent)
     if is_active is not None:
         fields.append("is_active=?")
         values.append(int(is_active))

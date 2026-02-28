@@ -38,7 +38,7 @@ def seed_if_empty():
         ("Food RX", 75.0, 1, 5),
     ]
     cursor.executemany(
-        "INSERT INTO payment_methods (name, discount_percent, is_active, sort_order) VALUES (?, ?, ?, ?)",
+        "INSERT INTO payment_methods (name, match_percent, is_active, sort_order) VALUES (?, ?, ?, ?)",
         payment_methods
     )
 
