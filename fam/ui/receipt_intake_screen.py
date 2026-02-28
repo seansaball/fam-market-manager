@@ -549,7 +549,7 @@ class ReceiptIntakeScreen(QWidget):
                 lambda checked, idx=i: self._remove_receipt(idx)
             )
             self.receipts_table.setCellWidget(i, 4, remove_btn)
-            self.receipts_table.setRowHeight(i, 36)
+            self.receipts_table.setRowHeight(i, 42)
             running_total += r['receipt_total']
 
         self.receipts_table.setSortingEnabled(True)
@@ -631,7 +631,7 @@ class ReceiptIntakeScreen(QWidget):
             actions_layout.setContentsMargins(2, 2, 2, 2)
             actions_layout.setSpacing(4)
 
-            resume_btn = make_action_btn("Resume Payment", 95)
+            resume_btn = make_action_btn("Resume", 55)
             resume_btn.clicked.connect(
                 lambda checked, oid=order['id']: self._resume_payment(oid)
             )
@@ -652,7 +652,7 @@ class ReceiptIntakeScreen(QWidget):
             actions_layout.addWidget(del_btn)
 
             self.pending_table.setCellWidget(i, 4, actions_widget)
-            self.pending_table.setRowHeight(i, 36)
+            self.pending_table.setRowHeight(i, 42)
 
         self.pending_table.setSortingEnabled(True)
         self.pending_header.setText(

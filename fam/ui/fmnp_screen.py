@@ -68,9 +68,10 @@ class FMNPScreen(QWidget):
 
         row2.addWidget(make_field_label("Amount ($)"))
         self.amount_spin = QDoubleSpinBox()
-        self.amount_spin.setRange(0.01, 99999.99)
+        self.amount_spin.setRange(0, 99999.99)
         self.amount_spin.setDecimals(2)
         self.amount_spin.setPrefix("$")
+        self.amount_spin.setSingleStep(1.00)
         row2.addWidget(self.amount_spin)
 
         row2.addWidget(make_field_label("Check Count"))
@@ -214,7 +215,7 @@ class FMNPScreen(QWidget):
             action_layout.addWidget(del_btn)
 
             self.table.setCellWidget(i, 6, action_widget)
-            self.table.setRowHeight(i, 36)
+            self.table.setRowHeight(i, 42)
 
         self.table.setSortingEnabled(True)
 
@@ -253,7 +254,7 @@ class FMNPScreen(QWidget):
                 entry_id = create_fmnp_entry(md_id, vendor_id, amount, entered_by, check_count, notes)
                 log_action('fmnp_entries', entry_id, 'INSERT', entered_by, notes='FMNP entry created')
 
-            self.amount_spin.setValue(0.01)
+            self.amount_spin.setValue(0)
             self.check_count_spin.setValue(0)
             self.notes_input.clear()
             self._load_entries()

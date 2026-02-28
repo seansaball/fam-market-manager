@@ -410,7 +410,7 @@ class PaymentScreen(QWidget):
         for i, (vname, vtotal) in enumerate(rows):
             self.vendor_table.setItem(i, 0, make_item(vname))
             self.vendor_table.setItem(i, 1, make_item(f"${vtotal:.2f}", vtotal))
-            self.vendor_table.setRowHeight(i, 36)
+            self.vendor_table.setRowHeight(i, 42)
         self.vendor_table.setSortingEnabled(True)
 
         has_vendors = len(rows) > 0

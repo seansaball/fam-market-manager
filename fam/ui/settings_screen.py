@@ -434,7 +434,7 @@ class SettingsScreen(QWidget):
             al.addWidget(toggle_btn)
 
             self.markets_table.setCellWidget(i, 5, action_widget)
-            self.markets_table.setRowHeight(i, 36)
+            self.markets_table.setRowHeight(i, 42)
         self.markets_table.setSortingEnabled(True)
 
     def _load_vendors(self):
@@ -465,7 +465,7 @@ class SettingsScreen(QWidget):
             al.addWidget(toggle_btn)
 
             self.vendors_table.setCellWidget(i, 4, action_widget)
-            self.vendors_table.setRowHeight(i, 36)
+            self.vendors_table.setRowHeight(i, 42)
         self.vendors_table.setSortingEnabled(True)
 
     def _load_payment_methods(self):
@@ -507,7 +507,7 @@ class SettingsScreen(QWidget):
             al.addWidget(toggle_btn)
 
             self.pm_table.setCellWidget(i, 4, action_widget)
-            self.pm_table.setRowHeight(i, 36)
+            self.pm_table.setRowHeight(i, 42)
         self.pm_table.setSortingEnabled(True)
 
     # ── Market Actions ───────────────────────────────────────

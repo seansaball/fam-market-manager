@@ -216,7 +216,7 @@ class AdminScreen(QWidget):
                 action_layout.addWidget(void_btn)
 
             self.table.setCellWidget(i, 7, action_widget)
-            self.table.setRowHeight(i, 36)
+            self.table.setRowHeight(i, 42)
 
         self.table.setSortingEnabled(True)
 

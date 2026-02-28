@@ -64,19 +64,23 @@ class PaymentRow(QFrame):
         self.customer_charged_label.setMinimumWidth(70)
         layout.addWidget(self.customer_charged_label)
 
-        # Remove button
-        self.remove_btn = QPushButton("X")
-        self.remove_btn.setFixedSize(32, 32)
+        # Remove button — red outline + red X, matching danger action buttons
+        self.remove_btn = QPushButton("✕")
+        self.remove_btn.setFixedSize(28, 28)
         self.remove_btn.setStyleSheet(f"""
             QPushButton {{
+                background-color: transparent;
+                color: {ERROR_COLOR};
+                border: 1.5px solid {ERROR_COLOR};
+                border-radius: 14px;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 0px;
+            }}
+            QPushButton:hover {{
                 background-color: {ERROR_COLOR};
                 color: white;
-                border-radius: 16px;
-                font-weight: bold;
-                font-size: 12px;
-                border: none;
             }}
-            QPushButton:hover {{ background-color: #B71C1C; }}
         """)
         self.remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
         layout.addWidget(self.remove_btn)

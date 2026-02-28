@@ -9,6 +9,7 @@ import matplotlib
 matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -534,10 +535,10 @@ class ReportsScreen(QWidget):
         self.match_table.setSortingEnabled(True)
 
         # Update summary cards
-        self.summary_row.update_value("total_receipts", f"${total_gross:.2f}")
-        self.summary_row.update_value("customer_paid", f"${total_customer:.2f}")
-        self.summary_row.update_value("fam_match", f"${total_fam_match:.2f}")
-        self.summary_row.update_value("fmnp_total", f"${total_fmnp:.2f}")
+        self.summary_row.update_card("total_receipts", f"${total_gross:.2f}")
+        self.summary_row.update_card("customer_paid", f"${total_customer:.2f}")
+        self.summary_row.update_card("fam_match", f"${total_fam_match:.2f}")
+        self.summary_row.update_card("fmnp_total", f"${total_fmnp:.2f}")
 
         # ── Detailed ledger ──────────────────────────────────────
         ledger_rows = conn.execute(f"""
@@ -750,6 +751,12 @@ class ReportsScreen(QWidget):
         ax.set_xlabel('# Customers', fontsize=10, color=TEXT_COLOR)
         ax.tick_params(axis='y', labelsize=9, colors=TEXT_COLOR)
         ax.tick_params(axis='x', labelsize=9, colors=TEXT_COLOR)
+
+        # Force integer ticks only — no decimals (can't have 0.5 customers)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        max_count = max(counts) if counts else 1
+        ax.set_xlim(left=0, right=max(max_count * 1.15, 1.5))
+
         ax.grid(True, axis='x', linestyle='--', alpha=0.3, color=MEDIUM_GRAY)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
