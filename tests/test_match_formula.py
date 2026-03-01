@@ -372,3 +372,277 @@ class TestRealWorldScenarios:
         items = result['line_items']
         assert items[0]['match_amount'] == 18.0
         assert items[1]['match_amount'] == 12.0
+
+
+# ══════════════════════════════════════════════════════════════════
+# 7. Cap penny-rounding precision
+# ══════════════════════════════════════════════════════════════════
+class TestCapPennyRounding:
+    """After proportional cap, the sum of rounded match amounts should
+    stay within 1 cent of the cap value."""
+
+    @pytest.mark.parametrize("cap", [10.0, 15.0, 20.0, 25.0, 33.33, 49.99, 75.50])
+    def test_cap_sum_within_tolerance(self, cap):
+        """Sum of capped match amounts stays within $0.01 of the cap."""
+        result = calculate_payment_breakdown(300.0, [
+            {'method_amount': 100.0, 'match_percent': 100.0},    # 50.00
+            {'method_amount': 100.0, 'match_percent': 50.0},     # 33.33
+            {'method_amount': 100.0, 'match_percent': 200.0},    # 66.67
+        ], match_limit=cap)
+        assert result['match_was_capped'] is True
+        assert abs(result['fam_subsidy_total'] - cap) <= 0.01
+
+    def test_five_methods_cap_penny_accuracy(self):
+        """Five diverse methods capped — total match exact after penny adjustment."""
+        result = calculate_payment_breakdown(500.0, [
+            {'method_amount': 120.0, 'match_percent': 100.0},
+            {'method_amount': 80.0,  'match_percent': 50.0},
+            {'method_amount': 100.0, 'match_percent': 200.0},
+            {'method_amount': 150.0, 'match_percent': 75.0},
+            {'method_amount': 50.0,  'match_percent': 25.0},
+        ], match_limit=55.55)
+        assert result['match_was_capped'] is True
+        assert abs(result['fam_subsidy_total'] - 55.55) <= 0.01
+        # All lines still reconcile individually
+        for li in result['line_items']:
+            assert li['customer_charged'] == round(li['method_amount'] - li['match_amount'], 2)
+
+    def test_cap_at_one_penny(self):
+        """Cap of $0.01 — minimal cap still distributes correctly."""
+        result = calculate_payment_breakdown(100.0, [
+            {'method_amount': 50.0, 'match_percent': 100.0},
+            {'method_amount': 50.0, 'match_percent': 100.0},
+        ], match_limit=0.01)
+        assert result['match_was_capped'] is True
+        assert result['fam_subsidy_total'] <= 0.02  # at most 1 penny drift
+        total = result['customer_total_paid'] + result['fam_subsidy_total']
+        assert abs(total - 100.0) <= 0.01
+
+    def test_cap_with_asymmetric_amounts(self):
+        """Highly asymmetric amounts — $999 + $1 capped to $10."""
+        result = calculate_payment_breakdown(1000.0, [
+            {'method_amount': 999.0, 'match_percent': 100.0},
+            {'method_amount': 1.0,   'match_percent': 100.0},
+        ], match_limit=10.0)
+        assert result['match_was_capped'] is True
+        assert abs(result['fam_subsidy_total'] - 10.0) <= 0.01
+        assert result['is_valid'] is True
+
+
+# ══════════════════════════════════════════════════════════════════
+# 8. Multi-transaction distribution math
+# ══════════════════════════════════════════════════════════════════
+class TestMultiTransactionDistribution:
+    """Test the remainder-based distribution math used by
+    _distribute_and_save_payments. We replicate the same algorithm
+    here to verify the math without needing the UI."""
+
+    @staticmethod
+    def _distribute(items, transactions, match_limit=None):
+        """Replicate _distribute_and_save_payments math.
+
+        items: list of {'method_amount': float, 'match_percent': float}
+        transactions: list of {'receipt_total': float}
+        match_limit: optional cap
+
+        Returns list-of-lists of line items.
+        """
+        order_total = sum(t['receipt_total'] for t in transactions)
+        if order_total <= 0:
+            return []
+
+        all_txn_items = []
+        num_txns = len(transactions)
+        allocated_method = [0.0] * len(items)
+        allocated_match = [0.0] * len(items)
+
+        for t_idx, t in enumerate(transactions):
+            is_last = (t_idx == num_txns - 1)
+            proportion = t['receipt_total'] / order_total
+            txn_items = []
+
+            for j, item in enumerate(items):
+                if is_last:
+                    method_amount = round(item['method_amount'] - allocated_method[j], 2)
+                else:
+                    method_amount = round(item['method_amount'] * proportion, 2)
+                    allocated_method[j] += method_amount
+
+                match_pct = item['match_percent']
+                if is_last:
+                    total_match = round(
+                        item['method_amount'] * (match_pct / (100.0 + match_pct)), 2
+                    )
+                    match_amount = round(total_match - allocated_match[j], 2)
+                else:
+                    match_amount = round(
+                        method_amount * (match_pct / (100.0 + match_pct)), 2
+                    )
+                    allocated_match[j] += match_amount
+
+                customer_charged = round(method_amount - match_amount, 2)
+
+                txn_items.append({
+                    'method_amount': method_amount,
+                    'match_amount': match_amount,
+                    'customer_charged': customer_charged,
+                })
+
+            all_txn_items.append(txn_items)
+
+        # Apply match-limit cap
+        if match_limit is not None:
+            total_match = sum(
+                li['match_amount'] for txn_items in all_txn_items for li in txn_items
+            )
+            if total_match > match_limit >= 0:
+                cap_ratio = match_limit / total_match
+                for txn_items in all_txn_items:
+                    for li in txn_items:
+                        li['match_amount'] = round(li['match_amount'] * cap_ratio, 2)
+                        li['customer_charged'] = round(
+                            li['method_amount'] - li['match_amount'], 2
+                        )
+
+                # Penny adjustment: fix rounding drift so sum == cap exactly
+                capped_sum = round(sum(
+                    li['match_amount']
+                    for txn_items in all_txn_items for li in txn_items
+                ), 2)
+                penny_diff = round(match_limit - capped_sum, 2)
+                if penny_diff != 0:
+                    all_lines = [
+                        li for txn_items in all_txn_items for li in txn_items
+                        if li['match_amount'] > 0
+                    ]
+                    if all_lines:
+                        target = max(all_lines, key=lambda li: li['match_amount'])
+                        target['match_amount'] = round(
+                            target['match_amount'] + penny_diff, 2
+                        )
+                        target['customer_charged'] = round(
+                            target['method_amount'] - target['match_amount'], 2
+                        )
+
+        return all_txn_items
+
+    def test_single_txn_matches_calculate_breakdown(self):
+        """Single transaction: distribution should equal calculate_payment_breakdown."""
+        items = [
+            {'method_amount': 50.0, 'match_percent': 100.0},
+            {'method_amount': 30.0, 'match_percent': 50.0},
+        ]
+        txns = [{'receipt_total': 80.0}]
+        distributed = self._distribute(items, txns)
+        result = calculate_payment_breakdown(80.0, items)
+
+        for i, li in enumerate(distributed[0]):
+            assert li['match_amount'] == result['line_items'][i]['match_amount']
+            assert li['customer_charged'] == result['line_items'][i]['customer_charged']
+
+    def test_two_txn_method_amounts_sum(self):
+        """Method amounts across 2 transactions sum to original total."""
+        items = [
+            {'method_amount': 100.0, 'match_percent': 100.0},
+            {'method_amount': 60.0,  'match_percent': 50.0},
+        ]
+        txns = [{'receipt_total': 90.0}, {'receipt_total': 70.0}]
+        distributed = self._distribute(items, txns)
+
+        for j in range(len(items)):
+            total = sum(distributed[t][j]['method_amount'] for t in range(2))
+            assert total == items[j]['method_amount']
+
+    def test_two_txn_match_amounts_sum(self):
+        """Match amounts across 2 transactions sum to overall match."""
+        items = [
+            {'method_amount': 100.0, 'match_percent': 100.0},
+            {'method_amount': 60.0,  'match_percent': 50.0},
+        ]
+        txns = [{'receipt_total': 90.0}, {'receipt_total': 70.0}]
+        distributed = self._distribute(items, txns)
+
+        for j in range(len(items)):
+            total_match = sum(distributed[t][j]['match_amount'] for t in range(2))
+            expected = round(
+                items[j]['method_amount'] * (items[j]['match_percent']
+                    / (100.0 + items[j]['match_percent'])), 2
+            )
+            assert total_match == expected
+
+    def test_three_txn_all_line_items_reconcile(self):
+        """Every distributed line item: customer + match = method_amount."""
+        items = [
+            {'method_amount': 200.0, 'match_percent': 100.0},
+            {'method_amount': 100.0, 'match_percent': 75.0},
+        ]
+        txns = [
+            {'receipt_total': 100.0},
+            {'receipt_total': 120.0},
+            {'receipt_total': 80.0},
+        ]
+        distributed = self._distribute(items, txns)
+
+        for txn_items in distributed:
+            for li in txn_items:
+                assert li['match_amount'] + li['customer_charged'] == li['method_amount']
+
+    def test_three_txn_with_cap(self):
+        """Distribution + cap: total match within tolerance of the cap."""
+        items = [
+            {'method_amount': 200.0, 'match_percent': 100.0},
+            {'method_amount': 100.0, 'match_percent': 50.0},
+        ]
+        txns = [
+            {'receipt_total': 100.0},
+            {'receipt_total': 120.0},
+            {'receipt_total': 80.0},
+        ]
+        distributed = self._distribute(items, txns, match_limit=50.0)
+
+        total_match = sum(
+            li['match_amount'] for txn_items in distributed for li in txn_items
+        )
+        assert abs(total_match - 50.0) <= 0.02
+
+        # Every line still reconciles
+        for txn_items in distributed:
+            for li in txn_items:
+                assert li['customer_charged'] == round(
+                    li['method_amount'] - li['match_amount'], 2
+                )
+
+    def test_uneven_split_no_penny_loss(self):
+        """$33.33 across 3 equal receipts — no pennies lost."""
+        items = [{'method_amount': 33.33, 'match_percent': 100.0}]
+        txns = [
+            {'receipt_total': 11.11},
+            {'receipt_total': 11.11},
+            {'receipt_total': 11.11},
+        ]
+        distributed = self._distribute(items, txns)
+
+        total_method = sum(distributed[t][0]['method_amount'] for t in range(3))
+        total_match = sum(distributed[t][0]['match_amount'] for t in range(3))
+
+        assert total_method == 33.33
+        expected_match = round(33.33 * 100.0 / 200.0, 2)  # 16.67 (rounded)
+        assert total_match == expected_match
+
+    def test_customer_charged_never_negative(self):
+        """No distributed line item should have negative customer_charged."""
+        items = [
+            {'method_amount': 150.0, 'match_percent': 200.0},
+            {'method_amount': 50.0,  'match_percent': 500.0},
+        ]
+        txns = [
+            {'receipt_total': 80.0},
+            {'receipt_total': 70.0},
+            {'receipt_total': 50.0},
+        ]
+        distributed = self._distribute(items, txns)
+
+        for txn_items in distributed:
+            for li in txn_items:
+                assert li['customer_charged'] >= 0.0
+                assert li['match_amount'] >= 0.0

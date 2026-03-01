@@ -3,9 +3,9 @@
 import logging
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox, QDoubleSpinBox, QTextEdit, QDialog, QDialogButtonBox,
+    QMessageBox, QTextEdit, QDialog, QDialogButtonBox,
     QFormLayout
 )
 from PySide6.QtCore import Qt
@@ -19,9 +19,12 @@ from fam.models.transaction import (
 from fam.models.audit import log_action, get_audit_log
 from fam.ui.styles import (
     WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, WARNING_COLOR,
-    BACKGROUND, TEXT_COLOR, CARD_FRAME_STYLE
+    BACKGROUND, TEXT_COLOR, SUBTITLE_GRAY
 )
-from fam.ui.helpers import make_field_label, make_item, make_action_btn, configure_table
+from fam.ui.helpers import (
+    make_field_label, make_item, make_action_btn, configure_table,
+    NoScrollDoubleSpinBox, NoScrollComboBox
+)
 
 logger = logging.getLogger('fam.ui.admin_screen')
 
@@ -55,14 +58,14 @@ class AdjustmentDialog(QDialog):
 
         layout = QFormLayout(self)
 
-        self.receipt_spin = QDoubleSpinBox()
+        self.receipt_spin = NoScrollDoubleSpinBox()
         self.receipt_spin.setRange(0.01, 99999.99)
         self.receipt_spin.setDecimals(2)
         self.receipt_spin.setPrefix("$")
         self.receipt_spin.setValue(txn['receipt_total'])
         layout.addRow("Receipt Total:", self.receipt_spin)
 
-        self.vendor_combo = QComboBox()
+        self.vendor_combo = NoScrollComboBox()
         vendors = get_all_vendors(active_only=True)
         for v in vendors:
             self.vendor_combo.addItem(v['name'], userData=v['id'])
@@ -72,7 +75,7 @@ class AdjustmentDialog(QDialog):
                 break
         layout.addRow("Vendor:", self.vendor_combo)
 
-        self.reason_combo = QComboBox()
+        self.reason_combo = NoScrollComboBox()
         for rc in REASON_CODES:
             self.reason_combo.addItem(rc)
         layout.addRow("Reason:", self.reason_combo)
@@ -102,29 +105,32 @@ class AdminScreen(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
 
         title = QLabel("Adjustments & Corrections")
         title.setObjectName("screen_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("Search, adjust, or void transactions with full audit trail")
-        subtitle.setObjectName("subtitle")
-        layout.addWidget(subtitle)
-
         # Filter bar
         filter_frame = QFrame()
-        filter_frame.setStyleSheet(CARD_FRAME_STYLE)
+        filter_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {WHITE};
+                border: 1px solid #E2E2E2;
+                border-radius: 8px;
+                padding: 6px 10px;
+            }}
+        """)
         filter_layout = QHBoxLayout(filter_frame)
 
         filter_layout.addWidget(make_field_label("Market"))
-        self.md_filter = QComboBox()
+        self.md_filter = NoScrollComboBox()
         self.md_filter.setMinimumWidth(200)
         filter_layout.addWidget(self.md_filter)
 
         filter_layout.addWidget(make_field_label("Status"))
-        self.status_filter = QComboBox()
+        self.status_filter = NoScrollComboBox()
         self.status_filter.addItems(["All", "Draft", "Confirmed", "Adjusted", "Voided"])
         filter_layout.addWidget(self.status_filter)
 
@@ -136,6 +142,7 @@ class AdminScreen(QWidget):
 
         search_btn = QPushButton("Search")
         search_btn.setObjectName("primary_btn")
+        search_btn.setStyleSheet("padding: 4px 16px; min-height: 0px;")
         search_btn.clicked.connect(self._search)
         filter_layout.addWidget(search_btn)
         filter_layout.addStretch()
@@ -153,7 +160,14 @@ class AdminScreen(QWidget):
         layout.addWidget(self.table)
 
         # Audit log preview (includes Changed By column)
-        layout.addWidget(QLabel("Recent Audit Log:"))
+        audit_label = QLabel("Recent Audit Log")
+        audit_label.setStyleSheet(f"""
+            font-size: 12px;
+            font-weight: bold;
+            color: {SUBTITLE_GRAY};
+            padding: 2px 0px;
+        """)
+        layout.addWidget(audit_label)
         self.audit_table = QTableWidget()
         self.audit_table.setColumnCount(8)
         self.audit_table.setHorizontalHeaderLabels(
@@ -161,10 +175,8 @@ class AdminScreen(QWidget):
              "Field", "Old Value", "New Value"]
         )
         configure_table(self.audit_table)
-        self.audit_table.setMaximumHeight(300)
+        self.audit_table.setMaximumHeight(220)
         layout.addWidget(self.audit_table)
-
-        layout.addStretch()
 
     def refresh(self):
         self._load_market_days()
@@ -306,4 +318,5 @@ class AdminScreen(QWidget):
             self.audit_table.setItem(i, 5, make_item(e.get('field_name') or ''))
             self.audit_table.setItem(i, 6, make_item(str(e.get('old_value') or '')))
             self.audit_table.setItem(i, 7, make_item(str(e.get('new_value') or '')))
+            self.audit_table.setRowHeight(i, 30)
         self.audit_table.setSortingEnabled(True)

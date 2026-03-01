@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QLabel, QPushButton, QAbstractItemView,
     QComboBox, QWidget, QHBoxLayout, QVBoxLayout, QLineEdit, QDateEdit,
-    QDialog, QDialogButtonBox, QSpinBox, QFormLayout
+    QDialog, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QFormLayout
 )
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 from PySide6.QtCore import Qt, Signal, QEvent, QDate
@@ -13,6 +13,30 @@ from fam.ui.styles import (
 
 # Style override for small action buttons inside table cells
 ACTION_BTN_STYLE = "min-height: 0px; max-height: 28px; padding: 4px 6px; font-size: 11px; border-radius: 4px;"
+
+
+# ── Scroll-safe input widgets ────────────────────────────────────
+# Prevent accidental value changes when scrolling the page.
+
+class NoScrollSpinBox(QSpinBox):
+    """QSpinBox that ignores mouse wheel events."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoScrollDoubleSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox that ignores mouse wheel events."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoScrollComboBox(QComboBox):
+    """QComboBox that ignores mouse wheel events."""
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class SortableTableItem(QTableWidgetItem):
@@ -269,19 +293,19 @@ class _DateRangeDialog(QDialog):
         start_row = QHBoxLayout()
         start_row.setSpacing(8)
 
-        self.start_month = QComboBox()
+        self.start_month = NoScrollComboBox()
         for m in self._MONTHS:
             self.start_month.addItem(m)
         self.start_month.setCurrentIndex(from_date.month() - 1)
         self.start_month.currentIndexChanged.connect(self._clamp_start_day)
         start_row.addWidget(self.start_month, 3)
 
-        self.start_day = QSpinBox()
+        self.start_day = NoScrollSpinBox()
         self.start_day.setRange(1, from_date.daysInMonth())
         self.start_day.setValue(from_date.day())
         start_row.addWidget(self.start_day, 1)
 
-        self.start_year = QSpinBox()
+        self.start_year = NoScrollSpinBox()
         self.start_year.setRange(min_date.year(), max_date.year())
         self.start_year.setValue(from_date.year())
         self.start_year.valueChanged.connect(self._clamp_start_day)
@@ -297,19 +321,19 @@ class _DateRangeDialog(QDialog):
         end_row = QHBoxLayout()
         end_row.setSpacing(8)
 
-        self.end_month = QComboBox()
+        self.end_month = NoScrollComboBox()
         for m in self._MONTHS:
             self.end_month.addItem(m)
         self.end_month.setCurrentIndex(to_date.month() - 1)
         self.end_month.currentIndexChanged.connect(self._clamp_end_day)
         end_row.addWidget(self.end_month, 3)
 
-        self.end_day = QSpinBox()
+        self.end_day = NoScrollSpinBox()
         self.end_day.setRange(1, to_date.daysInMonth())
         self.end_day.setValue(to_date.day())
         end_row.addWidget(self.end_day, 1)
 
-        self.end_year = QSpinBox()
+        self.end_year = NoScrollSpinBox()
         self.end_year.setRange(min_date.year(), max_date.year())
         self.end_year.setValue(to_date.year())
         self.end_year.valueChanged.connect(self._clamp_end_day)
@@ -506,20 +530,17 @@ def make_item(text, sort_value=None):
 def make_field_label(text):
     """Create a styled field label that matches input field heights exactly.
 
-    Uses 2px border, 8px vertical padding, and constrained height
-    so it visually aligns with QLineEdit / QComboBox / QSpinBox.
+    Uses compact padding so it visually aligns with QLineEdit / QComboBox / QSpinBox.
     """
     lbl = QLabel(text)
     lbl.setStyleSheet(f"""
         background-color: {FIELD_LABEL_BG};
-        border: 2px solid #D5D2CB;
-        border-radius: 6px;
-        padding: 10px 14px;
+        border: 1px solid #D5D2CB;
+        border-radius: 4px;
+        padding: 4px 8px;
         font-weight: bold;
-        font-size: 13px;
+        font-size: 12px;
         color: #555555;
-        min-height: 22px;
-        max-height: 38px;
     """)
     return lbl
 

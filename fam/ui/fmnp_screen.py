@@ -3,8 +3,8 @@
 import logging
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QLineEdit,
-    QDoubleSpinBox, QSpinBox, QPushButton, QFrame, QTableWidget,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit
 )
 from PySide6.QtCore import Qt
@@ -17,7 +17,10 @@ from fam.models.fmnp import (
 )
 from fam.models.audit import log_action
 from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG, CARD_FRAME_STYLE
-from fam.ui.helpers import make_field_label, make_item, make_action_btn, configure_table
+from fam.ui.helpers import (
+    make_field_label, make_item, make_action_btn, configure_table,
+    NoScrollDoubleSpinBox, NoScrollSpinBox, NoScrollComboBox
+)
 
 logger = logging.getLogger('fam.ui.fmnp_screen')
 
@@ -40,7 +43,7 @@ class FMNPScreen(QWidget):
         title.setObjectName("screen_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("Track FMNP check details for reconciliation — FMNP payments are processed via Payment screen")
+        subtitle = QLabel("Log FMNP checks collected by vendors for FAM match reimbursement — tracks external matching handled outside the app")
         subtitle.setObjectName("subtitle")
         layout.addWidget(subtitle)
 
@@ -52,7 +55,7 @@ class FMNPScreen(QWidget):
 
         row1 = QHBoxLayout()
         row1.addWidget(make_field_label("Market"))
-        self.md_combo = QComboBox()
+        self.md_combo = NoScrollComboBox()
         self.md_combo.setMinimumWidth(300)
         self.md_combo.currentIndexChanged.connect(self._on_market_day_changed)
         row1.addWidget(self.md_combo)
@@ -61,13 +64,13 @@ class FMNPScreen(QWidget):
 
         row2 = QHBoxLayout()
         row2.addWidget(make_field_label("Vendor"))
-        self.vendor_combo = QComboBox()
+        self.vendor_combo = NoScrollComboBox()
         self.vendor_combo.setMinimumWidth(180)
         self.vendor_combo.setMaximumWidth(280)
         row2.addWidget(self.vendor_combo)
 
         row2.addWidget(make_field_label("Amount ($)"))
-        self.amount_spin = QDoubleSpinBox()
+        self.amount_spin = NoScrollDoubleSpinBox()
         self.amount_spin.setRange(0, 99999.99)
         self.amount_spin.setDecimals(2)
         self.amount_spin.setPrefix("$")
@@ -75,7 +78,7 @@ class FMNPScreen(QWidget):
         row2.addWidget(self.amount_spin)
 
         row2.addWidget(make_field_label("Check Count"))
-        self.check_count_spin = QSpinBox()
+        self.check_count_spin = NoScrollSpinBox()
         self.check_count_spin.setRange(0, 9999)
         self.check_count_spin.setSpecialValueText("N/A")
         row2.addWidget(self.check_count_spin)

@@ -1,7 +1,7 @@
 """Screen A: Market Day Setup."""
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QFrame,
     QLineEdit
 )
@@ -16,7 +16,10 @@ from fam.models.market_day import (
 )
 from fam.models.transaction import get_draft_transactions
 from fam.ui.styles import PRIMARY_GREEN, HARVEST_GOLD, WHITE, LIGHT_GRAY, FIELD_LABEL_BG, CARD_FRAME_STYLE
-from fam.ui.helpers import make_field_label as _make_field_label_fn, make_item, configure_table
+from fam.ui.helpers import (
+    make_field_label as _make_field_label_fn, make_item, configure_table,
+    NoScrollComboBox
+)
 
 
 class MarketDayScreen(QWidget):
@@ -54,7 +57,7 @@ class MarketDayScreen(QWidget):
 
         row1 = QHBoxLayout()
         row1.addWidget(self._make_field_label("Market Location"))
-        self.market_combo = QComboBox()
+        self.market_combo = NoScrollComboBox()
         self.market_combo.setMinimumWidth(250)
         row1.addWidget(self.market_combo)
         row1.addStretch()
@@ -113,7 +116,7 @@ class MarketDayScreen(QWidget):
 
         # Existing market days list
         layout.addWidget(QLabel("Recent Market Days:"))
-        self.market_day_combo = QComboBox()
+        self.market_day_combo = NoScrollComboBox()
         self.market_day_combo.currentIndexChanged.connect(self._on_market_day_selected)
         layout.addWidget(self.market_day_combo)
 

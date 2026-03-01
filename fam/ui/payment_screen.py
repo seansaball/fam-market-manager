@@ -4,7 +4,7 @@ import logging
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QScrollArea, QLineEdit, QMessageBox, QTableWidget
+    QFrame, QScrollArea, QMessageBox, QTableWidget
 )
 from PySide6.QtCore import Signal, Qt
 
@@ -58,42 +58,39 @@ class PaymentScreen(QWidget):
 
         inner_widget = QWidget()
         layout = QVBoxLayout(inner_widget)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
 
         # Title
         title = QLabel("Payment Processing")
         title.setObjectName("screen_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("Allocate payment methods and confirm collection")
-        subtitle.setObjectName("subtitle")
-        layout.addWidget(subtitle)
+        # ── Combined info + summary row ──────────────────────────────
+        self.summary_row = SummaryRow()
 
-        # ── Customer order info bar ─────────────────────────────────
-        self.order_info_frame = QFrame()
-        self.order_info_frame.setStyleSheet(CARD_FRAME_STYLE)
-        info_layout = QHBoxLayout(self.order_info_frame)
-
-        self.customer_id_label = QLabel("No order loaded")
+        # Customer info card (first in the row)
+        order_card = self.summary_row.add_card("order_info", "Customer / Order")
+        self.customer_id_label = order_card.title_label
+        self.customer_id_label.setText("No order loaded")
+        # Override title style: no uppercase (customer names should be natural case)
         self.customer_id_label.setStyleSheet(
-            f"font-size: 16px; font-weight: bold; color: {PRIMARY_GREEN};"
+            f"font-size: 11px; color: {SUBTITLE_GRAY}; font-weight: bold;"
         )
-        info_layout.addWidget(self.customer_id_label)
+        self.order_total_label = order_card.value_label
+        self.order_total_label.setText("$0.00")
+        order_card.set_value_color(HARVEST_GOLD)
+        self.order_receipts_label = QLabel("")  # kept for API compat
 
-        self.order_receipts_label = QLabel("")
-        self.order_receipts_label.setStyleSheet("font-size: 13px; color: {SUBTITLE_GRAY};")
-        info_layout.addWidget(self.order_receipts_label)
+        self.summary_row.add_card("allocated", "Total Allocated")
+        self.summary_row.add_card("remaining", "Remaining", highlight=True)
+        self.summary_row.add_card("customer_pays", "Customer Pays")
+        self.summary_row.add_card("fam_match", "FAM Match", highlight=True)
 
-        info_layout.addStretch()
-        info_layout.addWidget(QLabel("Order Total:"))
-        self.order_total_label = QLabel("$0.00")
-        self.order_total_label.setStyleSheet(
-            f"font-size: 22px; font-weight: bold; color: {HARVEST_GOLD};"
-        )
-        info_layout.addWidget(self.order_total_label)
+        # Initial color setup
+        self.summary_row.update_card_color("fam_match", PRIMARY_GREEN)
 
-        layout.addWidget(self.order_info_frame)
+        layout.addWidget(self.summary_row)
 
         # Match limit info label
         self.match_limit_label = QLabel("")
@@ -115,20 +112,6 @@ class PaymentScreen(QWidget):
         self.match_cap_warning.setVisible(False)
         layout.addWidget(self.match_cap_warning)
 
-        # ── Summary cards row (at the top for visibility) ──────────
-        self.summary_row = SummaryRow()
-        self.summary_row.add_card("allocated", "Total Allocated")
-        self.summary_row.add_card("remaining", "Remaining to Allocate", highlight=True)
-        self.summary_row.add_card("customer_pays", "Customer Pays")
-        self.summary_row.add_card("fam_match", "FAM Match", highlight=True)
-        self.summary_row.add_card("vendor_reimburse", "Vendor Reimbursement")
-
-        # Initial color setup: vendor reimburse grey, FAM match green
-        self.summary_row.update_card_color("vendor_reimburse", MEDIUM_GRAY)
-        self.summary_row.update_card_color("fam_match", PRIMARY_GREEN)
-
-        layout.addWidget(self.summary_row)
-
         # ── Vendor summary table ────────────────────────────────────
         self.vendor_lbl = QLabel("Vendor Breakdown:")
         self.vendor_lbl.setStyleSheet("font-weight: bold;")
@@ -139,7 +122,6 @@ class PaymentScreen(QWidget):
         self.vendor_table.setColumnCount(2)
         self.vendor_table.setHorizontalHeaderLabels(["Vendor", "Receipt Total"])
         configure_table(self.vendor_table)
-        self.vendor_table.setMinimumHeight(80)
         self.vendor_table.setStyleSheet(f"""
             QTableWidget {{
                 background-color: {WHITE};
@@ -167,14 +149,14 @@ class PaymentScreen(QWidget):
         self.rows_container.setStyleSheet(f"background-color: {BACKGROUND};")
         self.rows_layout = QVBoxLayout(self.rows_container)
         self.rows_layout.setContentsMargins(4, 4, 4, 4)
-        self.rows_layout.setSpacing(8)
+        self.rows_layout.setSpacing(4)
         self.rows_layout.addStretch()
 
         pay_scroll = QScrollArea()
         pay_scroll.setWidgetResizable(True)
         pay_scroll.setWidget(self.rows_container)
-        pay_scroll.setMinimumHeight(120)
-        pay_scroll.setMaximumHeight(500)
+        pay_scroll.setMinimumHeight(150)
+        pay_scroll.setMaximumHeight(1200)
         pay_scroll.setStyleSheet(f"""
             QScrollArea {{
                 background-color: {BACKGROUND};
@@ -183,16 +165,6 @@ class PaymentScreen(QWidget):
             }}
         """)
         layout.addWidget(pay_scroll)
-
-        # SNAP reference code
-        snap_row = QHBoxLayout()
-        snap_row.addWidget(QLabel("SNAP Reference Code (optional):"))
-        self.snap_ref_input = QLineEdit()
-        self.snap_ref_input.setPlaceholderText("Enter SNAP approval code if applicable")
-        self.snap_ref_input.setMaximumWidth(300)
-        snap_row.addWidget(self.snap_ref_input)
-        snap_row.addStretch()
-        layout.addLayout(snap_row)
 
         # Error/validation message
         self.error_label = QLabel("")
@@ -208,15 +180,23 @@ class PaymentScreen(QWidget):
 
         # ── Bottom area: collection checklist + action buttons ──────
         bottom_frame = QFrame()
-        bottom_frame.setStyleSheet(CARD_FRAME_STYLE)
+        bottom_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {WHITE};
+                border: 1px solid #E2E2E2;
+                border-radius: 8px;
+                padding: 8px 12px;
+            }}
+        """)
         bottom_layout = QHBoxLayout(bottom_frame)
-        bottom_layout.setSpacing(20)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(12)
 
         # Left side: collection checklist
         collect_side = QVBoxLayout()
-        collect_side.setSpacing(4)
+        collect_side.setSpacing(2)
         collect_header = QLabel("Collect from Customer:")
-        collect_header.setStyleSheet("font-weight: bold; font-size: 13px;")
+        collect_header.setStyleSheet("font-weight: bold; font-size: 12px;")
         collect_side.addWidget(collect_header)
 
         self.collect_list_layout = QVBoxLayout()
@@ -225,7 +205,7 @@ class PaymentScreen(QWidget):
 
         self.collect_total_label = QLabel("Total: $0.00")
         self.collect_total_label.setStyleSheet(
-            f"font-weight: bold; font-size: 14px; color: {HARVEST_GOLD}; padding-top: 4px;"
+            f"font-weight: bold; font-size: 13px; color: {HARVEST_GOLD}; padding-top: 2px;"
         )
         collect_side.addWidget(self.collect_total_label)
         collect_side.addStretch()
@@ -234,7 +214,7 @@ class PaymentScreen(QWidget):
 
         # Right side: action buttons (vertically stacked)
         btn_side = QVBoxLayout()
-        btn_side.setSpacing(8)
+        btn_side.setSpacing(4)
         btn_side.addStretch()
 
         self.confirm_btn = QPushButton("Confirm Payment")
@@ -257,8 +237,8 @@ class PaymentScreen(QWidget):
             QFrame {{
                 background-color: {SUCCESS_BG};
                 border: 1px solid {ACCENT_GREEN};
-                border-radius: 10px;
-                padding: 16px 20px;
+                border-radius: 8px;
+                padding: 8px 12px;
             }}
         """)
         self.success_frame.setVisible(False)
@@ -324,12 +304,11 @@ class PaymentScreen(QWidget):
         self._order_transactions = get_order_transactions(order_id)
         self._order_total = sum(t['receipt_total'] for t in self._order_transactions)
 
+        n_receipts = len(self._order_transactions)
         self.customer_id_label.setText(
-            f"Customer {order['customer_label']}  —  {order['market_name']}"
+            f"Customer {order['customer_label']}  —  {order['market_name']}  |  {n_receipts} receipt(s)"
         )
-        self.order_receipts_label.setText(
-            f"{len(self._order_transactions)} receipt(s)"
-        )
+        self.order_receipts_label.setText(f"{n_receipts} receipt(s)")
         self.order_total_label.setText(f"${self._order_total:.2f}")
 
         self._populate_vendor_summary()
@@ -373,7 +352,9 @@ class PaymentScreen(QWidget):
             self._order_transactions = [txn]
             self._order_total = txn['receipt_total']
 
-            self.customer_id_label.setText(txn['fam_transaction_id'])
+            self.customer_id_label.setText(
+                f"{txn['fam_transaction_id']}  —  {txn['vendor_name']}"
+            )
             self.order_receipts_label.setText(f"Vendor: {txn['vendor_name']}")
             self.order_total_label.setText(f"${txn['receipt_total']:.2f}")
 
@@ -410,8 +391,13 @@ class PaymentScreen(QWidget):
         for i, (vname, vtotal) in enumerate(rows):
             self.vendor_table.setItem(i, 0, make_item(vname))
             self.vendor_table.setItem(i, 1, make_item(f"${vtotal:.2f}", vtotal))
-            self.vendor_table.setRowHeight(i, 42)
+            self.vendor_table.setRowHeight(i, 30)
         self.vendor_table.setSortingEnabled(True)
+
+        # Auto-fit table height: header + rows + border (no wasted space)
+        header_h = self.vendor_table.horizontalHeader().height()
+        rows_h = sum(self.vendor_table.rowHeight(i) for i in range(len(rows)))
+        self.vendor_table.setFixedHeight(header_h + rows_h + 4)
 
         has_vendors = len(rows) > 0
         self.vendor_lbl.setVisible(has_vendors)
@@ -422,10 +408,11 @@ class PaymentScreen(QWidget):
     # ------------------------------------------------------------------
     def _add_payment_row(self):
         row = PaymentRow()
-        row.changed.connect(self._update_summary)
+        row.changed.connect(self._on_row_changed)
         row.remove_requested.connect(self._remove_payment_row)
         self._payment_rows.append(row)
         self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
+        self._refresh_method_choices()
         return row
 
     def _remove_payment_row(self, row):
@@ -434,7 +421,31 @@ class PaymentScreen(QWidget):
         self._payment_rows.remove(row)
         self.rows_layout.removeWidget(row)
         row.deleteLater()
+        self._refresh_method_choices()
         self._update_summary()
+
+    def _on_row_changed(self):
+        """Called when any payment row's method or amount changes."""
+        self._refresh_method_choices()
+        self._update_summary()
+
+    def _refresh_method_choices(self):
+        """Disable already-selected methods in other rows, and hide the
+        '+ Add' button when all methods are in use."""
+        from fam.models.payment_method import get_all_payment_methods
+        total_methods = len(get_all_payment_methods(active_only=True))
+
+        selected_ids = set()
+        for row in self._payment_rows:
+            mid = row.get_selected_method_id()
+            if mid is not None:
+                selected_ids.add(mid)
+
+        for row in self._payment_rows:
+            row.set_excluded_methods(selected_ids)
+
+        # Hide "+ Add" when all payment methods are already in use
+        self.add_method_btn.setVisible(len(self._payment_rows) < total_methods)
 
     def _clear_payment_rows(self):
         for row in self._payment_rows:
@@ -473,7 +484,6 @@ class PaymentScreen(QWidget):
             self.summary_row.update_card("remaining", f"${remaining:.2f}")
             self.summary_row.update_card("customer_pays", f"${result['customer_total_paid']:.2f}")
             self.summary_row.update_card("fam_match", f"${fam_match:.2f}")
-            self.summary_row.update_card("vendor_reimburse", f"${receipt_total:.2f}")
 
             # Show/hide match cap warning
             if result.get('match_was_capped'):
@@ -506,12 +516,6 @@ class PaymentScreen(QWidget):
                 self.summary_row.update_card_color("remaining", HARVEST_GOLD)
                 self.summary_row.update_card_color("allocated", HARVEST_GOLD)
 
-            # Vendor reimbursement: green when fully allocated, grey otherwise
-            if remaining == 0:
-                self.summary_row.update_card_color("vendor_reimburse", PRIMARY_GREEN)
-            else:
-                self.summary_row.update_card_color("vendor_reimburse", MEDIUM_GRAY)
-
             # FAM match: green when there's a match, grey when zero
             if fam_match > 0:
                 self.summary_row.update_card_color("fam_match", PRIMARY_GREEN)
@@ -524,14 +528,12 @@ class PaymentScreen(QWidget):
             self.summary_row.update_card("remaining", f"${receipt_total:.2f}")
             self.summary_row.update_card("customer_pays", "$0.00")
             self.summary_row.update_card("fam_match", "$0.00")
-            self.summary_row.update_card("vendor_reimburse", f"${receipt_total:.2f}")
 
             # Reset colors to defaults when no entries
             self.summary_row.update_card_color("allocated", MEDIUM_GRAY)
             self.summary_row.update_card_color("remaining", HARVEST_GOLD)
             self.summary_row.update_card_color("customer_pays", PRIMARY_GREEN)
             self.summary_row.update_card_color("fam_match", MEDIUM_GRAY)
-            self.summary_row.update_card_color("vendor_reimburse", MEDIUM_GRAY)
 
             self._clear_collection_list()
             self.match_cap_warning.setVisible(False)
@@ -593,11 +595,6 @@ class PaymentScreen(QWidget):
             items = self._collect_line_items()
             if items:
                 save_payment_line_items(self._order_transactions[0]['id'], items)
-
-            snap_ref = self.snap_ref_input.text().strip() or None
-            if snap_ref:
-                for t in self._order_transactions:
-                    update_transaction(t['id'], snap_reference_code=snap_ref)
 
             self.success_frame.setVisible(True)
             self.success_msg.setText("Draft saved successfully.")
@@ -676,11 +673,7 @@ class PaymentScreen(QWidget):
         try:
             self._distribute_and_save_payments(items, receipt_total, commit=False)
 
-            snap_ref = self.snap_ref_input.text().strip() or None
             for t in self._order_transactions:
-                if snap_ref:
-                    update_transaction(t['id'], commit=False,
-                                       snap_reference_code=snap_ref)
                 confirm_transaction(t['id'], confirmed_by="Volunteer", commit=False)
 
             if self._current_order_id:
@@ -715,16 +708,41 @@ class PaymentScreen(QWidget):
         if order_total <= 0:
             return
 
-        # Build all per-transaction line items first
+        # Build all per-transaction line items using remainder-based
+        # distribution so that rounded amounts sum exactly to the totals.
         all_txn_items = []
-        for t in self._order_transactions:
+        num_txns = len(self._order_transactions)
+
+        # Track running totals per payment-method index so the last
+        # transaction gets the exact remainder (no penny drift).
+        allocated_method = [0.0] * len(items)
+        allocated_match = [0.0] * len(items)
+
+        for t_idx, t in enumerate(self._order_transactions):
+            is_last = (t_idx == num_txns - 1)
             proportion = t['receipt_total'] / order_total
             txn_items = []
 
-            for item in items:
-                method_amount = round(item['method_amount'] * proportion, 2)
+            for j, item in enumerate(items):
+                if is_last:
+                    # Last transaction gets the remainder
+                    method_amount = round(item['method_amount'] - allocated_method[j], 2)
+                else:
+                    method_amount = round(item['method_amount'] * proportion, 2)
+                    allocated_method[j] += method_amount
+
                 match_pct = item['match_percent_snapshot']
-                match_amount = round(method_amount * (match_pct / (100.0 + match_pct)), 2)
+                if is_last:
+                    # Compute the exact match for the original total, then subtract
+                    # what was already distributed to previous transactions
+                    total_match = round(
+                        item['method_amount'] * (match_pct / (100.0 + match_pct)), 2
+                    )
+                    match_amount = round(total_match - allocated_match[j], 2)
+                else:
+                    match_amount = round(method_amount * (match_pct / (100.0 + match_pct)), 2)
+                    allocated_match[j] += match_amount
+
                 customer_charged = round(method_amount - match_amount, 2)
 
                 txn_items.append({
@@ -754,6 +772,27 @@ class PaymentScreen(QWidget):
                         )
                         li['customer_charged'] = round(
                             li['method_amount'] - li['match_amount'], 2
+                        )
+
+                # Penny adjustment: fix rounding drift so sum == cap exactly
+                capped_sum = round(sum(
+                    li['match_amount']
+                    for txn_items in all_txn_items for li in txn_items
+                ), 2)
+                penny_diff = round(self._match_limit - capped_sum, 2)
+                if penny_diff != 0:
+                    # Adjust the line item with the largest match
+                    all_lines = [
+                        li for txn_items in all_txn_items for li in txn_items
+                        if li['match_amount'] > 0
+                    ]
+                    if all_lines:
+                        target = max(all_lines, key=lambda li: li['match_amount'])
+                        target['match_amount'] = round(
+                            target['match_amount'] + penny_diff, 2
+                        )
+                        target['customer_charged'] = round(
+                            target['method_amount'] - target['match_amount'], 2
                         )
 
         # Save to DB

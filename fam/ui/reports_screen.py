@@ -127,7 +127,7 @@ class ReportsScreen(QWidget):
         self.vendor_table = QTableWidget()
         self.vendor_table.setColumnCount(6)
         self.vendor_table.setHorizontalHeaderLabels(
-            ["Vendor", "Customer(s)", "Date(s)", "Gross Sales", "FMNP Match", "Total Reimbursement"]
+            ["Vendor", "Customer(s)", "Date(s)", "Gross Sales", "FAM Match", "FMNP Match"]
         )
         configure_table(self.vendor_table)
 
@@ -386,6 +386,36 @@ class ReportsScreen(QWidget):
         where = "WHERE " + " AND ".join(clauses)
         return where, params
 
+    def _build_fmnp_where(self):
+        """Return (where_sql, params) for fmnp_entries queries, applying active filters."""
+        clauses = []
+        params = []
+
+        from_date, to_date = self.date_range.get_date_range()
+        if from_date and to_date:
+            clauses.append("md.date BETWEEN ? AND ?")
+            params.extend([from_date, to_date])
+
+        market_ids = self.market_combo.checked_data()
+        if market_ids:
+            sql, p = self._in_clause("md.market_id", market_ids)
+            clauses.append(sql)
+            params.extend(p)
+
+        vendor_ids = self.vendor_combo.checked_data()
+        if vendor_ids:
+            sql, p = self._in_clause("fe.vendor_id", vendor_ids)
+            clauses.append(sql)
+            params.extend(p)
+
+        # If payment type filter is active and FMNP not included, exclude all
+        pay_types = self.pay_type_combo.checked_data()
+        if pay_types and 'FMNP' not in pay_types:
+            return "WHERE 1=0", []
+
+        if clauses:
+            return "WHERE " + " AND ".join(clauses), params
+        return "", params
 
     # ------------------------------------------------------------------
     # Generate all three reports
@@ -393,6 +423,7 @@ class ReportsScreen(QWidget):
     def _generate_reports(self):
         conn = get_connection()
         where, params = self._build_where()
+        fmnp_where, fmnp_params = self._build_fmnp_where()
 
         # ── Vendor reimbursement ─────────────────────────────────
         vendor_rows = conn.execute(f"""
@@ -409,48 +440,92 @@ class ReportsScreen(QWidget):
             ORDER BY v.name
         """, params).fetchall()
 
-        # FMNP match amounts from payment_line_items (FMNP is now a payment method)
-        fmnp_rows = conn.execute(f"""
+        # FAM Match per vendor (all payment methods)
+        match_by_vendor_rows = conn.execute(f"""
             SELECT v.name as vendor,
-                   COALESCE(SUM(pl.match_amount), 0) as fmnp_match
+                   COALESCE(SUM(pl.match_amount), 0) as fam_match,
+                   COALESCE(SUM(CASE WHEN pl.method_name_snapshot = 'FMNP'
+                                     THEN pl.match_amount ELSE 0 END), 0) as fmnp_match
             FROM payment_line_items pl
             JOIN transactions t ON pl.transaction_id = t.id
             JOIN vendors v ON t.vendor_id = v.id
             JOIN market_days md ON t.market_day_id = md.id
             LEFT JOIN customer_orders co ON t.customer_order_id = co.id
             {where}
-            AND pl.method_name_snapshot = 'FMNP'
             GROUP BY v.id, v.name
         """, params).fetchall()
 
-        fmnp_by_vendor = {r['vendor']: r['fmnp_match'] for r in fmnp_rows}
+        match_by_vendor = {
+            r['vendor']: {'fam_match': r['fam_match'], 'fmnp_match': r['fmnp_match']}
+            for r in match_by_vendor_rows
+        }
+
+        # Build combined vendor dict from transactions
+        vendor_dict = {}
+        for r in vendor_rows:
+            vendor_match = match_by_vendor.get(r['vendor'], {})
+            vendor_dict[r['vendor']] = {
+                'vendor': r['vendor'],
+                'customers': r['customer_ids'] or '',
+                'dates': r['transaction_dates'] or '',
+                'gross': r['gross_sales'],
+                'fam_match': vendor_match.get('fam_match', 0),
+                'fmnp_match': vendor_match.get('fmnp_match', 0),
+            }
+
+        # Merge external FMNP entries (from fmnp_entries table)
+        fmnp_vendor_rows = conn.execute(f"""
+            SELECT v.name as vendor,
+                   COALESCE(SUM(fe.amount), 0) as fmnp_entry_total,
+                   GROUP_CONCAT(DISTINCT md.date) as fmnp_dates
+            FROM fmnp_entries fe
+            JOIN vendors v ON fe.vendor_id = v.id
+            JOIN market_days md ON fe.market_day_id = md.id
+            {fmnp_where}
+            GROUP BY v.id, v.name
+        """, fmnp_params).fetchall()
+
+        for r in fmnp_vendor_rows:
+            if r['vendor'] in vendor_dict:
+                vendor_dict[r['vendor']]['fmnp_match'] += r['fmnp_entry_total']
+                existing = set(vendor_dict[r['vendor']]['dates'].split(',')) \
+                    if vendor_dict[r['vendor']]['dates'] else set()
+                new_dates = set((r['fmnp_dates'] or '').split(','))
+                all_dates = (existing | new_dates) - {''}
+                vendor_dict[r['vendor']]['dates'] = ','.join(sorted(all_dates))
+            else:
+                vendor_dict[r['vendor']] = {
+                    'vendor': r['vendor'],
+                    'customers': '',
+                    'dates': r['fmnp_dates'] or '',
+                    'gross': 0,
+                    'fam_match': 0,
+                    'fmnp_match': r['fmnp_entry_total'],
+                }
+
+        vendor_list = sorted(vendor_dict.values(), key=lambda x: x['vendor'])
 
         self._vendor_data = []
         self.vendor_table.setSortingEnabled(False)
-        self.vendor_table.setRowCount(len(vendor_rows))
+        self.vendor_table.setRowCount(len(vendor_list))
         total_gross = 0
         total_fmnp = 0
-        for i, r in enumerate(vendor_rows):
-            gross = r['gross_sales']
-            fmnp_amt = fmnp_by_vendor.get(r['vendor'], 0)
-            total_reimburse = gross + fmnp_amt
-            total_gross += gross
-            total_fmnp += fmnp_amt
-            dates_str = r['transaction_dates'] or ''
-            customers_str = r['customer_ids'] or ''
+        for i, v in enumerate(vendor_list):
+            total_gross += v['gross']
+            total_fmnp += v['fmnp_match']
 
-            self.vendor_table.setItem(i, 0, make_item(r['vendor']))
-            self.vendor_table.setItem(i, 1, make_item(customers_str))
-            self.vendor_table.setItem(i, 2, make_item(dates_str))
-            self.vendor_table.setItem(i, 3, make_item(f"${gross:.2f}", gross))
-            self.vendor_table.setItem(i, 4, make_item(f"${fmnp_amt:.2f}", fmnp_amt))
-            self.vendor_table.setItem(i, 5, make_item(f"${total_reimburse:.2f}", total_reimburse))
+            self.vendor_table.setItem(i, 0, make_item(v['vendor']))
+            self.vendor_table.setItem(i, 1, make_item(v['customers']))
+            self.vendor_table.setItem(i, 2, make_item(v['dates']))
+            self.vendor_table.setItem(i, 3, make_item(f"${v['gross']:.2f}", v['gross']))
+            self.vendor_table.setItem(i, 4, make_item(f"${v['fam_match']:.2f}", v['fam_match']))
+            self.vendor_table.setItem(i, 5, make_item(f"${v['fmnp_match']:.2f}", v['fmnp_match']))
 
             self._vendor_data.append({
-                'Vendor': r['vendor'], 'Customer(s)': customers_str,
-                'Date(s)': dates_str,
-                'Gross Sales': gross, 'FMNP Match': fmnp_amt,
-                'Total Reimbursement': total_reimburse
+                'Vendor': v['vendor'], 'Customer(s)': v['customers'],
+                'Date(s)': v['dates'],
+                'Gross Sales': v['gross'], 'FAM Match': v['fam_match'],
+                'FMNP Match': v['fmnp_match']
             })
         self.vendor_table.setSortingEnabled(True)
 
@@ -498,6 +573,30 @@ class ReportsScreen(QWidget):
                 'Payment Method': r['method'],
                 'Total Allocated': allocated,
                 'Total FAM Match': fam_match
+            })
+
+        # Add external FMNP entries to FAM Match report
+        fmnp_ext_total = conn.execute(f"""
+            SELECT COALESCE(SUM(fe.amount), 0) as total
+            FROM fmnp_entries fe
+            JOIN market_days md ON fe.market_day_id = md.id
+            {fmnp_where}
+        """, fmnp_params).fetchone()['total']
+
+        if fmnp_ext_total > 0:
+            row_idx = self.match_table.rowCount()
+            self.match_table.setRowCount(row_idx + 1)
+            self.match_table.setItem(row_idx, 0, make_item("FMNP (External)"))
+            self.match_table.setItem(row_idx, 1, make_item(
+                f"${fmnp_ext_total:.2f}", fmnp_ext_total))
+            self.match_table.setItem(row_idx, 2, make_item(
+                f"${fmnp_ext_total:.2f}", fmnp_ext_total))
+            total_fam_match += fmnp_ext_total
+
+            self._match_data.append({
+                'Payment Method': 'FMNP (External)',
+                'Total Allocated': fmnp_ext_total,
+                'Total FAM Match': fmnp_ext_total
             })
         self.match_table.setSortingEnabled(True)
 
@@ -551,6 +650,48 @@ class ReportsScreen(QWidget):
             })
         self.ledger_table.setSortingEnabled(True)
 
+        # Append external FMNP entries to detailed ledger
+        fmnp_ledger_rows = conn.execute(f"""
+            SELECT fe.id, v.name as vendor, fe.amount, md.date,
+                   fe.check_count, fe.notes, fe.entered_by
+            FROM fmnp_entries fe
+            JOIN vendors v ON fe.vendor_id = v.id
+            JOIN market_days md ON fe.market_day_id = md.id
+            {fmnp_where}
+            ORDER BY md.date, fe.id
+        """, fmnp_params).fetchall()
+
+        if fmnp_ledger_rows:
+            self.ledger_table.setSortingEnabled(False)
+            offset = len(ledger_rows)
+            self.ledger_table.setRowCount(offset + len(fmnp_ledger_rows))
+            for i, r in enumerate(fmnp_ledger_rows):
+                row_idx = offset + i
+                check_info = (f"FMNP (External) - {r['check_count']} checks"
+                              if r['check_count'] else "FMNP (External)")
+                self.ledger_table.setItem(row_idx, 0, make_item(f"FMNP-{r['id']}"))
+                self.ledger_table.setItem(row_idx, 1, make_item(''))
+                self.ledger_table.setItem(row_idx, 2, make_item(r['vendor']))
+                self.ledger_table.setItem(row_idx, 3, make_item(
+                    f"${r['amount']:.2f}", r['amount']))
+                self.ledger_table.setItem(row_idx, 4, make_item("$0.00", 0))
+                self.ledger_table.setItem(row_idx, 5, make_item(
+                    f"${r['amount']:.2f}", r['amount']))
+                self.ledger_table.setItem(row_idx, 6, make_item("FMNP Entry"))
+                self.ledger_table.setItem(row_idx, 7, make_item(check_info))
+
+                self._ledger_data.append({
+                    'Transaction ID': f"FMNP-{r['id']}",
+                    'Customer': '',
+                    'Vendor': r['vendor'],
+                    'Receipt Total': r['amount'],
+                    'Customer Paid': 0,
+                    'FAM Match': r['amount'],
+                    'Status': 'FMNP Entry',
+                    'Payment Methods': check_info
+                })
+            self.ledger_table.setSortingEnabled(True)
+
         # ── Chart data: time-series for trending ──────────────────
         trend_rows = conn.execute(f"""
             SELECT md.date,
@@ -585,9 +726,24 @@ class ReportsScreen(QWidget):
             ORDER BY md.date
         """, params).fetchall()
 
+        fmnp_inapp_map = {r['date']: r['fmnp_match'] for r in fmnp_trend}
+
+        # External FMNP entries trend
+        fmnp_entry_trend = conn.execute(f"""
+            SELECT md.date,
+                   COALESCE(SUM(fe.amount), 0) AS fmnp_entry_total
+            FROM fmnp_entries fe
+            JOIN market_days md ON fe.market_day_id = md.id
+            {fmnp_where}
+            GROUP BY md.date
+            ORDER BY md.date
+        """, fmnp_params).fetchall()
+
+        fmnp_entry_map = {r['date']: r['fmnp_entry_total'] for r in fmnp_entry_trend}
+        all_fmnp_dates = sorted(set(fmnp_inapp_map.keys()) | set(fmnp_entry_map.keys()))
         self._chart_fmnp_data = [
-            {'date': r['date'], 'fmnp': r['fmnp_match']}
-            for r in fmnp_trend
+            {'date': d, 'fmnp': fmnp_inapp_map.get(d, 0) + fmnp_entry_map.get(d, 0)}
+            for d in all_fmnp_dates
         ]
 
         # Pie chart data — reuse already-fetched match_rows
@@ -595,6 +751,10 @@ class ReportsScreen(QWidget):
             {'method': r['method'], 'total': r['total_allocated']}
             for r in match_rows
         ]
+        if fmnp_ext_total > 0:
+            self._chart_pie_data.append({
+                'method': 'FMNP (External)', 'total': fmnp_ext_total
+            })
 
         self._update_charts()
 

@@ -5,7 +5,7 @@ import logging
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
-    QDoubleSpinBox, QSpinBox, QCheckBox, QMessageBox, QDialog,
+    QCheckBox, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox
 )
 from PySide6.QtCore import Qt
@@ -24,7 +24,10 @@ from fam.ui.styles import (
     WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, BACKGROUND, TEXT_COLOR,
     CARD_FRAME_STYLE
 )
-from fam.ui.helpers import make_field_label, make_item, make_action_btn, configure_table
+from fam.ui.helpers import (
+    make_field_label, make_item, make_action_btn, configure_table,
+    NoScrollDoubleSpinBox
+)
 
 
 # ── Edit Dialogs ─────────────────────────────────────────────
@@ -103,7 +106,7 @@ class EditPaymentMethodDialog(QDialog):
         self.name_input.setText(method['name'])
         layout.addRow("Method Name:", self.name_input)
 
-        self.match_spin = QDoubleSpinBox()
+        self.match_spin = NoScrollDoubleSpinBox()
         self.match_spin.setRange(0, 999)
         self.match_spin.setDecimals(1)
         self.match_spin.setSuffix("%")
@@ -136,7 +139,7 @@ class MatchLimitDialog(QDialog):
         info.setStyleSheet("font-size: 12px; padding-bottom: 8px;")
         layout.addRow(info)
 
-        self.limit_spin = QDoubleSpinBox()
+        self.limit_spin = NoScrollDoubleSpinBox()
         self.limit_spin.setRange(0.01, 99999.99)
         self.limit_spin.setDecimals(2)
         self.limit_spin.setPrefix("$")
@@ -318,7 +321,7 @@ class SettingsScreen(QWidget):
         self.pm_name_input.setPlaceholderText("e.g., SNAP")
         fl.addWidget(self.pm_name_input)
         fl.addWidget(make_field_label("Match %"))
-        self.pm_match_spin = QDoubleSpinBox()
+        self.pm_match_spin = NoScrollDoubleSpinBox()
         self.pm_match_spin.setRange(0, 999)
         self.pm_match_spin.setDecimals(1)
         self.pm_match_spin.setSuffix("%")

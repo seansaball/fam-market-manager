@@ -77,6 +77,22 @@ def calculate_payment_breakdown(receipt_total: float, payment_entries: list,
             li['match_amount'] = round(li['match_amount'] * cap_ratio, 2)
             li['customer_charged'] = round(li['method_amount'] - li['match_amount'], 2)
 
+        # Penny adjustment: fix rounding drift so sum of match == cap exactly
+        capped_sum = round(sum(li['match_amount'] for li in line_items), 2)
+        penny_diff = round(match_limit - capped_sum, 2)
+        if penny_diff != 0:
+            # Adjust the line item with the largest match (least % impact)
+            target = max(
+                (li for li in line_items if li['match_amount'] > 0),
+                key=lambda li: li['match_amount'],
+                default=None,
+            )
+            if target:
+                target['match_amount'] = round(target['match_amount'] + penny_diff, 2)
+                target['customer_charged'] = round(
+                    target['method_amount'] - target['match_amount'], 2
+                )
+
     # ── Totals ───────────────────────────────────────────────────
     allocated_total = round(sum(li['method_amount'] for li in line_items), 2)
     customer_total_paid = round(sum(li['customer_charged'] for li in line_items), 2)

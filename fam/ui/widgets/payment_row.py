@@ -1,11 +1,13 @@
 """Reusable payment method entry row widget."""
 
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QComboBox, QDoubleSpinBox, QLabel, QPushButton
+    QFrame, QHBoxLayout, QLabel, QPushButton
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
+from PySide6.QtGui import QStandardItemModel, QColor, QBrush
 from fam.models.payment_method import get_all_payment_methods
 from fam.ui.styles import LIGHT_GRAY, WHITE, ERROR_COLOR, SUBTITLE_GRAY
+from fam.ui.helpers import NoScrollDoubleSpinBox, NoScrollComboBox
 
 
 class PaymentRow(QFrame):
@@ -20,16 +22,16 @@ class PaymentRow(QFrame):
             PaymentRow {{
                 background-color: {WHITE};
                 border: 1px solid {LIGHT_GRAY};
-                border-radius: 10px;
+                border-radius: 8px;
             }}
         """)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 10, 16, 10)
-        layout.setSpacing(12)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(8)
 
         # Payment method combo
-        self.method_combo = QComboBox()
+        self.method_combo = NoScrollComboBox()
         self.method_combo.setMinimumWidth(160)
         self._load_methods()
         self.method_combo.currentIndexChanged.connect(self._on_changed)
@@ -43,7 +45,7 @@ class PaymentRow(QFrame):
 
         # Amount input
         layout.addWidget(QLabel("Amount: $"))
-        self.amount_spin = QDoubleSpinBox()
+        self.amount_spin = NoScrollDoubleSpinBox()
         self.amount_spin.setRange(0, 99999.99)
         self.amount_spin.setDecimals(2)
         self.amount_spin.setSingleStep(1.00)
@@ -89,6 +91,8 @@ class PaymentRow(QFrame):
 
     def _load_methods(self):
         self.method_combo.clear()
+        # Placeholder item — no userData so get_selected_method() returns None
+        self.method_combo.addItem("Select Payment Type...")
         methods = get_all_payment_methods(active_only=True)
         for m in methods:
             self.method_combo.addItem(
@@ -140,6 +144,42 @@ class PaymentRow(QFrame):
             'match_amount': match_amount,
             'customer_charged': customer_charged,
         }
+
+    def get_selected_method_id(self):
+        """Return the ID of the currently selected payment method, or None."""
+        method = self.get_selected_method()
+        return method['id'] if method else None
+
+    def has_method_selected(self):
+        """Return True if a real payment method is selected (not the placeholder)."""
+        return self.get_selected_method() is not None
+
+    def set_excluded_methods(self, excluded_ids):
+        """Gray out payment methods that are already selected in other rows.
+
+        The row's own current selection is never disabled.
+        The placeholder item (index 0) is always left enabled.
+        Uses both flags (prevents selection) and foreground color (visual gray).
+        """
+        model = self.method_combo.model()
+        if not isinstance(model, QStandardItemModel):
+            return
+        my_id = self.get_selected_method_id()
+        gray = QBrush(QColor(180, 180, 180))
+        normal = QBrush(QColor(0, 0, 0))
+        for i in range(model.rowCount()):
+            item = model.item(i)
+            m = self.method_combo.itemData(i)
+            if m is None:
+                # Placeholder — always enabled
+                continue
+            mid = m['id']
+            if mid in excluded_ids and mid != my_id:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                item.setForeground(gray)
+            else:
+                item.setFlags(item.flags() | Qt.ItemIsEnabled)
+                item.setForeground(normal)
 
     def set_data(self, payment_method_id, amount):
         """Set the row from existing data."""
