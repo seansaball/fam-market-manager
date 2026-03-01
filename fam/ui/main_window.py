@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QLabel, QButtonGroup, QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt, QRect
-from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush
+from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush, QIcon
 
 from fam.ui.styles import PRIMARY_GREEN
 
@@ -63,6 +63,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("FAM Market Day Transaction Manager")
+        icon_path = _resolve_asset("fam_icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         self.setMinimumSize(1200, 750)
         self.resize(1400, 850)
 

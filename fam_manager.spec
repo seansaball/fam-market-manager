@@ -16,6 +16,8 @@ a = Analysis(
         (os.path.join('fam', 'ui', '_fam_logo_white.png'), os.path.join('fam', 'ui')),
         # Include the tiled background pattern for the sidebar
         (os.path.join('fam', 'ui', '_fam_background.jpg'), os.path.join('fam', 'ui')),
+        # Include the app icon for the window title bar and taskbar
+        (os.path.join('fam', 'ui', 'fam_icon.ico'), os.path.join('fam', 'ui')),
     ],
     hiddenimports=[
         # matplotlib backends needed at runtime
@@ -67,6 +69,7 @@ exe = EXE(
     upx=True,
     console=False,  # No console window — windowed app
     disable_windowed_traceback=False,
+    icon='fam_icon.ico',  # .exe icon shown in File Explorer
 )
 
 coll = COLLECT(
