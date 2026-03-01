@@ -49,7 +49,8 @@ def get_customer_order(order_id: int) -> dict | None:
     """Get a customer order by ID with market info."""
     conn = get_connection()
     row = conn.execute("""
-        SELECT co.*, md.date as market_day_date, m.name as market_name,
+        SELECT co.*, md.date as market_day_date, md.market_id,
+               m.name as market_name,
                m.daily_match_limit, m.match_limit_active
         FROM customer_orders co
         JOIN market_days md ON co.market_day_id = md.id

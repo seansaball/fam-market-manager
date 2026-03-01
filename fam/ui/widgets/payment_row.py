@@ -5,8 +5,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QStandardItemModel, QColor, QBrush
-from fam.models.payment_method import get_all_payment_methods
-from fam.ui.styles import LIGHT_GRAY, WHITE, ERROR_COLOR, SUBTITLE_GRAY
+from fam.models.payment_method import get_all_payment_methods, get_payment_methods_for_market
+from fam.ui.styles import LIGHT_GRAY, WHITE, ERROR_COLOR, SUBTITLE_GRAY, HARVEST_GOLD, ACCENT_GREEN
 from fam.ui.helpers import NoScrollDoubleSpinBox, NoScrollComboBox
 
 
@@ -16,8 +16,9 @@ class PaymentRow(QFrame):
     changed = Signal()
     remove_requested = Signal(object)  # emits self
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, market_id=None):
         super().__init__(parent)
+        self._market_id = market_id
         self.setStyleSheet(f"""
             PaymentRow {{
                 background-color: {WHITE};
@@ -43,13 +44,35 @@ class PaymentRow(QFrame):
         self.match_label.setStyleSheet(f"font-weight: bold; color: {SUBTITLE_GRAY};")
         layout.addWidget(self.match_label)
 
-        # Amount input
-        layout.addWidget(QLabel("Amount: $"))
+        # Amount input — visually prominent so volunteers know to enter a value
+        amount_label = QLabel("Amount:")
+        amount_label.setStyleSheet(f"font-weight: bold; color: {HARVEST_GOLD};")
+        layout.addWidget(amount_label)
         self.amount_spin = NoScrollDoubleSpinBox()
         self.amount_spin.setRange(0, 99999.99)
         self.amount_spin.setDecimals(2)
         self.amount_spin.setSingleStep(1.00)
-        self.amount_spin.setMinimumWidth(110)
+        self.amount_spin.setPrefix("$ ")
+        self.amount_spin.setMinimumWidth(120)
+        self.amount_spin.setStyleSheet(f"""
+            QDoubleSpinBox {{
+                border: 2px solid {HARVEST_GOLD};
+                border-radius: 6px;
+                padding: 4px 8px;
+                background-color: {WHITE};
+                font-size: 14px;
+                font-weight: bold;
+                min-height: 22px;
+            }}
+            QDoubleSpinBox:focus {{
+                border-color: {ACCENT_GREEN};
+                background-color: #FEFFFE;
+            }}
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+                width: 0px;
+                border: none;
+            }}
+        """)
         self.amount_spin.valueChanged.connect(self._on_changed)
         layout.addWidget(self.amount_spin)
 
@@ -93,12 +116,23 @@ class PaymentRow(QFrame):
         self.method_combo.clear()
         # Placeholder item — no userData so get_selected_method() returns None
         self.method_combo.addItem("Select Payment Type...")
-        methods = get_all_payment_methods(active_only=True)
+        if self._market_id:
+            methods = get_payment_methods_for_market(self._market_id, active_only=True)
+            if not methods:
+                # Fallback: if no methods assigned to market, show all active
+                methods = get_all_payment_methods(active_only=True)
+        else:
+            methods = get_all_payment_methods(active_only=True)
         for m in methods:
             self.method_combo.addItem(
                 f"{m['name']} ({m['match_percent']:.0f}% match)",
                 userData=m
             )
+
+    def reload_methods(self, market_id=None):
+        """Reload the payment method dropdown, optionally filtered by market."""
+        self._market_id = market_id
+        self._load_methods()
 
     def _update_match_label(self):
         method = self.get_selected_method()

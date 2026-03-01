@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QDialogButtonBox
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QBrush
 
 from fam.database.connection import get_connection
 
@@ -18,16 +19,35 @@ from fam.models.vendor import (
     get_market_vendor_ids, assign_vendor_to_market, unassign_vendor_from_market
 )
 from fam.models.payment_method import (
-    get_all_payment_methods, create_payment_method, update_payment_method
+    get_all_payment_methods, create_payment_method, update_payment_method,
+    get_market_payment_method_ids, assign_payment_method_to_market,
+    unassign_payment_method_from_market
 )
 from fam.ui.styles import (
-    WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, BACKGROUND, TEXT_COLOR,
-    CARD_FRAME_STYLE
+    WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ACCENT_GREEN,
+    BACKGROUND, TEXT_COLOR
 )
 from fam.ui.helpers import (
     make_field_label, make_item, make_action_btn, configure_table,
     NoScrollDoubleSpinBox
 )
+
+
+_COMPACT_FRAME = f"""
+    QFrame {{
+        background-color: {WHITE};
+        border: 1px solid #E2E2E2;
+        border-radius: 8px;
+        padding: 6px 10px;
+    }}
+"""
+
+_FORM_ROW_HEIGHT = 36
+
+# Compact overrides so setFixedHeight can actually win over the global
+# stylesheet's generous padding / min-height values.
+_FORM_INPUT_STYLE = "min-height: 0px; padding: 6px 10px;"
+_FORM_BTN_STYLE = "min-height: 0px; padding: 6px 16px;"
 
 
 # ── Edit Dialogs ─────────────────────────────────────────────
@@ -183,6 +203,7 @@ class AssignVendorsDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {LIGHT_GRAY}; border-radius: 6px; }}")
         scroll_widget = QWidget()
+        scroll_widget.setStyleSheet(f"background-color: {WHITE};")
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setSpacing(6)
 
@@ -190,7 +211,21 @@ class AssignVendorsDialog(QDialog):
             cb = QCheckBox(f"{v['name']}" + ("" if v['is_active'] else " (inactive)"))
             cb.setChecked(v['id'] in assigned_ids)
             cb.setProperty("vendor_id", v['id'])
-            cb.setStyleSheet("font-size: 13px; padding: 4px;")
+            cb.setStyleSheet(f"""
+                QCheckBox {{
+                    font-size: 13px; padding: 4px; background-color: {WHITE};
+                }}
+                QCheckBox::indicator {{
+                    width: 16px; height: 16px;
+                    background-color: {WHITE};
+                    border: 2px solid #AAAAAA;
+                    border-radius: 3px;
+                }}
+                QCheckBox::indicator:checked {{
+                    background-color: {ACCENT_GREEN};
+                    border-color: {PRIMARY_GREEN};
+                }}
+            """)
             scroll_layout.addWidget(cb)
             self._checkboxes.append(cb)
 
@@ -212,6 +247,84 @@ class AssignVendorsDialog(QDialog):
         }
 
 
+class AssignPaymentMethodsDialog(QDialog):
+    """Dialog for assigning/unassigning payment methods to a market via checkboxes."""
+
+    def __init__(self, market, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Assign Payment Methods to: {market['name']}")
+        self.setMinimumWidth(420)
+        self.setMinimumHeight(400)
+        self.market = market
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {BACKGROUND}; }}
+            QLabel {{ background-color: transparent; color: {TEXT_COLOR}; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        info = QLabel(f"Check payment methods accepted at {market['name']}:")
+        info.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.addWidget(info)
+
+        # Build checkboxes for all payment methods
+        self._checkboxes = []
+        assigned_ids = get_market_payment_method_ids(market['id'])
+        all_methods = get_all_payment_methods()
+
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {LIGHT_GRAY}; border-radius: 6px; }}")
+        scroll_widget = QWidget()
+        scroll_widget.setStyleSheet(f"background-color: {WHITE};")
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(6)
+
+        for m in all_methods:
+            label = f"{m['name']} ({m['match_percent']:.0f}% match)"
+            if not m['is_active']:
+                label += " (inactive)"
+            cb = QCheckBox(label)
+            cb.setChecked(m['id'] in assigned_ids)
+            cb.setProperty("pm_id", m['id'])
+            cb.setStyleSheet(f"""
+                QCheckBox {{
+                    font-size: 13px; padding: 4px; background-color: {WHITE};
+                }}
+                QCheckBox::indicator {{
+                    width: 16px; height: 16px;
+                    background-color: {WHITE};
+                    border: 2px solid #AAAAAA;
+                    border-radius: 3px;
+                }}
+                QCheckBox::indicator:checked {{
+                    background-color: {ACCENT_GREEN};
+                    border-color: {PRIMARY_GREEN};
+                }}
+            """)
+            scroll_layout.addWidget(cb)
+            self._checkboxes.append(cb)
+
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_checked_payment_method_ids(self):
+        """Return set of payment method IDs that are checked."""
+        return {
+            cb.property("pm_id")
+            for cb in self._checkboxes
+            if cb.isChecked()
+        }
+
+
 # ── Main Settings Screen ─────────────────────────────────────
 
 class SettingsScreen(QWidget):
@@ -224,16 +337,12 @@ class SettingsScreen(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
 
         title = QLabel("Settings")
         title.setObjectName("screen_title")
         layout.addWidget(title)
-
-        subtitle = QLabel("Manage markets, vendors, and payment methods")
-        subtitle.setObjectName("subtitle")
-        layout.addWidget(subtitle)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_markets_tab(), "Markets")
@@ -250,18 +359,28 @@ class SettingsScreen(QWidget):
         layout = QVBoxLayout(tab)
 
         form = QFrame()
-        form.setStyleSheet(CARD_FRAME_STYLE)
+        form.setStyleSheet(_COMPACT_FRAME)
         fl = QHBoxLayout(form)
-        fl.addWidget(make_field_label("Market Name"))
+        lbl1 = make_field_label("Market Name")
+        lbl1.setFixedHeight(_FORM_ROW_HEIGHT)
+        fl.addWidget(lbl1)
         self.market_name_input = QLineEdit()
+        self.market_name_input.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.market_name_input.setStyleSheet(_FORM_INPUT_STYLE)
         self.market_name_input.setPlaceholderText("e.g., Downtown Saturday Market")
         fl.addWidget(self.market_name_input)
-        fl.addWidget(make_field_label("Address"))
+        lbl2 = make_field_label("Address")
+        lbl2.setFixedHeight(_FORM_ROW_HEIGHT)
+        fl.addWidget(lbl2)
         self.market_address_input = QLineEdit()
+        self.market_address_input.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.market_address_input.setStyleSheet(_FORM_INPUT_STYLE)
         self.market_address_input.setPlaceholderText("Optional address")
         fl.addWidget(self.market_address_input)
         add_btn = QPushButton("Add Market")
         add_btn.setObjectName("primary_btn")
+        add_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        add_btn.setStyleSheet(_FORM_BTN_STYLE)
         add_btn.clicked.connect(self._add_market)
         fl.addWidget(add_btn)
         layout.addWidget(form)
@@ -271,7 +390,7 @@ class SettingsScreen(QWidget):
         self.markets_table.setHorizontalHeaderLabels(
             ["ID", "Name", "Address", "Match Limit", "Active", "Actions"]
         )
-        configure_table(self.markets_table, actions_col=5, actions_width=380)
+        configure_table(self.markets_table, actions_col=5, actions_width=450)
         layout.addWidget(self.markets_table)
 
         return tab
@@ -283,18 +402,28 @@ class SettingsScreen(QWidget):
         layout = QVBoxLayout(tab)
 
         form = QFrame()
-        form.setStyleSheet(CARD_FRAME_STYLE)
+        form.setStyleSheet(_COMPACT_FRAME)
         fl = QHBoxLayout(form)
-        fl.addWidget(make_field_label("Vendor Name"))
+        lbl1 = make_field_label("Vendor Name")
+        lbl1.setFixedHeight(_FORM_ROW_HEIGHT)
+        fl.addWidget(lbl1)
         self.vendor_name_input = QLineEdit()
+        self.vendor_name_input.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.vendor_name_input.setStyleSheet(_FORM_INPUT_STYLE)
         self.vendor_name_input.setPlaceholderText("e.g., Green Valley Farm")
         fl.addWidget(self.vendor_name_input)
-        fl.addWidget(make_field_label("Contact Info"))
+        lbl2 = make_field_label("Contact Info")
+        lbl2.setFixedHeight(_FORM_ROW_HEIGHT)
+        fl.addWidget(lbl2)
         self.vendor_contact_input = QLineEdit()
+        self.vendor_contact_input.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.vendor_contact_input.setStyleSheet(_FORM_INPUT_STYLE)
         self.vendor_contact_input.setPlaceholderText("Optional")
         fl.addWidget(self.vendor_contact_input)
         add_btn = QPushButton("Add Vendor")
         add_btn.setObjectName("primary_btn")
+        add_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        add_btn.setStyleSheet(_FORM_BTN_STYLE)
         add_btn.clicked.connect(self._add_vendor)
         fl.addWidget(add_btn)
         layout.addWidget(form)
@@ -314,20 +443,30 @@ class SettingsScreen(QWidget):
         layout = QVBoxLayout(tab)
 
         form = QFrame()
-        form.setStyleSheet(CARD_FRAME_STYLE)
+        form.setStyleSheet(_COMPACT_FRAME)
         fl = QHBoxLayout(form)
-        fl.addWidget(make_field_label("Name"))
+        lbl1 = make_field_label("Name")
+        lbl1.setFixedHeight(_FORM_ROW_HEIGHT)
+        fl.addWidget(lbl1)
         self.pm_name_input = QLineEdit()
+        self.pm_name_input.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.pm_name_input.setStyleSheet(_FORM_INPUT_STYLE)
         self.pm_name_input.setPlaceholderText("e.g., SNAP")
         fl.addWidget(self.pm_name_input)
-        fl.addWidget(make_field_label("Match %"))
+        lbl2 = make_field_label("Match %")
+        lbl2.setFixedHeight(_FORM_ROW_HEIGHT)
+        fl.addWidget(lbl2)
         self.pm_match_spin = NoScrollDoubleSpinBox()
+        self.pm_match_spin.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.pm_match_spin.setStyleSheet(_FORM_INPUT_STYLE)
         self.pm_match_spin.setRange(0, 999)
         self.pm_match_spin.setDecimals(1)
         self.pm_match_spin.setSuffix("%")
         fl.addWidget(self.pm_match_spin)
         add_btn = QPushButton("Add Payment Method")
         add_btn.setObjectName("primary_btn")
+        add_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        add_btn.setStyleSheet(_FORM_BTN_STYLE)
         add_btn.clicked.connect(self._add_payment_method)
         fl.addWidget(add_btn)
         layout.addWidget(form)
@@ -386,21 +525,28 @@ class SettingsScreen(QWidget):
         conn = get_connection()
         rows = conn.execute("SELECT * FROM markets ORDER BY name").fetchall()
         self.markets_table.setSortingEnabled(False)
+        self.markets_table.setRowCount(0)
         self.markets_table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             self.markets_table.setItem(i, 0, make_item(str(r['id']), r['id']))
             self.markets_table.setItem(i, 1, make_item(r['name']))
             self.markets_table.setItem(i, 2, make_item(r['address'] or ''))
 
-            # Match Limit column
+            # Match Limit column — green when on, red when off
             limit_active = r['match_limit_active']
             limit_val = r['daily_match_limit'] or 100.00
             if limit_active:
-                self.markets_table.setItem(i, 3, make_item(f"${limit_val:.2f}", limit_val))
+                limit_item = make_item(f"${limit_val:.2f}", limit_val)
+                limit_item.setForeground(QBrush(QColor(ACCENT_GREEN)))
             else:
-                self.markets_table.setItem(i, 3, make_item("Off"))
+                limit_item = make_item("Off")
+                limit_item.setForeground(QBrush(QColor(ERROR_COLOR)))
+            self.markets_table.setItem(i, 3, limit_item)
 
-            self.markets_table.setItem(i, 4, make_item("Yes" if r['is_active'] else "No"))
+            # Active column — green Yes, red No
+            active_item = make_item("Yes" if r['is_active'] else "No")
+            active_item.setForeground(QBrush(QColor(ACCENT_GREEN if r['is_active'] else ERROR_COLOR)))
+            self.markets_table.setItem(i, 4, active_item)
 
             action_widget = QWidget()
             al = QHBoxLayout(action_widget)
@@ -416,6 +562,11 @@ class SettingsScreen(QWidget):
             assign_btn.setToolTip("Assign Vendors to this Market")
             assign_btn.clicked.connect(lambda checked, mid=mid: self._assign_vendors(mid))
             al.addWidget(assign_btn)
+
+            pay_btn = make_action_btn("Payments", 65)
+            pay_btn.setToolTip("Assign Payment Methods to this Market")
+            pay_btn.clicked.connect(lambda checked, mid=mid: self._assign_payment_methods(mid))
+            al.addWidget(pay_btn)
 
             limit_btn = make_action_btn("Match Limit", 75)
             limit_btn.setToolTip("Set daily FAM match limit per customer")
@@ -443,12 +594,16 @@ class SettingsScreen(QWidget):
     def _load_vendors(self):
         vendors = get_all_vendors()
         self.vendors_table.setSortingEnabled(False)
+        self.vendors_table.setRowCount(0)
         self.vendors_table.setRowCount(len(vendors))
         for i, v in enumerate(vendors):
             self.vendors_table.setItem(i, 0, make_item(str(v['id']), v['id']))
             self.vendors_table.setItem(i, 1, make_item(v['name']))
             self.vendors_table.setItem(i, 2, make_item(v.get('contact_info') or ''))
-            self.vendors_table.setItem(i, 3, make_item("Yes" if v['is_active'] else "No"))
+
+            active_item = make_item("Yes" if v['is_active'] else "No")
+            active_item.setForeground(QBrush(QColor(ACCENT_GREEN if v['is_active'] else ERROR_COLOR)))
+            self.vendors_table.setItem(i, 3, active_item)
 
             action_widget = QWidget()
             al = QHBoxLayout(action_widget)
@@ -474,12 +629,16 @@ class SettingsScreen(QWidget):
     def _load_payment_methods(self):
         methods = get_all_payment_methods()
         self.pm_table.setSortingEnabled(False)
+        self.pm_table.setRowCount(0)
         self.pm_table.setRowCount(len(methods))
         for i, m in enumerate(methods):
             self.pm_table.setItem(i, 0, make_item(str(m['id']), m['id']))
             self.pm_table.setItem(i, 1, make_item(m['name']))
             self.pm_table.setItem(i, 2, make_item(f"{m['match_percent']}%", m['match_percent']))
-            self.pm_table.setItem(i, 3, make_item("Yes" if m['is_active'] else "No"))
+
+            active_item = make_item("Yes" if m['is_active'] else "No")
+            active_item.setForeground(QBrush(QColor(ACCENT_GREEN if m['is_active'] else ERROR_COLOR)))
+            self.pm_table.setItem(i, 3, active_item)
 
             action_widget = QWidget()
             al = QHBoxLayout(action_widget)
@@ -622,6 +781,27 @@ class SettingsScreen(QWidget):
             # Remove newly unchecked
             for vid in old_ids - new_ids:
                 unassign_vendor_from_market(market_id, vid)
+
+    def _assign_payment_methods(self, market_id):
+        """Open payment method assignment dialog for a market."""
+        conn = get_connection()
+        row = conn.execute("SELECT * FROM markets WHERE id=?", (market_id,)).fetchone()
+        if not row:
+            return
+        market = dict(row)
+
+        dialog = AssignPaymentMethodsDialog(market, self)
+        if dialog.exec() == QDialog.Accepted:
+            new_ids = dialog.get_checked_payment_method_ids()
+            old_ids = get_market_payment_method_ids(market_id)
+
+            # Add newly checked
+            for pid in new_ids - old_ids:
+                assign_payment_method_to_market(market_id, pid)
+
+            # Remove newly unchecked
+            for pid in old_ids - new_ids:
+                unassign_payment_method_from_market(market_id, pid)
 
     # ── Vendor Actions ───────────────────────────────────────
 
@@ -767,6 +947,7 @@ class SettingsScreen(QWidget):
             conn.execute("DELETE FROM market_days")
             conn.execute("DELETE FROM payment_methods")
             conn.execute("DELETE FROM market_vendors")
+            conn.execute("DELETE FROM market_payment_methods")
             conn.execute("DELETE FROM vendors")
             conn.execute("DELETE FROM markets")
             conn.commit()

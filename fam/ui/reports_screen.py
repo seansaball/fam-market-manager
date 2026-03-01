@@ -29,7 +29,7 @@ from fam.utils.export import (
 from fam.ui.styles import (
     WHITE, LIGHT_GRAY, PRIMARY_GREEN, HARVEST_GOLD, SUBTITLE_GRAY,
     ACCENT_GREEN, BACKGROUND, TEXT_COLOR, MEDIUM_GRAY, WARNING_COLOR, ERROR_COLOR,
-    CARD_FRAME_STYLE, FIELD_LABEL_BG
+    FIELD_LABEL_BG
 )
 from fam.ui.widgets.summary_card import SummaryCard, SummaryRow
 from fam.ui.helpers import make_field_label, make_item, configure_table, CheckableComboBox, DateRangeWidget
@@ -54,8 +54,8 @@ class ReportsScreen(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
 
         title = QLabel("Reports & Exports")
         title.setObjectName("screen_title")
@@ -63,7 +63,14 @@ class ReportsScreen(QWidget):
 
         # ── Filter bar — 4 checkable dropdowns ───────────────────
         filter_frame = QFrame()
-        filter_frame.setStyleSheet(CARD_FRAME_STYLE)
+        filter_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {WHITE};
+                border: 1px solid #E2E2E2;
+                border-radius: 8px;
+                padding: 6px 10px;
+            }}
+        """)
         filter_layout = QHBoxLayout(filter_frame)
         filter_layout.setSpacing(6)
 

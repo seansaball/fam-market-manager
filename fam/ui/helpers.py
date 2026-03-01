@@ -3,9 +3,10 @@
 from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QLabel, QPushButton, QAbstractItemView,
     QComboBox, QWidget, QHBoxLayout, QVBoxLayout, QLineEdit, QDateEdit,
-    QDialog, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QFormLayout
+    QDialog, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QFormLayout,
+    QStyledItemDelegate
 )
-from PySide6.QtGui import QStandardItemModel, QStandardItem
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QPalette
 from PySide6.QtCore import Qt, Signal, QEvent, QDate
 from fam.ui.styles import (
     FIELD_LABEL_BG, ERROR_COLOR, PRIMARY_GREEN, TEXT_COLOR, LIGHT_GRAY, WHITE
@@ -13,6 +14,22 @@ from fam.ui.styles import (
 
 # Style override for small action buttons inside table cells
 ACTION_BTN_STYLE = "min-height: 0px; max-height: 28px; padding: 4px 6px; font-size: 11px; border-radius: 4px;"
+
+
+class ColorPreservingDelegate(QStyledItemDelegate):
+    """Item delegate that keeps custom foreground colors when rows are selected.
+
+    Without this, QTableWidget's selection-color stylesheet property overrides
+    any per-item foreground set via setForeground(), turning green/red status
+    text back to the default text color when the row is clicked or highlighted.
+    """
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        fg = index.data(Qt.ForegroundRole)
+        if fg is not None:
+            color = fg.color() if hasattr(fg, 'color') else fg
+            option.palette.setColor(QPalette.HighlightedText, color)
 
 
 # ── Scroll-safe input widgets ────────────────────────────────────
@@ -545,6 +562,23 @@ def make_field_label(text):
     return lbl
 
 
+def make_section_label(text):
+    """Create a styled section header label for visual hierarchy.
+
+    Used above tables, grouped controls, and content sections to provide
+    a clear, consistent heading that volunteers can scan quickly.
+    """
+    from fam.ui.styles import SUBTITLE_GRAY
+    lbl = QLabel(text)
+    lbl.setStyleSheet(f"""
+        font-size: 12px;
+        font-weight: bold;
+        color: {SUBTITLE_GRAY};
+        padding: 2px 0px;
+    """)
+    return lbl
+
+
 def make_action_btn(text, width=50, danger=False):
     """Create a compact action button for use inside table cells.
 
@@ -580,11 +614,12 @@ def configure_table(table, actions_col=None, actions_width=140):
     table.setSelectionBehavior(QAbstractItemView.SelectRows)
     table.setEditTriggers(QAbstractItemView.NoEditTriggers)
     table.setAlternatingRowColors(True)
+    table.setItemDelegate(ColorPreservingDelegate(table))
 
     header = table.horizontalHeader()
     header.setStretchLastSection(False)
     header.setSortIndicatorShown(True)
-    header.setFixedHeight(44)
+    header.setFixedHeight(36)
 
     # Explicit header style — overrides any inherited QFrame padding/border
     # that cascades from parent frame stylesheets (QHeaderView is a QFrame
@@ -599,7 +634,8 @@ def configure_table(table, actions_col=None, actions_width=140):
             background-color: #F5F5F5;
             color: {TEXT_COLOR};
             font-weight: bold;
-            padding: 8px 12px;
+            font-size: 12px;
+            padding: 6px 10px;
             border: none;
             border-bottom: 2px solid {LIGHT_GRAY};
             border-right: 1px solid #ECECEC;

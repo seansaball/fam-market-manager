@@ -22,8 +22,8 @@ from fam.ui.styles import (
     WARNING_COLOR, WARNING_BG
 )
 from fam.ui.helpers import (
-    make_field_label, make_item, make_action_btn, configure_table,
-    NoScrollDoubleSpinBox, NoScrollComboBox
+    make_field_label, make_section_label, make_item, make_action_btn,
+    configure_table, NoScrollDoubleSpinBox, NoScrollComboBox
 )
 
 
@@ -155,15 +155,38 @@ class ReceiptIntakeScreen(QWidget):
         self.vendor_combo.setMinimumWidth(250)
         form_grid.addWidget(self.vendor_combo, 0, 1)
 
-        form_grid.addWidget(make_field_label("Receipt Total"), 0, 2)
+        receipt_total_label = QLabel("Receipt Total:")
+        receipt_total_label.setStyleSheet(
+            f"font-weight: bold; color: {HARVEST_GOLD};"
+        )
+        form_grid.addWidget(receipt_total_label, 0, 2)
         self.receipt_total_spin = NoScrollDoubleSpinBox()
         self.receipt_total_spin.setRange(0.00, 99999.99)
         self.receipt_total_spin.setDecimals(2)
         self.receipt_total_spin.setSingleStep(1.00)
-        self.receipt_total_spin.setPrefix("$")
+        self.receipt_total_spin.setPrefix("$ ")
         self.receipt_total_spin.setMinimumWidth(140)
         self.receipt_total_spin.setValue(0.00)
-        self.receipt_total_spin.setSpecialValueText("$0.00")
+        self.receipt_total_spin.setSpecialValueText("$ 0.00")
+        self.receipt_total_spin.setStyleSheet(f"""
+            QDoubleSpinBox {{
+                border: 2px solid {HARVEST_GOLD};
+                border-radius: 6px;
+                padding: 4px 8px;
+                background-color: {WHITE};
+                font-size: 14px;
+                font-weight: bold;
+                min-height: 22px;
+            }}
+            QDoubleSpinBox:focus {{
+                border-color: {ACCENT_GREEN};
+                background-color: #FEFFFE;
+            }}
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+                width: 0px;
+                border: none;
+            }}
+        """)
         # Select all text on focus so user can just type a new value
         self.receipt_total_spin.lineEdit().installEventFilter(self)
         form_grid.addWidget(self.receipt_total_spin, 0, 3)
@@ -271,10 +294,7 @@ class ReceiptIntakeScreen(QWidget):
         pending_inner.setContentsMargins(0, 0, 0, 0)
         pending_inner.setSpacing(4)
 
-        self.pending_header = QLabel("Pending Orders")
-        self.pending_header.setStyleSheet(
-            f"font-weight: bold; font-size: 13px; color: {HARVEST_GOLD};"
-        )
+        self.pending_header = make_section_label("Pending Orders")
         pending_inner.addWidget(self.pending_header)
 
         self.pending_table = QTableWidget()

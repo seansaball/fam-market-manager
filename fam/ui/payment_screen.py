@@ -26,9 +26,9 @@ from fam.ui.widgets.summary_card import SummaryRow
 from fam.ui.styles import (
     PRIMARY_GREEN, WHITE, LIGHT_GRAY, HARVEST_GOLD, ERROR_COLOR, ACCENT_GREEN,
     BACKGROUND, FIELD_LABEL_BG, MEDIUM_GRAY, SUBTITLE_GRAY, SUCCESS_BG,
-    ERROR_BG, WARNING_BG, WARNING_COLOR, CARD_FRAME_STYLE
+    ERROR_BG, WARNING_BG, WARNING_COLOR
 )
-from fam.ui.helpers import make_field_label, make_item, configure_table
+from fam.ui.helpers import make_field_label, make_section_label, make_item, configure_table
 
 
 class PaymentScreen(QWidget):
@@ -45,6 +45,7 @@ class PaymentScreen(QWidget):
         self._match_limit = None  # None = no cap, float = remaining cap value
         self._daily_limit = None  # Full daily limit from market settings
         self._prior_match = 0.0   # FAM match already used by this customer today
+        self._market_id = None    # Market ID for filtering payment methods
         self._payment_rows = []
         self._build_ui()
 
@@ -113,8 +114,7 @@ class PaymentScreen(QWidget):
         layout.addWidget(self.match_cap_warning)
 
         # ── Vendor summary table ────────────────────────────────────
-        self.vendor_lbl = QLabel("Vendor Breakdown:")
-        self.vendor_lbl.setStyleSheet("font-weight: bold;")
+        self.vendor_lbl = make_section_label("Vendor Breakdown")
         self.vendor_lbl.setVisible(False)
         layout.addWidget(self.vendor_lbl)
 
@@ -134,8 +134,7 @@ class PaymentScreen(QWidget):
 
         # ── Payment rows area ───────────────────────────────────────
         payment_header = QHBoxLayout()
-        pay_lbl = QLabel("Payment Methods:")
-        pay_lbl.setStyleSheet("font-weight: bold;")
+        pay_lbl = make_section_label("Payment Methods")
         payment_header.addWidget(pay_lbl)
         self.add_method_btn = QPushButton("+ Add Payment Method")
         self.add_method_btn.setObjectName("secondary_btn")
@@ -270,6 +269,8 @@ class PaymentScreen(QWidget):
             self.customer_id_label.setText("Order not found")
             return
 
+        self._market_id = order.get('market_id')
+
         # Determine match limit from market settings, accounting for prior usage
         if order.get('match_limit_active'):
             self._daily_limit = order.get('daily_match_limit') or 100.00
@@ -344,6 +345,7 @@ class PaymentScreen(QWidget):
             self.load_customer_order(txn['customer_order_id'])
         else:
             self._current_order_id = None
+            self._market_id = txn.get('market_id')
             self._match_limit = None
             self._daily_limit = None
             self._prior_match = 0.0
@@ -407,7 +409,7 @@ class PaymentScreen(QWidget):
     # Payment rows
     # ------------------------------------------------------------------
     def _add_payment_row(self):
-        row = PaymentRow()
+        row = PaymentRow(market_id=self._market_id)
         row.changed.connect(self._on_row_changed)
         row.remove_requested.connect(self._remove_payment_row)
         self._payment_rows.append(row)
@@ -432,8 +434,14 @@ class PaymentScreen(QWidget):
     def _refresh_method_choices(self):
         """Disable already-selected methods in other rows, and hide the
         '+ Add' button when all methods are in use."""
-        from fam.models.payment_method import get_all_payment_methods
-        total_methods = len(get_all_payment_methods(active_only=True))
+        from fam.models.payment_method import get_all_payment_methods, get_payment_methods_for_market
+        if self._market_id:
+            methods = get_payment_methods_for_market(self._market_id, active_only=True)
+            if not methods:
+                methods = get_all_payment_methods(active_only=True)
+        else:
+            methods = get_all_payment_methods(active_only=True)
+        total_methods = len(methods)
 
         selected_ids = set()
         for row in self._payment_rows:

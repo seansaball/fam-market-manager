@@ -16,10 +16,10 @@ from fam.models.fmnp import (
     get_fmnp_entry_by_id
 )
 from fam.models.audit import log_action
-from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG, CARD_FRAME_STYLE
+from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG, SUBTITLE_GRAY
 from fam.ui.helpers import (
-    make_field_label, make_item, make_action_btn, configure_table,
-    NoScrollDoubleSpinBox, NoScrollSpinBox, NoScrollComboBox
+    make_field_label, make_item, make_section_label, make_action_btn,
+    configure_table, NoScrollDoubleSpinBox, NoScrollSpinBox, NoScrollComboBox
 )
 
 logger = logging.getLogger('fam.ui.fmnp_screen')
@@ -36,20 +36,23 @@ class FMNPScreen(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
 
-        title = QLabel("FMNP Entry")
+        title = QLabel("FMNP Check Tracking")
         title.setObjectName("screen_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("Log FMNP checks collected by vendors for FAM match reimbursement — tracks external matching handled outside the app")
-        subtitle.setObjectName("subtitle")
-        layout.addWidget(subtitle)
-
         # Form
         form_frame = QFrame()
-        form_frame.setStyleSheet(CARD_FRAME_STYLE)
+        form_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {WHITE};
+                border: 1px solid #E2E2E2;
+                border-radius: 8px;
+                padding: 6px 10px;
+            }}
+        """)
         form_layout = QVBoxLayout(form_frame)
         form_layout.setSpacing(10)
 
@@ -128,16 +131,14 @@ class FMNPScreen(QWidget):
         layout.addWidget(form_frame)
 
         # Entries table
-        layout.addWidget(QLabel("FMNP Entries for Selected Market:"))
+        layout.addWidget(make_section_label("FMNP Entries for Selected Market"))
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["ID", "Vendor", "Amount", "Check Count", "Entered By", "Notes", "Actions"]
+            ["ID", "Vendor", "Amount", "Checks", "Entered By", "Notes", "Actions"]
         )
         configure_table(self.table, actions_col=6, actions_width=120)
         layout.addWidget(self.table)
-
-        layout.addStretch()
 
     def refresh(self):
         self._load_market_days()

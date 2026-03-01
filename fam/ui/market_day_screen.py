@@ -15,10 +15,10 @@ from fam.models.market_day import (
     get_open_market_day, find_market_day
 )
 from fam.models.transaction import get_draft_transactions
-from fam.ui.styles import PRIMARY_GREEN, HARVEST_GOLD, WHITE, LIGHT_GRAY, FIELD_LABEL_BG, CARD_FRAME_STYLE
+from fam.ui.styles import PRIMARY_GREEN, HARVEST_GOLD, WHITE, LIGHT_GRAY, FIELD_LABEL_BG, SUBTITLE_GRAY
 from fam.ui.helpers import (
-    make_field_label as _make_field_label_fn, make_item, configure_table,
-    NoScrollComboBox
+    make_field_label as _make_field_label_fn, make_item, make_section_label,
+    configure_table, NoScrollComboBox
 )
 
 
@@ -38,21 +38,24 @@ class MarketDayScreen(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(6)
 
         # Title
         title = QLabel("Market Day Setup")
         title.setObjectName("screen_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("Open or manage a market day to start recording transactions")
-        subtitle.setObjectName("subtitle")
-        layout.addWidget(subtitle)
-
         # Create / select area
         create_frame = QFrame()
-        create_frame.setStyleSheet(CARD_FRAME_STYLE)
+        create_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {WHITE};
+                border: 1px solid #E2E2E2;
+                border-radius: 8px;
+                padding: 6px 10px;
+            }}
+        """)
         create_layout = QVBoxLayout(create_frame)
 
         row1 = QHBoxLayout()
@@ -67,10 +70,9 @@ class MarketDayScreen(QWidget):
         row_vol = QHBoxLayout()
         row_vol.addWidget(self._make_field_label("Volunteer Name"))
         self.volunteer_input = QLineEdit()
-        self.volunteer_input.setPlaceholderText("Enter your name")
+        self.volunteer_input.setPlaceholderText("Enter your name (required)")
         self.volunteer_input.setMinimumWidth(200)
         self.volunteer_input.setMaximumWidth(400)
-        self.volunteer_input.setText("Volunteer")
         row_vol.addWidget(self.volunteer_input)
         row_vol.addStretch()
         create_layout.addLayout(row_vol)
@@ -87,7 +89,14 @@ class MarketDayScreen(QWidget):
 
         # Current market day status
         self.status_frame = QFrame()
-        self.status_frame.setStyleSheet(CARD_FRAME_STYLE)
+        self.status_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {WHITE};
+                border: 1px solid #E2E2E2;
+                border-radius: 8px;
+                padding: 6px 10px;
+            }}
+        """)
         status_layout = QVBoxLayout(self.status_frame)
 
         self.status_header = QLabel("No Active Market Day")
@@ -115,13 +124,13 @@ class MarketDayScreen(QWidget):
         layout.addWidget(self.status_frame)
 
         # Existing market days list
-        layout.addWidget(QLabel("Recent Market Days:"))
+        layout.addWidget(make_section_label("Recent Market Days"))
         self.market_day_combo = NoScrollComboBox()
         self.market_day_combo.currentIndexChanged.connect(self._on_market_day_selected)
         layout.addWidget(self.market_day_combo)
 
         # Transactions table
-        layout.addWidget(QLabel("Transactions for Selected Market Day:"))
+        layout.addWidget(make_section_label("Transactions for Selected Market Day"))
         self.txn_table = QTableWidget()
         self.txn_table.setColumnCount(5)
         self.txn_table.setHorizontalHeaderLabels(
@@ -129,8 +138,6 @@ class MarketDayScreen(QWidget):
         )
         configure_table(self.txn_table)
         layout.addWidget(self.txn_table)
-
-        layout.addStretch()
 
     def refresh(self):
         """Reload all data."""
@@ -206,6 +213,7 @@ class MarketDayScreen(QWidget):
             self.txn_table.setItem(i, 2, make_item(f"${t['receipt_total']:.2f}", t['receipt_total']))
             self.txn_table.setItem(i, 3, make_item(t['status']))
             self.txn_table.setItem(i, 4, make_item(str(t.get('created_at', ''))))
+            self.txn_table.setRowHeight(i, 30)
         self.txn_table.setSortingEnabled(True)
 
     def _get_volunteer_name(self):

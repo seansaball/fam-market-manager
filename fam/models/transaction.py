@@ -60,7 +60,7 @@ def get_transaction_by_id(txn_id):
     conn = get_connection()
     row = conn.execute("""
         SELECT t.*, v.name as vendor_name, md.date as market_day_date,
-               m.name as market_name
+               md.market_id, m.name as market_name
         FROM transactions t
         JOIN vendors v ON t.vendor_id = v.id
         JOIN market_days md ON t.market_day_id = md.id

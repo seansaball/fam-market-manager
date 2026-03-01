@@ -29,13 +29,13 @@ from fam.ui.helpers import (
 logger = logging.getLogger('fam.ui.admin_screen')
 
 
-REASON_CODES = [
-    "data_entry_error",
-    "vendor_correction",
-    "admin_adjustment",
-    "customer_dispute",
-    "other"
-]
+REASON_CODES = {
+    "Data Entry Error": "data_entry_error",
+    "Vendor Correction": "vendor_correction",
+    "Admin Adjustment": "admin_adjustment",
+    "Customer Dispute": "customer_dispute",
+    "Other": "other",
+}
 
 
 class AdjustmentDialog(QDialog):
@@ -76,8 +76,8 @@ class AdjustmentDialog(QDialog):
         layout.addRow("Vendor:", self.vendor_combo)
 
         self.reason_combo = NoScrollComboBox()
-        for rc in REASON_CODES:
-            self.reason_combo.addItem(rc)
+        for display_label, code in REASON_CODES.items():
+            self.reason_combo.addItem(display_label, userData=code)
         layout.addRow("Reason:", self.reason_combo)
 
         self.notes_input = QTextEdit()
@@ -246,7 +246,7 @@ class AdminScreen(QWidget):
 
         if dialog.exec() == QDialog.Accepted:
             adjusted_by = dialog.adjusted_by_input.text().strip() or "Admin"
-            reason = dialog.reason_combo.currentText()
+            reason = dialog.reason_combo.currentData() or dialog.reason_combo.currentText()
             notes = dialog.notes_input.toPlainText().strip()
             new_total = dialog.receipt_spin.value()
             new_vendor = dialog.vendor_combo.currentData()

@@ -43,5 +43,18 @@ def seed_if_empty():
         payment_methods
     )
 
+    # Assign all payment methods to all markets by default
+    cursor.execute("SELECT id FROM markets")
+    market_ids = [r[0] for r in cursor.fetchall()]
+    cursor.execute("SELECT id FROM payment_methods")
+    pm_ids = [r[0] for r in cursor.fetchall()]
+    for mid in market_ids:
+        for pid in pm_ids:
+            cursor.execute(
+                "INSERT OR IGNORE INTO market_payment_methods"
+                " (market_id, payment_method_id) VALUES (?, ?)",
+                (mid, pid)
+            )
+
     conn.commit()
     return True

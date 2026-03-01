@@ -6,7 +6,7 @@ from .connection import get_connection
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
@@ -123,6 +123,15 @@ CREATE TABLE IF NOT EXISTS market_vendors (
     FOREIGN KEY (market_id) REFERENCES markets(id),
     FOREIGN KEY (vendor_id) REFERENCES vendors(id),
     UNIQUE(market_id, vendor_id)
+);
+
+CREATE TABLE IF NOT EXISTS market_payment_methods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id INTEGER NOT NULL,
+    payment_method_id INTEGER NOT NULL,
+    FOREIGN KEY (market_id) REFERENCES markets(id),
+    FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id),
+    UNIQUE(market_id, payment_method_id)
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -345,6 +354,32 @@ def _migrate_v7_to_v8(conn):
     logger.info("Migration v7->v8 complete: FMNP payment method added")
 
 
+def _migrate_v8_to_v9(conn):
+    """Add market_payment_methods junction table and auto-assign all methods to all markets."""
+    logger.info("Running migration v8 to v9: market_payment_methods table")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS market_payment_methods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id INTEGER NOT NULL,
+            payment_method_id INTEGER NOT NULL,
+            FOREIGN KEY (market_id) REFERENCES markets(id),
+            FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id),
+            UNIQUE(market_id, payment_method_id)
+        )
+    """)
+    # Auto-assign all active payment methods to all active markets
+    # so existing users see no behavior change
+    conn.execute("""
+        INSERT OR IGNORE INTO market_payment_methods (market_id, payment_method_id)
+        SELECT m.id, pm.id
+        FROM markets m
+        CROSS JOIN payment_methods pm
+        WHERE m.is_active = 1 AND pm.is_active = 1
+    """)
+    conn.commit()
+    logger.info("Migration v8->v9 complete: market_payment_methods table created")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -403,6 +438,10 @@ def initialize_database():
     if current_version < 8:
         _migrate_v7_to_v8(conn)
         current_version = 8
+
+    if current_version < 9:
+        _migrate_v8_to_v9(conn)
+        current_version = 9
 
     # Record the final version
     conn.execute(
