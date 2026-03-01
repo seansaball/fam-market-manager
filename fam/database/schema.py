@@ -1,6 +1,7 @@
 """Database schema creation and migrations."""
 
 import logging
+import sqlite3
 
 from .connection import get_connection
 
@@ -158,7 +159,7 @@ def _migrate_v1_to_v2(conn):
     # Add customer_order_id to transactions (if not already present)
     try:
         conn.execute("ALTER TABLE transactions ADD COLUMN customer_order_id INTEGER REFERENCES customer_orders(id)")
-    except Exception:
+    except sqlite3.OperationalError:
         pass  # Column already exists
 
     conn.commit()
@@ -264,13 +265,13 @@ def _migrate_v4_to_v5(conn):
         conn.execute(
             "ALTER TABLE markets ADD COLUMN daily_match_limit REAL DEFAULT 100.00"
         )
-    except Exception:
+    except sqlite3.OperationalError:
         pass  # Column already exists
     try:
         conn.execute(
             "ALTER TABLE markets ADD COLUMN match_limit_active BOOLEAN DEFAULT 1"
         )
-    except Exception:
+    except sqlite3.OperationalError:
         pass  # Column already exists
     conn.commit()
     logger.info("Migration v4->v5 complete: daily_match_limit + match_limit_active added")
@@ -333,7 +334,7 @@ def _migrate_v6_to_v7(conn):
     logger.info("Running migration v6 to v7: add zip_code to customer_orders")
     try:
         conn.execute("ALTER TABLE customer_orders ADD COLUMN zip_code TEXT")
-    except Exception as e:
+    except sqlite3.OperationalError as e:
         logger.warning("zip_code column may already exist: %s", e)
     conn.commit()
     logger.info("Migration v6->v7 complete: zip_code column added")
@@ -347,7 +348,7 @@ def _migrate_v7_to_v8(conn):
             "INSERT INTO payment_methods (name, match_percent, is_active, sort_order)"
             " VALUES ('FMNP', 100.0, 1, 6)"
         )
-    except Exception as e:
+    except sqlite3.IntegrityError as e:
         # FMNP may already exist if user added it manually
         logger.warning("FMNP payment method may already exist: %s", e)
     conn.commit()
@@ -443,11 +444,16 @@ def initialize_database():
         _migrate_v8_to_v9(conn)
         current_version = 9
 
-    # Record the final version
-    conn.execute(
-        "INSERT INTO schema_version (version) VALUES (?)",
+    # Record the final version (avoid duplicate if already at this version)
+    existing = conn.execute(
+        "SELECT version FROM schema_version WHERE version = ?",
         (CURRENT_SCHEMA_VERSION,)
-    )
+    ).fetchone()
+    if not existing:
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?)",
+            (CURRENT_SCHEMA_VERSION,)
+        )
     conn.commit()
     logger.info("Schema at version %s", CURRENT_SCHEMA_VERSION)
     return True

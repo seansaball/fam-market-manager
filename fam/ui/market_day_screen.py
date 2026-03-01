@@ -15,6 +15,7 @@ from fam.models.market_day import (
     get_open_market_day, find_market_day
 )
 from fam.models.transaction import get_draft_transactions
+from fam.utils.export import write_ledger_backup
 from fam.ui.styles import PRIMARY_GREEN, HARVEST_GOLD, WHITE, LIGHT_GRAY, FIELD_LABEL_BG, SUBTITLE_GRAY
 from fam.ui.helpers import (
     make_field_label as _make_field_label_fn, make_item, make_section_label,
@@ -218,12 +219,19 @@ class MarketDayScreen(QWidget):
 
     def _get_volunteer_name(self):
         name = self.volunteer_input.text().strip()
-        return name if name else "Volunteer"
+        return name if name else None
 
     def _open_market_day(self):
         market_id = self.market_combo.currentData()
         if not market_id:
             QMessageBox.warning(self, "Error", "Please select a market location.")
+            return
+
+        volunteer = self._get_volunteer_name()
+        if not volunteer:
+            QMessageBox.warning(self, "Name Required",
+                                "Please enter your name before opening a market day.")
+            self.volunteer_input.setFocus()
             return
 
         # Check for existing open market day
@@ -238,7 +246,6 @@ class MarketDayScreen(QWidget):
             return
 
         today = date.today().isoformat()
-        volunteer = self._get_volunteer_name()
 
         # Check if a market day already exists for this market+date (prevents duplicates)
         existing = find_market_day(market_id, today)
@@ -257,6 +264,11 @@ class MarketDayScreen(QWidget):
             return
 
         volunteer = self._get_volunteer_name()
+        if not volunteer:
+            QMessageBox.warning(self, "Name Required",
+                                "Please enter your name before closing the market day.")
+            self.volunteer_input.setFocus()
+            return
 
         # Warn about draft transactions
         drafts = get_draft_transactions(open_md['id'])
@@ -271,6 +283,7 @@ class MarketDayScreen(QWidget):
                 return
 
         close_market_day(open_md['id'], closed_by=volunteer)
+        write_ledger_backup()
         self.refresh()
         self.market_day_changed.emit()
 

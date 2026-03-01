@@ -30,13 +30,28 @@ def run():
     log_path = setup_logging()
     logger.info("FAM Manager starting up — db=%s  log=%s", db_path, log_path)
 
-    # Initialize database
-    initialize_database()
-    seed_if_empty()
-    logger.info("Database initialized")
+    # Initialize database — show user-friendly error if this fails
+    try:
+        initialize_database()
+        seed_if_empty()
+        logger.info("Database initialized")
+    except Exception as e:
+        logger.exception("Failed to initialize database")
+        # Need a QApplication to show a dialog
+        _app = QApplication.instance() or QApplication(sys.argv)
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            None, "Database Error",
+            f"FAM Market Manager could not open the database.\n\n"
+            f"Path: {db_path}\n"
+            f"Error: {e}\n\n"
+            f"Check that the folder is writable and the file is not corrupted.\n"
+            f"Log file: {log_path}"
+        )
+        sys.exit(1)
 
     # Create Qt application
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("FAM Market Day Transaction Manager")
     app.setOrganizationName("Food Assistance Match")
 

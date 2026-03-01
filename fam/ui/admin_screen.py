@@ -17,6 +17,7 @@ from fam.models.transaction import (
     void_transaction, get_payment_line_items, save_payment_line_items
 )
 from fam.models.audit import log_action, get_audit_log
+from fam.utils.export import write_ledger_backup
 from fam.ui.styles import (
     WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, WARNING_COLOR,
     BACKGROUND, TEXT_COLOR, SUBTITLE_GRAY
@@ -237,6 +238,11 @@ class AdminScreen(QWidget):
         if not txn:
             return
 
+        if txn['status'] == 'Voided':
+            QMessageBox.warning(self, "Cannot Adjust",
+                                "Voided transactions cannot be adjusted.")
+            return
+
         dialog = AdjustmentDialog(txn, self)
 
         # Pre-fill "Adjusted By" with the open market day's volunteer
@@ -274,6 +280,7 @@ class AdminScreen(QWidget):
                     update_transaction(txn_id, vendor_id=new_vendor)
 
                 update_transaction(txn_id, status='Adjusted')
+                write_ledger_backup()
                 self._search()
                 self._load_audit_log()
             except Exception as e:
@@ -283,6 +290,11 @@ class AdminScreen(QWidget):
     def _void_transaction(self, txn_id):
         txn = get_transaction_by_id(txn_id)
         if not txn:
+            return
+
+        if txn['status'] == 'Voided':
+            QMessageBox.warning(self, "Already Voided",
+                                "This transaction has already been voided.")
             return
 
         result = QMessageBox.warning(
@@ -299,6 +311,7 @@ class AdminScreen(QWidget):
                 log_action('transactions', txn_id, 'VOID', changed_by,
                             reason_code='admin_adjustment', notes='Transaction voided')
                 void_transaction(txn_id)
+                write_ledger_backup()
                 self._search()
                 self._load_audit_log()
             except Exception as e:

@@ -100,6 +100,7 @@ class FMNPScreen(QWidget):
         self.notes_input.setPlaceholderText("Optional notes")
         self.notes_input.setMaximumWidth(500)
         row3.addWidget(self.notes_input)
+        row3.addStretch()
         form_layout.addLayout(row3)
 
         self.error_label = QLabel("")

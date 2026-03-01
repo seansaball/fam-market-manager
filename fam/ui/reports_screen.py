@@ -12,11 +12,12 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
-    QFileDialog, QMessageBox, QScrollArea
+    QFileDialog, QMessageBox, QScrollArea, QTextEdit, QCheckBox, QSplitter
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QBrush, QFont
 
 from fam.database.connection import get_connection
 from fam.models.market_day import get_all_market_days, get_all_markets
@@ -24,15 +25,22 @@ from fam.models.vendor import get_all_vendors
 from fam.models.payment_method import get_all_payment_methods
 from fam.utils.export import (
     export_vendor_reimbursement, export_fam_match_report, export_detailed_ledger,
-    export_activity_log, export_geolocation_report, generate_export_filename
+    export_activity_log, export_geolocation_report, export_transaction_log,
+    export_error_log, generate_export_filename
 )
+from fam.models.audit import get_transaction_log, ACTION_LABELS
+from fam.utils.log_reader import parse_log_file
+from fam.utils.logging_config import get_log_path
 from fam.ui.styles import (
     WHITE, LIGHT_GRAY, PRIMARY_GREEN, HARVEST_GOLD, SUBTITLE_GRAY,
     ACCENT_GREEN, BACKGROUND, TEXT_COLOR, MEDIUM_GRAY, WARNING_COLOR, ERROR_COLOR,
     FIELD_LABEL_BG
 )
 from fam.ui.widgets.summary_card import SummaryCard, SummaryRow
-from fam.ui.helpers import make_field_label, make_item, configure_table, CheckableComboBox, DateRangeWidget
+from fam.ui.helpers import (
+    make_field_label, make_item, configure_table, CheckableComboBox,
+    DateRangeWidget, NoScrollComboBox
+)
 
 
 class ReportsScreen(QWidget):
@@ -45,9 +53,14 @@ class ReportsScreen(QWidget):
         self._ledger_data = []
         self._activity_data = []
         self._geo_data = []
+        self._txn_log_data = []
+        self._error_log_data = []
+        self._error_log_loaded = False
         self._chart_pie_data = []
         self._chart_trend_data = []
         self._chart_fmnp_data = []
+        self._chart_traffic_data = []
+        self._chart_vendor_match = []
         self._populating = False
         self._build_ui()
         self.refresh()
@@ -182,6 +195,9 @@ class ReportsScreen(QWidget):
         ll.addWidget(export_btn3)
         self.tabs.addTab(ledger_tab, "Detailed Ledger")
 
+        # Transaction Log tab (human-friendly view of audit data)
+        self.tabs.addTab(self._build_transaction_log_tab(), "Transaction Log")
+
         # Activity Log tab
         self.activity_table = QTableWidget()
         self.activity_table.setColumnCount(10)
@@ -292,6 +308,26 @@ class ReportsScreen(QWidget):
         self._line_canvas.setMinimumHeight(420)
         chart_layout.addWidget(self._line_canvas)
 
+        # Customer traffic chart
+        traffic_header = QLabel("Customer & Receipt Traffic Over Time")
+        traffic_header.setObjectName("section_header")
+        chart_layout.addWidget(traffic_header)
+
+        self._traffic_figure = Figure(figsize=(12, 5), dpi=100, facecolor=BACKGROUND)
+        self._traffic_canvas = FigureCanvasQTAgg(self._traffic_figure)
+        self._traffic_canvas.setMinimumHeight(420)
+        chart_layout.addWidget(self._traffic_canvas)
+
+        # Vendor match distribution chart
+        vendor_match_header = QLabel("FAM Match by Vendor")
+        vendor_match_header.setObjectName("section_header")
+        chart_layout.addWidget(vendor_match_header)
+
+        self._vendor_match_figure = Figure(figsize=(12, 5), dpi=100, facecolor=BACKGROUND)
+        self._vendor_match_canvas = FigureCanvasQTAgg(self._vendor_match_figure)
+        self._vendor_match_canvas.setMinimumHeight(420)
+        chart_layout.addWidget(self._vendor_match_canvas)
+
         chart_layout.addStretch()
         chart_scroll.setWidget(chart_content)
         charts_outer.addWidget(chart_scroll)
@@ -302,6 +338,12 @@ class ReportsScreen(QWidget):
         charts_outer.addWidget(export_charts_btn)
 
         self.tabs.addTab(charts_tab, "Charts")
+
+        # Error Log tab (parsed from fam_manager.log file)
+        self.tabs.addTab(self._build_error_log_tab(), "Error Log")
+
+        # Lazy-load error log when its tab is selected
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         layout.addWidget(self.tabs)
 
@@ -763,6 +805,34 @@ class ReportsScreen(QWidget):
                 'method': 'FMNP (External)', 'total': fmnp_ext_total
             })
 
+        # Customer & receipt traffic time-series
+        traffic_rows = conn.execute(f"""
+            SELECT md.date,
+                   COUNT(DISTINCT co.customer_label) AS unique_customers,
+                   COUNT(DISTINCT t.id) AS receipt_count
+            FROM transactions t
+            JOIN market_days md ON t.market_day_id = md.id
+            LEFT JOIN customer_orders co ON t.customer_order_id = co.id
+            {where}
+            GROUP BY md.date
+            ORDER BY md.date
+        """, params).fetchall()
+
+        self._chart_traffic_data = [
+            {'date': r['date'], 'customers': r['unique_customers'],
+             'receipts': r['receipt_count']}
+            for r in traffic_rows
+        ]
+
+        # Vendor match distribution — derived from already-fetched vendor data
+        self._chart_vendor_match = sorted(
+            [{'vendor': v['Vendor'],
+              'match': v['FAM Match'] + v['FMNP Match']}
+             for v in self._vendor_data
+             if (v['FAM Match'] + v['FMNP Match']) > 0],
+            key=lambda x: x['match'], reverse=True
+        )[:12]
+
         self._update_charts()
 
         # ── Geolocation report ─────────────────────────────────────
@@ -770,6 +840,9 @@ class ReportsScreen(QWidget):
 
         # ── Activity log (full extract — no filters) ──────────────
         self._load_activity_log(conn)
+
+        # ── Transaction log (human-friendly audit view) ───────────
+        self._load_transaction_log()
 
     def _load_activity_log(self, conn):
         """Load all audit log entries into the Activity Log tab."""
@@ -982,15 +1055,34 @@ class ReportsScreen(QWidget):
     # ------------------------------------------------------------------
     # Charts
     # ------------------------------------------------------------------
+    # Curated pie-chart palette — 10 hues with wide angular spacing,
+    # tested for contrast, colorblind safety, and white/dark text legibility.
+    _PIE_PALETTE = [
+        '#3a7d5e',  # Forest green  (brand-aligned)
+        '#e68a3e',  # Harvest gold  (brand accent)
+        '#4e79a7',  # Steel blue
+        '#c85c4a',  # Terra cotta
+        '#6aab8d',  # Sage
+        '#d4a03c',  # Amber
+        '#8b6fae',  # Plum
+        '#e8927c',  # Peach coral
+        '#5898a0',  # Teal
+        '#9c755f',  # Warm brown
+    ]
+
+    @staticmethod
+    def _text_color_for_bg(hex_color):
+        """Return white or dark text for best contrast on *hex_color*."""
+        r = int(hex_color[1:3], 16) / 255
+        g = int(hex_color[3:5], 16) / 255
+        b = int(hex_color[5:7], 16) / 255
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        return '#FFFFFF' if luminance < 0.55 else '#2C2C2C'
+
     def _get_pie_colors(self, count):
         """Return a list of theme-appropriate colors for pie chart slices."""
-        palette = [
-            PRIMARY_GREEN, HARVEST_GOLD, ACCENT_GREEN,
-            WARNING_COLOR, ERROR_COLOR, SUBTITLE_GRAY,
-            '#5B9BD5', '#8E6FBF',  # blue, purple
-        ]
-        # Cycle through palette if more slices than colors
-        return [palette[i % len(palette)] for i in range(count)]
+        pal = self._PIE_PALETTE
+        return [pal[i % len(pal)] for i in range(count)]
 
     def _show_no_data(self, ax, message="No data available"):
         """Display a centered 'no data' message on an empty axes."""
@@ -1005,9 +1097,11 @@ class ReportsScreen(QWidget):
             spine.set_visible(False)
 
     def _update_charts(self):
-        """Redraw both charts with current data."""
+        """Redraw all charts with current data."""
         self._draw_pie_chart()
         self._draw_line_chart()
+        self._draw_traffic_chart()
+        self._draw_vendor_match_chart()
 
     def _draw_pie_chart(self):
         """Draw a pie chart of payment method distribution."""
@@ -1030,11 +1124,11 @@ class ReportsScreen(QWidget):
             wedgeprops={'edgecolor': WHITE, 'linewidth': 1.5}
         )
 
-        # Style percentage labels
-        for t in autotexts:
+        # Style percentage labels — adapt text color to slice luminance
+        for t, c in zip(autotexts, colors):
             t.set_fontsize(9)
             t.set_fontweight('bold')
-            t.set_color(WHITE)
+            t.set_color(self._text_color_for_bg(c))
 
         ax.legend(
             wedges, labels, loc='center left', bbox_to_anchor=(1.0, 0.5),
@@ -1095,8 +1189,103 @@ class ReportsScreen(QWidget):
         self._line_figure.tight_layout()
         self._line_canvas.draw()
 
+    def _draw_traffic_chart(self):
+        """Draw customer & receipt traffic over time."""
+        self._traffic_figure.clear()
+        ax = self._traffic_figure.add_subplot(111)
+        ax.set_facecolor(WHITE)
+
+        if not self._chart_traffic_data:
+            self._show_no_data(ax, "No customer traffic data available")
+            self._traffic_canvas.draw()
+            return
+
+        dates = [d['date'] for d in self._chart_traffic_data]
+        customers = [d['customers'] for d in self._chart_traffic_data]
+        receipts = [d['receipts'] for d in self._chart_traffic_data]
+
+        ax.plot(dates, customers, color=PRIMARY_GREEN, marker='o', markersize=5,
+                linewidth=2, label='Unique Customers', solid_capstyle='round')
+        ax.plot(dates, receipts, color=HARVEST_GOLD, marker='s', markersize=5,
+                linewidth=2, linestyle='--', label='Receipts', solid_capstyle='round')
+
+        ax.set_title('Customer & Receipt Traffic Over Time', fontsize=12,
+                      fontweight='bold', color=TEXT_COLOR, pad=12)
+        ax.set_xlabel('Market Date', fontsize=10, color=TEXT_COLOR)
+        ax.set_ylabel('Count', fontsize=10, color=TEXT_COLOR)
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+        ax.tick_params(axis='x', rotation=45, labelsize=8, colors=TEXT_COLOR)
+        ax.tick_params(axis='y', labelsize=9, colors=TEXT_COLOR)
+
+        ax.grid(True, linestyle='--', alpha=0.3, color=MEDIUM_GRAY)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color(LIGHT_GRAY)
+        ax.spines['bottom'].set_color(LIGHT_GRAY)
+
+        ax.legend(loc='upper left', fontsize=9, frameon=True,
+                  facecolor=WHITE, edgecolor=LIGHT_GRAY, labelcolor=TEXT_COLOR)
+
+        self._traffic_figure.tight_layout()
+        self._traffic_canvas.draw()
+
+    def _draw_vendor_match_chart(self):
+        """Draw horizontal bar chart of FAM match distribution by vendor."""
+        self._vendor_match_figure.clear()
+        ax = self._vendor_match_figure.add_subplot(111)
+        ax.set_facecolor(WHITE)
+
+        if not self._chart_vendor_match:
+            self._show_no_data(ax, "No vendor match data available")
+            self._vendor_match_canvas.draw()
+            return
+
+        # Reverse so largest bar is at the top
+        display = self._chart_vendor_match[::-1]
+        vendors = [d['vendor'] for d in display]
+        amounts = [d['match'] for d in display]
+        max_amt = max(amounts) if amounts else 1
+
+        # Green gradient: lighter for smaller amounts, deeper for larger
+        light_green = (0.78, 0.93, 0.82)   # #c7edcf – soft mint
+        dark_green  = (0.16, 0.40, 0.28)   # #296647 – deep forest
+        colors = []
+        for a in amounts:
+            t = a / max_amt if max_amt else 0
+            r = light_green[0] + t * (dark_green[0] - light_green[0])
+            g = light_green[1] + t * (dark_green[1] - light_green[1])
+            b = light_green[2] + t * (dark_green[2] - light_green[2])
+            colors.append((r, g, b))
+
+        bars = ax.barh(vendors, amounts, color=colors,
+                       edgecolor=WHITE, linewidth=0.5, height=0.6)
+
+        # Dollar labels at end of each bar
+        for bar, amt in zip(bars, amounts):
+            ax.text(bar.get_width() + max_amt * 0.02,
+                    bar.get_y() + bar.get_height() / 2,
+                    f'${amt:,.2f}', va='center', fontsize=8, color=TEXT_COLOR)
+
+        ax.set_title('FAM Match by Vendor', fontsize=12,
+                      fontweight='bold', color=TEXT_COLOR, pad=12)
+        ax.set_xlabel('FAM Match ($)', fontsize=10, color=TEXT_COLOR)
+        ax.set_xlim(left=0, right=max_amt * 1.18)
+
+        ax.tick_params(axis='y', labelsize=9, colors=TEXT_COLOR)
+        ax.tick_params(axis='x', labelsize=9, colors=TEXT_COLOR)
+
+        ax.grid(True, axis='x', linestyle='--', alpha=0.3, color=MEDIUM_GRAY)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color(LIGHT_GRAY)
+        ax.spines['bottom'].set_color(LIGHT_GRAY)
+
+        self._vendor_match_figure.tight_layout()
+        self._vendor_match_canvas.draw()
+
     def _export_charts(self):
-        """Export both charts as PNG files."""
+        """Export all charts as PNG files."""
         filepath, _ = QFileDialog.getSaveFileName(
             self, "Export Charts", "fam_charts.png",
             "PNG Files (*.png)"
@@ -1108,15 +1297,22 @@ class ReportsScreen(QWidget):
             base, ext = os.path.splitext(filepath)
             pie_path = f"{base}_pie{ext}"
             trend_path = f"{base}_trend{ext}"
+            traffic_path = f"{base}_traffic{ext}"
+            vendor_match_path = f"{base}_vendor_match{ext}"
 
             self._pie_figure.savefig(pie_path, dpi=150, bbox_inches='tight',
                                      facecolor=self._pie_figure.get_facecolor())
             self._line_figure.savefig(trend_path, dpi=150, bbox_inches='tight',
                                       facecolor=self._line_figure.get_facecolor())
+            self._traffic_figure.savefig(traffic_path, dpi=150, bbox_inches='tight',
+                                         facecolor=self._traffic_figure.get_facecolor())
+            self._vendor_match_figure.savefig(vendor_match_path, dpi=150, bbox_inches='tight',
+                                              facecolor=self._vendor_match_figure.get_facecolor())
 
             QMessageBox.information(
                 self, "Export Complete",
                 f"Charts saved to:\n{pie_path}\n{trend_path}"
+                f"\n{traffic_path}\n{vendor_match_path}"
             )
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export charts: {str(e)}")
@@ -1143,6 +1339,461 @@ class ReportsScreen(QWidget):
                 export_activity_log(self._activity_data, filepath)
             elif report_type == "geolocation":
                 export_geolocation_report(self._geo_data, filepath)
+            elif report_type == "transaction_log":
+                export_transaction_log(self._txn_log_data, filepath)
+            elif report_type == "error_log":
+                export_error_log(self._error_log_data, filepath)
             QMessageBox.information(self, "Export Complete", f"Report saved to:\n{filepath}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
+
+    # ------------------------------------------------------------------
+    # Transaction Log tab
+    # ------------------------------------------------------------------
+    def _build_transaction_log_tab(self):
+        """Build the Transaction Log tab with filters, table, and export."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # ── Filter row ────────────────────────────────────────────
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+
+        # "Today Only" toggle
+        self._txn_today_cb = QCheckBox("Today Only")
+        self._txn_today_cb.setStyleSheet("font-size: 12px; font-weight: bold;")
+        self._txn_today_cb.stateChanged.connect(self._on_txn_log_filter_changed)
+        filter_row.addWidget(self._txn_today_cb)
+
+        # Action filter combo
+        action_lbl = QLabel("Action:")
+        action_lbl.setStyleSheet(
+            f"background-color: {FIELD_LABEL_BG}; border: 1px solid #D5D2CB;"
+            " border-radius: 6px; padding: 4px 8px;"
+            " font-weight: bold; font-size: 12px; color: #555;"
+        )
+        filter_row.addWidget(action_lbl)
+
+        self._txn_action_combo = NoScrollComboBox()
+        self._txn_action_combo.addItem("All Actions", "")
+        for code, label in ACTION_LABELS.items():
+            self._txn_action_combo.addItem(label, code)
+        self._txn_action_combo.setStyleSheet("font-size: 11px; min-height: 0px; padding: 4px 8px;")
+        self._txn_action_combo.currentIndexChanged.connect(self._on_txn_log_filter_changed)
+        filter_row.addWidget(self._txn_action_combo)
+
+        filter_row.addStretch()
+
+        # Search field
+        search_lbl = QLabel("Search:")
+        search_lbl.setStyleSheet(
+            f"background-color: {FIELD_LABEL_BG}; border: 1px solid #D5D2CB;"
+            " border-radius: 6px; padding: 4px 8px;"
+            " font-weight: bold; font-size: 12px; color: #555;"
+        )
+        filter_row.addWidget(search_lbl)
+
+        self._txn_search = QLineEdit()
+        self._txn_search.setPlaceholderText("Filter rows...")
+        self._txn_search.setStyleSheet("font-size: 12px; min-height: 0px; padding: 4px 8px;")
+        self._txn_search.setMaximumWidth(200)
+        self._txn_search.textChanged.connect(self._on_txn_log_search)
+        filter_row.addWidget(self._txn_search)
+
+        layout.addLayout(filter_row)
+
+        # ── Table ─────────────────────────────────────────────────
+        self.txn_log_table = QTableWidget()
+        self.txn_log_table.setColumnCount(6)
+        self.txn_log_table.setHorizontalHeaderLabels(
+            ["Time", "Action", "Transaction", "Vendor", "Details", "By"]
+        )
+        configure_table(self.txn_log_table)
+        layout.addWidget(self.txn_log_table)
+
+        # ── Export button ─────────────────────────────────────────
+        export_btn = QPushButton("Export Transaction Log CSV")
+        export_btn.setObjectName("secondary_btn")
+        export_btn.clicked.connect(lambda: self._export("transaction_log"))
+        layout.addWidget(export_btn)
+
+        return tab
+
+    def _load_transaction_log(self):
+        """Query audit data and populate the Transaction Log table."""
+        from datetime import date
+
+        # Determine filters
+        today_only = self._txn_today_cb.isChecked()
+        action_code = self._txn_action_combo.currentData()
+
+        date_from = None
+        date_to = None
+        if today_only:
+            today_str = date.today().isoformat()
+            date_from = today_str
+            date_to = today_str
+
+        action_filter = [action_code] if action_code else None
+
+        rows = get_transaction_log(
+            date_from=date_from,
+            date_to=date_to,
+            action_filter=action_filter,
+            limit=500
+        )
+
+        self._txn_log_data = []
+        self.txn_log_table.setSortingEnabled(False)
+        self.txn_log_table.setRowCount(0)
+        self.txn_log_table.setRowCount(len(rows))
+
+        for i, r in enumerate(rows):
+            # Time — just the timestamp
+            timestamp = r.get('changed_at', '')
+            self.txn_log_table.setItem(i, 0, make_item(timestamp))
+
+            # Action — friendly label
+            action_raw = r.get('action', '')
+            action_label = ACTION_LABELS.get(action_raw, action_raw)
+            self.txn_log_table.setItem(i, 1, make_item(action_label))
+
+            # Transaction ID
+            txn_id = r.get('fam_transaction_id', '') or ''
+            self.txn_log_table.setItem(i, 2, make_item(txn_id))
+
+            # Vendor
+            vendor = r.get('vendor_name', '') or ''
+            self.txn_log_table.setItem(i, 3, make_item(vendor))
+
+            # Details — built from field changes and notes
+            detail = self._format_txn_detail(r)
+            self.txn_log_table.setItem(i, 4, make_item(detail))
+
+            # By
+            changed_by = r.get('changed_by', '') or ''
+            self.txn_log_table.setItem(i, 5, make_item(changed_by))
+
+            self._txn_log_data.append({
+                'Time': timestamp,
+                'Action': action_label,
+                'Transaction': txn_id,
+                'Vendor': vendor,
+                'Details': detail,
+                'By': changed_by,
+            })
+
+        self.txn_log_table.setSortingEnabled(True)
+
+        # Re-apply any active search filter
+        self._on_txn_log_search(self._txn_search.text())
+
+    @staticmethod
+    def _format_txn_detail(row):
+        """Build a human-readable Details string from audit row data."""
+        parts = []
+        field = row.get('field_name')
+        old = row.get('old_value')
+        new = row.get('new_value')
+        reason = row.get('reason_code')
+        notes = row.get('notes')
+
+        if field:
+            if old and new:
+                parts.append(f"{field}: {old} → {new}")
+            elif new:
+                parts.append(f"{field}: {new}")
+            elif old:
+                parts.append(f"{field}: was {old}")
+            else:
+                parts.append(field)
+
+        if reason:
+            parts.append(f"Reason: {reason}")
+        if notes:
+            parts.append(notes)
+
+        # Include table context if no transaction ID
+        if not row.get('fam_transaction_id'):
+            table = row.get('table_name', '')
+            record = row.get('record_id', '')
+            if table:
+                parts.insert(0, f"[{table} #{record}]")
+
+        return " | ".join(parts) if parts else ""
+
+    def _on_txn_log_filter_changed(self):
+        """Re-query transaction log when Today Only or Action filter changes."""
+        self._load_transaction_log()
+
+    def _on_txn_log_search(self, text):
+        """Client-side row filtering on the transaction log table."""
+        search = text.strip().lower()
+        for row in range(self.txn_log_table.rowCount()):
+            if not search:
+                self.txn_log_table.setRowHidden(row, False)
+                continue
+            visible = False
+            for col in range(self.txn_log_table.columnCount()):
+                item = self.txn_log_table.item(row, col)
+                if item and search in item.text().lower():
+                    visible = True
+                    break
+            self.txn_log_table.setRowHidden(row, not visible)
+
+    # ------------------------------------------------------------------
+    # Error Log tab
+    # ------------------------------------------------------------------
+    def _build_error_log_tab(self):
+        """Build the Error Log tab with filters, table, detail panel, and export."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # ── Filter row ────────────────────────────────────────────
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+
+        # Level filter
+        level_lbl = QLabel("Level:")
+        level_lbl.setStyleSheet(
+            f"background-color: {FIELD_LABEL_BG}; border: 1px solid #D5D2CB;"
+            " border-radius: 6px; padding: 4px 8px;"
+            " font-weight: bold; font-size: 12px; color: #555;"
+        )
+        filter_row.addWidget(level_lbl)
+
+        self._error_level_combo = NoScrollComboBox()
+        self._error_level_combo.addItem("Errors & Warnings", "both")
+        self._error_level_combo.addItem("Errors Only", "errors")
+        self._error_level_combo.addItem("Warnings Only", "warnings")
+        self._error_level_combo.setStyleSheet("font-size: 11px; min-height: 0px; padding: 4px 8px;")
+        self._error_level_combo.currentIndexChanged.connect(self._on_error_log_filter_changed)
+        filter_row.addWidget(self._error_level_combo)
+
+        # Area filter
+        area_lbl = QLabel("Area:")
+        area_lbl.setStyleSheet(
+            f"background-color: {FIELD_LABEL_BG}; border: 1px solid #D5D2CB;"
+            " border-radius: 6px; padding: 4px 8px;"
+            " font-weight: bold; font-size: 12px; color: #555;"
+        )
+        filter_row.addWidget(area_lbl)
+
+        self._error_area_combo = NoScrollComboBox()
+        self._error_area_combo.addItem("All Areas", "")
+        self._error_area_combo.setStyleSheet("font-size: 11px; min-height: 0px; padding: 4px 8px;")
+        self._error_area_combo.currentIndexChanged.connect(self._on_error_log_filter_changed)
+        filter_row.addWidget(self._error_area_combo)
+
+        filter_row.addStretch()
+
+        # Search
+        err_search_lbl = QLabel("Search:")
+        err_search_lbl.setStyleSheet(
+            f"background-color: {FIELD_LABEL_BG}; border: 1px solid #D5D2CB;"
+            " border-radius: 6px; padding: 4px 8px;"
+            " font-weight: bold; font-size: 12px; color: #555;"
+        )
+        filter_row.addWidget(err_search_lbl)
+
+        self._error_search = QLineEdit()
+        self._error_search.setPlaceholderText("Filter rows...")
+        self._error_search.setStyleSheet("font-size: 12px; min-height: 0px; padding: 4px 8px;")
+        self._error_search.setMaximumWidth(200)
+        self._error_search.textChanged.connect(self._on_error_log_filter_changed)
+        filter_row.addWidget(self._error_search)
+
+        layout.addLayout(filter_row)
+
+        # ── Splitter: table on top, detail panel on bottom ────────
+        splitter = QSplitter(Qt.Vertical)
+
+        # Table
+        self.error_log_table = QTableWidget()
+        self.error_log_table.setColumnCount(4)
+        self.error_log_table.setHorizontalHeaderLabels(
+            ["Time", "Level", "Area", "What Happened"]
+        )
+        configure_table(self.error_log_table)
+        self.error_log_table.currentCellChanged.connect(self._on_error_row_selected)
+        splitter.addWidget(self.error_log_table)
+
+        # Detail panel — read-only monospace text showing traceback
+        self._error_detail = QTextEdit()
+        self._error_detail.setReadOnly(True)
+        self._error_detail.setFont(QFont("Consolas", 10))
+        self._error_detail.setPlaceholderText("Click an error row to see full details here...")
+        self._error_detail.setMaximumHeight(180)
+        self._error_detail.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: #FAFAFA;
+                border: 1px solid {LIGHT_GRAY};
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 11px;
+            }}
+        """)
+        splitter.addWidget(self._error_detail)
+
+        # Default split: table gets 70%, detail gets 30%
+        splitter.setStretchFactor(0, 7)
+        splitter.setStretchFactor(1, 3)
+        layout.addWidget(splitter)
+
+        # ── Button row ────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setObjectName("secondary_btn")
+        refresh_btn.clicked.connect(self._reload_error_log)
+        btn_row.addWidget(refresh_btn)
+
+        export_btn = QPushButton("Export Error Log CSV")
+        export_btn.setObjectName("secondary_btn")
+        export_btn.clicked.connect(lambda: self._export("error_log"))
+        btn_row.addWidget(export_btn)
+
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        return tab
+
+    def _load_error_log(self):
+        """Parse the log file and populate the Error Log table."""
+        from fam.utils.log_reader import parse_log_file, get_friendly_module
+        from fam.utils.logging_config import get_log_path
+
+        log_path = get_log_path()
+        entries = parse_log_file(log_path, limit=500)
+
+        # Store full entries for detail view and filtering
+        self._error_log_entries = entries
+
+        # Populate the Area filter with unique module labels
+        current_area = self._error_area_combo.currentData()
+        self._error_area_combo.blockSignals(True)
+        self._error_area_combo.clear()
+        self._error_area_combo.addItem("All Areas", "")
+        area_labels = sorted(set(e['module_label'] for e in entries))
+        for label in area_labels:
+            self._error_area_combo.addItem(label, label)
+        # Restore previous selection if still valid
+        idx = self._error_area_combo.findData(current_area)
+        if idx >= 0:
+            self._error_area_combo.setCurrentIndex(idx)
+        self._error_area_combo.blockSignals(False)
+
+        self._apply_error_log_filters()
+
+    def _apply_error_log_filters(self):
+        """Filter and display error log entries based on current filter state."""
+        entries = getattr(self, '_error_log_entries', [])
+
+        # Level filter
+        level_filter = self._error_level_combo.currentData()
+        if level_filter == "errors":
+            entries = [e for e in entries if e['level'] == 'ERROR']
+        elif level_filter == "warnings":
+            entries = [e for e in entries if e['level'] == 'WARNING']
+
+        # Area filter
+        area_filter = self._error_area_combo.currentData()
+        if area_filter:
+            entries = [e for e in entries if e['module_label'] == area_filter]
+
+        # Search filter
+        search = self._error_search.text().strip().lower()
+        if search:
+            entries = [
+                e for e in entries
+                if search in e['timestamp'].lower()
+                or search in e['level'].lower()
+                or search in e['module_label'].lower()
+                or search in e['friendly_message'].lower()
+                or search in e['message'].lower()
+            ]
+
+        # Populate table
+        self._error_log_data = []
+        self.error_log_table.setSortingEnabled(False)
+        self.error_log_table.setRowCount(0)
+        self.error_log_table.setRowCount(len(entries))
+
+        for i, e in enumerate(entries):
+            # Time
+            self.error_log_table.setItem(i, 0, make_item(e['timestamp']))
+
+            # Level — color-coded
+            level_item = make_item(e['level'].capitalize())
+            if e['level'] == 'ERROR':
+                level_item.setForeground(QBrush(QColor(ERROR_COLOR)))
+            elif e['level'] == 'WARNING':
+                level_item.setForeground(QBrush(QColor(WARNING_COLOR)))
+            self.error_log_table.setItem(i, 1, level_item)
+
+            # Area
+            self.error_log_table.setItem(i, 2, make_item(e['module_label']))
+
+            # What Happened
+            self.error_log_table.setItem(i, 3, make_item(e['friendly_message']))
+
+            # Store index into _error_log_entries for detail lookup
+            # (We use the traceback from the original entry)
+            detail_text = e.get('traceback', '').strip()
+            raw_msg = e.get('message', '')
+
+            self._error_log_data.append({
+                'Time': e['timestamp'],
+                'Level': e['level'],
+                'Area': e['module_label'],
+                'What Happened': e['friendly_message'],
+                'Raw Message': raw_msg,
+                'Traceback': detail_text,
+            })
+
+        self.error_log_table.setSortingEnabled(True)
+        self._error_detail.clear()
+
+    def _on_error_log_filter_changed(self):
+        """Re-filter error log display when any filter changes."""
+        if self._error_log_loaded:
+            self._apply_error_log_filters()
+
+    def _on_error_row_selected(self, row, _col, _prev_row, _prev_col):
+        """Show full details for the selected error log entry."""
+        if row < 0 or row >= len(self._error_log_data):
+            self._error_detail.clear()
+            return
+
+        entry = self._error_log_data[row]
+        parts = []
+        parts.append(f"Time: {entry['Time']}")
+        parts.append(f"Level: {entry['Level']}")
+        parts.append(f"Area: {entry['Area']}")
+        parts.append(f"Message: {entry['Raw Message']}")
+        if entry.get('Traceback'):
+            parts.append("")
+            parts.append("Traceback:")
+            parts.append(entry['Traceback'])
+
+        self._error_detail.setPlainText("\n".join(parts))
+
+    def _reload_error_log(self):
+        """Force reload the error log from disk."""
+        self._error_log_loaded = False
+        self._load_error_log()
+        self._error_log_loaded = True
+
+    # ------------------------------------------------------------------
+    # Tab change handler (lazy-load Error Log)
+    # ------------------------------------------------------------------
+    def _on_tab_changed(self, index):
+        """Lazy-load the Error Log when its tab is first selected."""
+        tab_text = self.tabs.tabText(index)
+        if tab_text == "Error Log" and not self._error_log_loaded:
+            self._load_error_log()
+            self._error_log_loaded = True

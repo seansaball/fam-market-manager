@@ -5,7 +5,8 @@ from PySide6.QtWidgets import (
     QPushButton, QFrame, QMessageBox, QTableWidget,
     QAbstractItemView, QScrollArea
 )
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QRegularExpression
+from PySide6.QtGui import QRegularExpressionValidator
 
 from fam.models.market_day import get_open_market_day
 from fam.models.vendor import get_all_vendors, get_vendors_for_market
@@ -25,6 +26,33 @@ from fam.ui.helpers import (
     make_field_label, make_section_label, make_item, make_action_btn,
     configure_table, NoScrollDoubleSpinBox, NoScrollComboBox
 )
+
+# 3-digit prefixes not assigned by USPS — rejects obviously invalid zips
+# without requiring a full database or API call.
+_INVALID_ZIP_PREFIXES = frozenset({
+    '000', '002', '004', '099',
+    '213', '269',
+    '343', '345', '348', '353',
+    '419', '428', '429',
+    '517', '518', '519', '529', '533', '536', '552',
+    '568', '578', '579', '589',
+    '621', '632', '642', '643', '659', '663', '682',
+    '694', '695', '696', '697', '698', '699',
+    '702', '709', '715', '732', '742', '771',
+    '817', '818', '819', '839', '848', '849',
+    '851', '854', '858', '861', '862',
+    '866', '867', '868', '869',
+    '876', '877', '878', '879', '880', '881', '882', '883', '884',
+    '886', '887', '888', '889', '890', '891', '892', '893', '894',
+    '909', '929', '987',
+})
+
+
+def _is_valid_zip(zip_text):
+    """Return True if zip_text is a plausible US zip code (5 digits, assigned prefix)."""
+    if not zip_text or len(zip_text) != 5 or not zip_text.isdigit():
+        return False
+    return zip_text[:3] not in _INVALID_ZIP_PREFIXES
 
 
 class ReceiptIntakeScreen(QWidget):
@@ -105,6 +133,9 @@ class ReceiptIntakeScreen(QWidget):
         self.zip_code_input.setPlaceholderText("Zip")
         self.zip_code_input.setMaximumWidth(60)
         self.zip_code_input.setMaxLength(5)
+        self.zip_code_input.setValidator(
+            QRegularExpressionValidator(QRegularExpression(r"^\d{0,5}$"))
+        )
         self.zip_code_input.setStyleSheet(
             "padding: 4px 6px; border: 1px solid #D5D2CB; border-radius: 4px;"
         )
@@ -125,6 +156,7 @@ class ReceiptIntakeScreen(QWidget):
             f" padding: 4px 6px;"
         )
         cust_layout.addWidget(self.status_msg_label)
+        cust_layout.addStretch()
 
         self.new_customer_btn = QPushButton("New Customer")
         self.new_customer_btn.setObjectName("secondary_btn")
@@ -144,28 +176,32 @@ class ReceiptIntakeScreen(QWidget):
                 padding: 6px 10px;
             }}
         """)
-        form_grid = QGridLayout(form_frame)
-        form_grid.setContentsMargins(0, 0, 0, 0)
-        form_grid.setHorizontalSpacing(8)
-        form_grid.setVerticalSpacing(4)
+        form_inner = QVBoxLayout(form_frame)
+        form_inner.setContentsMargins(0, 0, 0, 0)
+        form_inner.setSpacing(4)
 
         # Row 0: Vendor + Receipt total
-        form_grid.addWidget(make_field_label("Vendor"), 0, 0)
+        row0 = QHBoxLayout()
+        row0.setSpacing(8)
+        vendor_lbl = make_field_label("Vendor")
+        vendor_lbl.setFixedWidth(70)
+        row0.addWidget(vendor_lbl)
         self.vendor_combo = NoScrollComboBox()
-        self.vendor_combo.setMinimumWidth(250)
-        form_grid.addWidget(self.vendor_combo, 0, 1)
+        self.vendor_combo.setMinimumWidth(200)
+        row0.addWidget(self.vendor_combo, 1)   # stretches with window
+        row0.addSpacing(16)
 
         receipt_total_label = QLabel("Receipt Total:")
         receipt_total_label.setStyleSheet(
             f"font-weight: bold; color: {HARVEST_GOLD};"
         )
-        form_grid.addWidget(receipt_total_label, 0, 2)
+        row0.addWidget(receipt_total_label)
         self.receipt_total_spin = NoScrollDoubleSpinBox()
         self.receipt_total_spin.setRange(0.00, 99999.99)
         self.receipt_total_spin.setDecimals(2)
         self.receipt_total_spin.setSingleStep(1.00)
         self.receipt_total_spin.setPrefix("$ ")
-        self.receipt_total_spin.setMinimumWidth(140)
+        self.receipt_total_spin.setFixedWidth(140)
         self.receipt_total_spin.setValue(0.00)
         self.receipt_total_spin.setSpecialValueText("$ 0.00")
         self.receipt_total_spin.setStyleSheet(f"""
@@ -189,25 +225,29 @@ class ReceiptIntakeScreen(QWidget):
         """)
         # Select all text on focus so user can just type a new value
         self.receipt_total_spin.lineEdit().installEventFilter(self)
-        form_grid.addWidget(self.receipt_total_spin, 0, 3)
+        row0.addWidget(self.receipt_total_spin)
+        form_inner.addLayout(row0)
 
-        # Row 1: Notes + Add button (notes aligns with vendor combo)
-        form_grid.addWidget(make_field_label("Notes"), 1, 0)
+        # Row 1: Notes + Add button
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        notes_lbl = make_field_label("Notes")
+        notes_lbl.setFixedWidth(70)
+        row1.addWidget(notes_lbl)
         self.notes_input = QLineEdit()
         self.notes_input.setPlaceholderText("Optional")
         self.notes_input.setStyleSheet(
             "padding: 4px 8px; border: 1px solid #D5D2CB; border-radius: 4px;"
         )
-        form_grid.addWidget(self.notes_input, 1, 1)
+        row1.addWidget(self.notes_input, 1)    # stretches with window
+        row1.addSpacing(16)
 
         self.add_receipt_btn = QPushButton("Add Receipt to Order")
         self.add_receipt_btn.setObjectName("primary_btn")
         self.add_receipt_btn.setStyleSheet("padding: 4px 12px;")
         self.add_receipt_btn.clicked.connect(self._add_receipt)
-        form_grid.addWidget(self.add_receipt_btn, 1, 2, 1, 2)  # span cols 2-3
-
-        # Let col 1 (vendor/notes) stretch to fill space
-        form_grid.setColumnStretch(1, 1)
+        row1.addWidget(self.add_receipt_btn)
+        form_inner.addLayout(row1)
 
         # Error message
         self.error_label = QLabel("")
@@ -219,7 +259,7 @@ class ReceiptIntakeScreen(QWidget):
             padding: 6px 10px;
         """)
         self.error_label.setVisible(False)
-        form_grid.addWidget(self.error_label, 2, 0, 1, 4)  # span full width
+        form_inner.addWidget(self.error_label)
 
         layout.addWidget(form_frame)
 
@@ -374,12 +414,24 @@ class ReceiptIntakeScreen(QWidget):
         if not self._current_order_id:
             return
         zip_text = self.zip_code_input.text().strip()
-        # Basic validation: empty or exactly 5 digits
-        if zip_text and (len(zip_text) != 5 or not zip_text.isdigit()):
+        if not zip_text:
+            # Empty is fine — clear the stored value
+            self.zip_code_input.setStyleSheet(
+                "padding: 4px 6px; border: 1px solid #D5D2CB; border-radius: 4px;"
+            )
+            update_customer_order_zip_code(self._current_order_id, None)
             return
-        update_customer_order_zip_code(
-            self._current_order_id, zip_text if zip_text else None
+        if not _is_valid_zip(zip_text):
+            # Highlight invalid — red border, don't persist
+            self.zip_code_input.setStyleSheet(
+                f"padding: 4px 6px; border: 2px solid {ERROR_COLOR}; border-radius: 4px;"
+            )
+            return
+        # Valid — green border briefly, then persist
+        self.zip_code_input.setStyleSheet(
+            f"padding: 4px 6px; border: 2px solid {ACCENT_GREEN}; border-radius: 4px;"
         )
+        update_customer_order_zip_code(self._current_order_id, zip_text)
 
     def _reset_customer_session(self):
         self._current_order_id = None
@@ -506,22 +558,28 @@ class ReceiptIntakeScreen(QWidget):
     # Receipt CRUD
     # ------------------------------------------------------------------
     def _add_receipt(self):
+        # Prevent double-click from creating duplicate receipts
+        self.add_receipt_btn.setEnabled(False)
+
         self.error_label.setVisible(False)
         self.error_label.setText("")
         self.status_msg_label.setVisible(False)
 
         if not self._active_market_day:
             self._show_error("No active market day. Please open one first.")
+            self.add_receipt_btn.setEnabled(True)
             return
 
         vendor_id = self.vendor_combo.currentData()
         if not vendor_id:
             self._show_error("Please select a vendor.")
+            self.add_receipt_btn.setEnabled(True)
             return
 
         receipt_total = self.receipt_total_spin.value()
         if receipt_total <= 0:
             self._show_error("Receipt total must be greater than $0.00.")
+            self.add_receipt_btn.setEnabled(True)
             return
 
         notes_text = self.notes_input.text().strip() or None
@@ -559,6 +617,8 @@ class ReceiptIntakeScreen(QWidget):
 
         except Exception as e:
             self._show_error(f"Error saving receipt: {str(e)}")
+        finally:
+            self.add_receipt_btn.setEnabled(True)
 
     def _remove_receipt(self, index):
         if index < 0 or index >= len(self._order_receipts):

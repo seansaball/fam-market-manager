@@ -127,7 +127,7 @@ def void_customer_order(order_id: int):
     """Void all transactions in the order and mark order as Voided."""
     conn = get_connection()
     conn.execute(
-        "UPDATE transactions SET status='Voided' WHERE customer_order_id=? AND status='Draft'",
+        "UPDATE transactions SET status='Voided' WHERE customer_order_id=? AND status != 'Voided'",
         (order_id,)
     )
     conn.execute(
@@ -137,7 +137,7 @@ def void_customer_order(order_id: int):
     conn.commit()
 
     log_action('customer_orders', order_id, 'VOID', 'System',
-               notes='Customer order and draft transactions voided')
+               notes='Customer order and all transactions voided')
     logger.info("Customer order voided: id=%s", order_id)
 
 

@@ -13,6 +13,7 @@ from fam.models.transaction import (
     get_transaction_by_id, confirm_transaction, save_payment_line_items,
     get_payment_line_items, update_transaction
 )
+from fam.utils.export import write_ledger_backup
 from fam.models.customer_order import (
     get_customer_order, get_order_transactions, get_order_total,
     get_order_vendor_summary, update_customer_order_status,
@@ -697,6 +698,7 @@ class PaymentScreen(QWidget):
 
         txn_ids = ", ".join(t['fam_transaction_id'] for t in self._order_transactions)
         logger.info("Payment confirmed for: %s", txn_ids)
+        write_ledger_backup()
         self.success_frame.setVisible(True)
         self.success_msg.setText(f"Payment Confirmed!  Transactions: {txn_ids}")
         self.confirm_btn.setEnabled(False)

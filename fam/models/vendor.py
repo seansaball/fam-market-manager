@@ -52,6 +52,15 @@ def get_market_vendor_ids(market_id):
     return {r['vendor_id'] for r in rows}
 
 
+def get_vendor_market_ids(vendor_id):
+    """Get set of market IDs that a vendor is assigned to."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT market_id FROM market_vendors WHERE vendor_id = ?", (vendor_id,)
+    ).fetchall()
+    return {r['market_id'] for r in rows}
+
+
 def assign_vendor_to_market(market_id, vendor_id):
     """Assign a vendor to a market (idempotent)."""
     conn = get_connection()

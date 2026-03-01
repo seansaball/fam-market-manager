@@ -15,8 +15,9 @@ from fam.database.connection import get_connection
 
 logger = logging.getLogger('fam.ui.settings_screen')
 from fam.models.vendor import (
-    get_all_vendors, create_vendor, update_vendor,
-    get_market_vendor_ids, assign_vendor_to_market, unassign_vendor_from_market
+    get_all_vendors, get_vendor_by_id, create_vendor, update_vendor,
+    get_market_vendor_ids, get_vendor_market_ids,
+    assign_vendor_to_market, unassign_vendor_from_market
 )
 from fam.models.payment_method import (
     get_all_payment_methods, create_payment_method, update_payment_method,
@@ -325,6 +326,87 @@ class AssignPaymentMethodsDialog(QDialog):
         }
 
 
+class AssignMarketsDialog(QDialog):
+    """Dialog for assigning/unassigning a vendor to markets via checkboxes."""
+
+    def __init__(self, vendor, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Assign Markets for: {vendor['name']}")
+        self.setMinimumWidth(420)
+        self.setMinimumHeight(400)
+        self.vendor = vendor
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {BACKGROUND}; }}
+            QLabel {{ background-color: transparent; color: {TEXT_COLOR}; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        info = QLabel(f"Check markets to assign {vendor['name']} to:")
+        info.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.addWidget(info)
+
+        # Build checkboxes for all markets
+        self._checkboxes = []
+        assigned_ids = get_vendor_market_ids(vendor['id'])
+        conn = get_connection()
+        all_markets = [
+            dict(r) for r in conn.execute("SELECT * FROM markets ORDER BY name").fetchall()
+        ]
+
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {LIGHT_GRAY}; border-radius: 6px; }}")
+        scroll_widget = QWidget()
+        scroll_widget.setStyleSheet(f"background-color: {WHITE};")
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(6)
+
+        for m in all_markets:
+            label = m['name']
+            if not m.get('is_active', 1):
+                label += " (inactive)"
+            cb = QCheckBox(label)
+            cb.setChecked(m['id'] in assigned_ids)
+            cb.setProperty("market_id", m['id'])
+            cb.setStyleSheet(f"""
+                QCheckBox {{
+                    font-size: 13px; padding: 4px; background-color: {WHITE};
+                }}
+                QCheckBox::indicator {{
+                    width: 16px; height: 16px;
+                    background-color: {WHITE};
+                    border: 2px solid #AAAAAA;
+                    border-radius: 3px;
+                }}
+                QCheckBox::indicator:checked {{
+                    background-color: {ACCENT_GREEN};
+                    border-color: {PRIMARY_GREEN};
+                }}
+            """)
+            scroll_layout.addWidget(cb)
+            self._checkboxes.append(cb)
+
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_checked_market_ids(self):
+        """Return set of market IDs that are checked."""
+        return {
+            cb.property("market_id")
+            for cb in self._checkboxes
+            if cb.isChecked()
+        }
+
+
 # ── Main Settings Screen ─────────────────────────────────────
 
 class SettingsScreen(QWidget):
@@ -431,7 +513,7 @@ class SettingsScreen(QWidget):
         self.vendors_table = QTableWidget()
         self.vendors_table.setColumnCount(5)
         self.vendors_table.setHorizontalHeaderLabels(["ID", "Name", "Contact", "Active", "Actions"])
-        configure_table(self.vendors_table, actions_col=4, actions_width=140)
+        configure_table(self.vendors_table, actions_col=4, actions_width=220)
         layout.addWidget(self.vendors_table)
 
         return tab
@@ -616,6 +698,10 @@ class SettingsScreen(QWidget):
             edit_btn.clicked.connect(lambda checked, vid=vid: self._edit_vendor(vid))
             al.addWidget(edit_btn)
 
+            markets_btn = make_action_btn("Markets", 60)
+            markets_btn.clicked.connect(lambda checked, vid=vid: self._assign_markets_to_vendor(vid))
+            al.addWidget(markets_btn)
+
             toggle_btn = make_action_btn("Deactivate" if is_active else "Activate", 70)
             toggle_btn.clicked.connect(
                 lambda checked, vid=vid, active=is_active: self._toggle_vendor(vid, active)
@@ -782,6 +868,25 @@ class SettingsScreen(QWidget):
             for vid in old_ids - new_ids:
                 unassign_vendor_from_market(market_id, vid)
 
+    def _assign_markets_to_vendor(self, vendor_id):
+        """Open market assignment dialog for a vendor."""
+        vendor = get_vendor_by_id(vendor_id)
+        if not vendor:
+            return
+
+        dialog = AssignMarketsDialog(vendor, self)
+        if dialog.exec() == QDialog.Accepted:
+            new_ids = dialog.get_checked_market_ids()
+            old_ids = get_vendor_market_ids(vendor_id)
+
+            # Add newly checked
+            for mid in new_ids - old_ids:
+                assign_vendor_to_market(mid, vendor_id)
+
+            # Remove newly unchecked
+            for mid in old_ids - new_ids:
+                unassign_vendor_from_market(mid, vendor_id)
+
     def _assign_payment_methods(self, market_id):
         """Open payment method assignment dialog for a market."""
         conn = get_connection()
@@ -821,7 +926,6 @@ class SettingsScreen(QWidget):
             QMessageBox.warning(self, "Error", f"Could not add vendor: {e}")
 
     def _edit_vendor(self, vendor_id):
-        from fam.models.vendor import get_vendor_by_id
         vendor = get_vendor_by_id(vendor_id)
         if not vendor:
             return
@@ -938,16 +1042,16 @@ class SettingsScreen(QWidget):
 
         try:
             conn = get_connection()
-            # Delete all data in dependency order
+            # Delete all data in dependency order (junction/child tables first)
             conn.execute("DELETE FROM audit_log")
             conn.execute("DELETE FROM payment_line_items")
             conn.execute("DELETE FROM fmnp_entries")
             conn.execute("DELETE FROM transactions")
             conn.execute("DELETE FROM customer_orders")
             conn.execute("DELETE FROM market_days")
-            conn.execute("DELETE FROM payment_methods")
-            conn.execute("DELETE FROM market_vendors")
             conn.execute("DELETE FROM market_payment_methods")
+            conn.execute("DELETE FROM market_vendors")
+            conn.execute("DELETE FROM payment_methods")
             conn.execute("DELETE FROM vendors")
             conn.execute("DELETE FROM markets")
             conn.commit()
