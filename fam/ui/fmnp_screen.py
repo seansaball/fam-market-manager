@@ -45,6 +45,7 @@ class FMNPScreen(QWidget):
 
         # Form
         form_frame = QFrame()
+        self.form_frame = form_frame  # expose for tutorial hints
         form_frame.setStyleSheet(f"""
             QFrame {{
                 background-color: {WHITE};

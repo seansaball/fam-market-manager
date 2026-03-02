@@ -175,9 +175,13 @@ def _write_ledger_backup_inner():
         receipt = float(r['receipt_total'])
         cust_paid = float(r['customer_paid'])
         fam_match = float(r['fam_match'])
-        total_receipt += receipt
-        total_customer += cust_paid
-        total_match += fam_match
+        is_voided = (r['status'] == 'Voided')
+
+        # Voided transactions are listed for audit trail but excluded from totals
+        if not is_voided:
+            total_receipt += receipt
+            total_customer += cust_paid
+            total_match += fam_match
         count += 1
 
         vendor = (r['vendor'][:18] + '..') if len(r['vendor']) > 20 else r['vendor']

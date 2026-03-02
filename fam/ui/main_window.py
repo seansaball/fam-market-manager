@@ -5,12 +5,13 @@ import sys
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
-    QStackedWidget, QLabel, QButtonGroup, QFrame, QSizePolicy
+    QStackedWidget, QLabel, QButtonGroup, QFrame, QSizePolicy,
+    QDialog, QDialogButtonBox
 )
-from PySide6.QtCore import Qt, QRect
-from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush, QIcon
+from PySide6.QtCore import Qt, QRect, QEvent, QUrl
+from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush, QIcon, QDesktopServices
 
-from fam.ui.styles import PRIMARY_GREEN
+from fam.ui.styles import PRIMARY_GREEN, WHITE, LIGHT_GRAY, SUBTITLE_GRAY
 
 
 def _resolve_asset(filename: str) -> str:
@@ -116,8 +117,8 @@ class MainWindow(QMainWindow):
             ("Market", 0),
             ("Receipt Intake", 1),
             ("Payment", 2),
-            ("FMNP Entry", 3),
-            ("Adjustments", 4),
+            ("Adjustments", 3),
+            ("FMNP Entry", 4),
             ("Reports", 5),
             ("Settings", 6),
         ]
@@ -131,10 +132,25 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        # Version info
-        ver_label = QLabel("  v1.3.0")
-        ver_label.setStyleSheet("color: rgba(255,255,255,0.5); font-size: 11px; padding: 10px;")
-        sidebar_layout.addWidget(ver_label)
+        # About button (version + clickable)
+        self._about_btn = QPushButton("  v1.5.0  \u2022  About")
+        self._about_btn.setCursor(Qt.PointingHandCursor)
+        self._about_btn.setStyleSheet("""
+            QPushButton {
+                color: rgba(255,255,255,0.5);
+                font-size: 11px;
+                padding: 10px;
+                background: transparent;
+                border: none;
+                text-align: left;
+                min-height: 0px;
+            }
+            QPushButton:hover {
+                color: rgba(255,255,255,0.85);
+            }
+        """)
+        self._about_btn.clicked.connect(self._show_about)
+        sidebar_layout.addWidget(self._about_btn)
 
         main_layout.addWidget(sidebar)
 
@@ -143,6 +159,44 @@ class MainWindow(QMainWindow):
         content_frame.setObjectName("content_area")
         content_layout = QVBoxLayout(content_frame)
         content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        # Header bar with tutorial button
+        header_bar = QFrame()
+        header_bar.setObjectName("header_bar")
+        header_bar.setFixedHeight(40)
+        header_bar.setStyleSheet(f"""
+            #header_bar {{
+                background-color: {WHITE};
+                border-bottom: 1px solid {LIGHT_GRAY};
+            }}
+        """)
+        header_layout = QHBoxLayout(header_bar)
+        header_layout.setContentsMargins(16, 4, 16, 4)
+        header_layout.addStretch()
+
+        self._tutorial_btn = QPushButton("\U0001F4D6  Start Tutorial")
+        self._tutorial_btn.setCursor(Qt.PointingHandCursor)
+        self._tutorial_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 5px 14px;
+                font-size: 12px;
+                min-height: 0px;
+                border: 1px solid {LIGHT_GRAY};
+                border-radius: 6px;
+                background-color: {WHITE};
+                color: {SUBTITLE_GRAY};
+            }}
+            QPushButton:hover {{
+                background-color: #F0EFEB;
+                color: {PRIMARY_GREEN};
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        self._tutorial_btn.clicked.connect(self.start_tutorial)
+        header_layout.addWidget(self._tutorial_btn)
+
+        content_layout.addWidget(header_bar)
 
         self.stack = QStackedWidget()
         content_layout.addWidget(self.stack)
@@ -160,8 +214,8 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.market_day_screen)   # 0
         self.stack.addWidget(self.receipt_intake_screen) # 1
         self.stack.addWidget(self.payment_screen)        # 2
-        self.stack.addWidget(self.fmnp_screen)           # 3
-        self.stack.addWidget(self.admin_screen)          # 4
+        self.stack.addWidget(self.admin_screen)          # 3
+        self.stack.addWidget(self.fmnp_screen)           # 4
         self.stack.addWidget(self.reports_screen)        # 5
         self.stack.addWidget(self.settings_screen)       # 6
 
@@ -179,6 +233,10 @@ class MainWindow(QMainWindow):
         if first_btn:
             first_btn.setChecked(True)
         self.stack.setCurrentIndex(0)
+
+        # Tutorial overlay (created on demand)
+        self._tutorial_overlay = None
+        self.centralWidget().installEventFilter(self)
 
     def _navigate(self, idx):
         self.stack.setCurrentIndex(idx)
@@ -214,3 +272,109 @@ class MainWindow(QMainWindow):
         btn = self.nav_group.button(1)
         if btn:
             btn.setChecked(True)
+
+    # ------------------------------------------------------------------
+    # About dialog
+    # ------------------------------------------------------------------
+
+    def _show_about(self):
+        """Show the About dialog."""
+        from fam.ui.styles import (
+            PRIMARY_GREEN, ACCENT_GREEN, HARVEST_GOLD,
+            WHITE, TEXT_COLOR, BACKGROUND, LIGHT_GRAY
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("About FAM Market Manager")
+        dlg.setFixedWidth(420)
+        dlg.setStyleSheet(f"QDialog {{ background-color: {BACKGROUND}; }}")
+
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(12)
+        layout.setContentsMargins(24, 20, 24, 16)
+
+        # Title
+        title = QLabel("FAM Market Manager")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet(f"""
+            font-size: 20px; font-weight: bold;
+            color: {PRIMARY_GREEN}; background: transparent;
+        """)
+        layout.addWidget(title)
+
+        # Version
+        version = QLabel("Version 1.5.0")
+        version.setAlignment(Qt.AlignCenter)
+        version.setStyleSheet(f"""
+            font-size: 13px; color: {TEXT_COLOR}; background: transparent;
+        """)
+        layout.addWidget(version)
+
+        # Description
+        desc = QLabel(
+            "A transaction management tool for farmers market "
+            "incentive programs. Tracks customer payments, calculates "
+            "FAM match amounts, and generates reports for vendor "
+            "reimbursement."
+        )
+        desc.setWordWrap(True)
+        desc.setAlignment(Qt.AlignCenter)
+        desc.setStyleSheet(f"""
+            font-size: 12px; color: {TEXT_COLOR};
+            padding: 8px 12px; background: transparent;
+        """)
+        layout.addWidget(desc)
+
+        # GitHub link
+        repo_btn = QPushButton("View Source Code on GitHub")
+        repo_btn.setCursor(Qt.PointingHandCursor)
+        repo_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 16px; font-size: 12px; min-height: 0px;
+                border: 1px solid {LIGHT_GRAY}; border-radius: 6px;
+                background-color: {WHITE}; color: {ACCENT_GREEN};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #F0EFEB;
+                border-color: {ACCENT_GREEN};
+            }}
+        """)
+        repo_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://github.com/seansaball/fam-market-manager")
+            )
+        )
+        layout.addWidget(repo_btn, alignment=Qt.AlignCenter)
+
+        # Close button
+        close_btn = QDialogButtonBox(QDialogButtonBox.Close)
+        close_btn.rejected.connect(dlg.close)
+        layout.addWidget(close_btn)
+
+        dlg.exec()
+
+    # ------------------------------------------------------------------
+    # Tutorial
+    # ------------------------------------------------------------------
+
+    def start_tutorial(self):
+        """Launch the guided tutorial overlay."""
+        from fam.ui.tutorial_overlay import TutorialOverlay, TUTORIAL_STEPS
+        self._end_tutorial()
+        self._tutorial_overlay = TutorialOverlay(self, TUTORIAL_STEPS)
+        self._tutorial_overlay.finished.connect(self._end_tutorial)
+
+    def _end_tutorial(self):
+        """Remove the tutorial overlay if active."""
+        if self._tutorial_overlay:
+            self._tutorial_overlay.hide()
+            self._tutorial_overlay.deleteLater()
+            self._tutorial_overlay = None
+
+    def eventFilter(self, obj, event):
+        """Resize the tutorial overlay when the central widget resizes."""
+        if obj is self.centralWidget() and event.type() == QEvent.Resize:
+            if self._tutorial_overlay:
+                self._tutorial_overlay.refresh_position()
+        return super().eventFilter(obj, event)

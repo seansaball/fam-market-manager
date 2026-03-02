@@ -10,9 +10,10 @@ logger = logging.getLogger('fam.models.audit')
 ACTION_LABELS = {
     'CREATE':        'Transaction Created',
     'CONFIRM':       'Payment Confirmed',
-    'ADJUST':        'Transaction Adjusted',
-    'VOID':          'Voided',
-    'PAYMENT_SAVED': 'Payment Methods Saved',
+    'ADJUST':            'Transaction Adjusted',
+    'PAYMENT_ADJUSTED':  'Payment Methods Adjusted',
+    'VOID':              'Voided',
+    'PAYMENT_SAVED':     'Payment Methods Saved',
     'OPEN':          'Market Day Opened',
     'CLOSE':         'Market Day Closed',
     'REOPEN':        'Market Day Reopened',

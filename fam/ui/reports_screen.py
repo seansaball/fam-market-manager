@@ -76,6 +76,7 @@ class ReportsScreen(QWidget):
 
         # ── Filter bar — 4 checkable dropdowns ───────────────────
         filter_frame = QFrame()
+        self.filter_frame = filter_frame  # expose for tutorial hints
         filter_frame.setStyleSheet(f"""
             QFrame {{
                 background-color: {WHITE};
@@ -745,11 +746,17 @@ class ReportsScreen(QWidget):
         trend_rows = conn.execute(f"""
             SELECT md.date,
                    COALESCE(SUM(t.receipt_total), 0)   AS gross_total,
-                   COALESCE(SUM(pl.match_amount), 0) AS fam_match_total,
-                   COALESCE(SUM(pl.customer_charged), 0) AS customer_paid_total
+                   COALESCE(SUM(pl_agg.match_total), 0) AS fam_match_total,
+                   COALESCE(SUM(pl_agg.customer_total), 0) AS customer_paid_total
             FROM transactions t
             JOIN market_days md ON t.market_day_id = md.id
-            LEFT JOIN payment_line_items pl ON pl.transaction_id = t.id
+            LEFT JOIN (
+                SELECT transaction_id,
+                       SUM(match_amount) as match_total,
+                       SUM(customer_charged) as customer_total
+                FROM payment_line_items
+                GROUP BY transaction_id
+            ) pl_agg ON pl_agg.transaction_id = t.id
             {where}
             GROUP BY md.date
             ORDER BY md.date
@@ -895,12 +902,16 @@ class ReportsScreen(QWidget):
                    COUNT(DISTINCT co.customer_label) as customer_count,
                    COUNT(t.id) as receipt_count,
                    COALESCE(SUM(t.receipt_total), 0) as total_spend,
-                   COALESCE(SUM(pli.match_amount), 0) as total_match
+                   COALESCE(SUM(pli_agg.total_match), 0) as total_match
             FROM customer_orders co
             JOIN transactions t ON t.customer_order_id = co.id
             JOIN market_days md ON t.market_day_id = md.id
             JOIN vendors v ON t.vendor_id = v.id
-            LEFT JOIN payment_line_items pli ON pli.transaction_id = t.id
+            LEFT JOIN (
+                SELECT transaction_id, SUM(match_amount) as total_match
+                FROM payment_line_items
+                GROUP BY transaction_id
+            ) pli_agg ON pli_agg.transaction_id = t.id
             {where}
               AND co.zip_code IS NOT NULL AND co.zip_code != ''
             GROUP BY co.zip_code

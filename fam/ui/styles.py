@@ -32,6 +32,7 @@ FIELD_LABEL_BG = "#ECEAE4"  # Warm tinted label background
 SUCCESS_BG = "#e4ede8"
 ERROR_BG = "#FFEBEE"
 WARNING_BG = "#fef2e6"
+SELECTION_BG = "#fcdcc6"       # Light orange text highlight
 
 # Font stacks
 FONT_FAMILY = "'Inter', 'Source Sans Pro', 'Segoe UI', 'Arial', sans-serif"
@@ -266,6 +267,8 @@ QLineEdit, QDoubleSpinBox, QSpinBox {{
     background-color: {WHITE};
     font-size: 14px;
     min-height: 22px;
+    selection-background-color: {SELECTION_BG};
+    selection-color: {TEXT_COLOR};
 }}
 
 QLineEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus {{
@@ -282,6 +285,8 @@ QComboBox {{
     background-color: {WHITE};
     font-size: 14px;
     min-height: 22px;
+    selection-background-color: {SELECTION_BG};
+    selection-color: {TEXT_COLOR};
 }}
 
 QComboBox:focus {{
@@ -343,6 +348,8 @@ QTextEdit, QPlainTextEdit {{
     padding: 10px 14px;
     background-color: {WHITE};
     font-size: 13px;
+    selection-background-color: {SELECTION_BG};
+    selection-color: {TEXT_COLOR};
 }}
 
 QTextEdit:focus, QPlainTextEdit:focus {{

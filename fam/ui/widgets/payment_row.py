@@ -215,6 +215,11 @@ class PaymentRow(QFrame):
                 item.setFlags(item.flags() | Qt.ItemIsEnabled)
                 item.setForeground(normal)
 
+    def set_display_values(self, match_amount, customer_charged):
+        """Override the displayed match and customer values (e.g., after cap)."""
+        self.match_amount_label.setText(f"${match_amount:.2f}")
+        self.customer_charged_label.setText(f"${customer_charged:.2f}")
+
     def set_data(self, payment_method_id, amount):
         """Set the row from existing data."""
         for i in range(self.method_combo.count()):

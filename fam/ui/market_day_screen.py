@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QFrame,
-    QLineEdit
+    QLineEdit, QInputDialog
 )
 from PySide6.QtCore import Qt, Signal
 from datetime import date
@@ -49,6 +49,7 @@ class MarketDayScreen(QWidget):
 
         # Create / select area
         create_frame = QFrame()
+        self.create_frame = create_frame  # expose for tutorial hints
         create_frame.setStyleSheet(f"""
             QFrame {{
                 background-color: {WHITE};
@@ -182,7 +183,23 @@ class MarketDayScreen(QWidget):
             self.close_btn.setVisible(True)
             self.reopen_btn.setVisible(False)
             self._load_transactions(open_md['id'])
+
+            # Lock volunteer field and controls while market day is open
+            opened_by = open_md.get('opened_by', '')
+            self.volunteer_input.setText(opened_by)
+            self.volunteer_input.setReadOnly(True)
+            self.volunteer_input.setStyleSheet(
+                "background-color: #F0F0F0; color: #888888;"
+            )
+            self.open_btn.setEnabled(False)
+            self.market_combo.setEnabled(False)
         else:
+            # Unlock volunteer field and controls
+            self.volunteer_input.setReadOnly(False)
+            self.volunteer_input.setStyleSheet("")
+            self.open_btn.setEnabled(True)
+            self.market_combo.setEnabled(True)
+
             selected_id = self.market_day_combo.currentData()
             if selected_id:
                 md = get_market_day_by_id(selected_id)
@@ -263,12 +280,16 @@ class MarketDayScreen(QWidget):
         if not open_md:
             return
 
-        volunteer = self._get_volunteer_name()
-        if not volunteer:
-            QMessageBox.warning(self, "Name Required",
-                                "Please enter your name before closing the market day.")
-            self.volunteer_input.setFocus()
+        # Prompt for name of volunteer closing the market day
+        volunteer, ok = QInputDialog.getText(
+            self, "Close Market Day",
+            "Enter your name to close the market day:",
+            QLineEdit.Normal,
+            open_md.get('opened_by', '')
+        )
+        if not ok or not volunteer.strip():
             return
+        volunteer = volunteer.strip()
 
         # Warn about draft transactions
         drafts = get_draft_transactions(open_md['id'])
@@ -299,7 +320,18 @@ class MarketDayScreen(QWidget):
                 f"{open_md['market_name']} - {open_md['date']}"
             )
             return
-        volunteer = self._get_volunteer_name()
+
+        # Prompt for name of volunteer reopening the market day
+        volunteer, ok = QInputDialog.getText(
+            self, "Reopen Market Day",
+            "Enter your name to reopen the market day:",
+            QLineEdit.Normal,
+            self.volunteer_input.text().strip()
+        )
+        if not ok or not volunteer.strip():
+            return
+        volunteer = volunteer.strip()
+
         reopen_market_day(md_id, opened_by=volunteer)
         self.refresh()
         self.market_day_changed.emit()

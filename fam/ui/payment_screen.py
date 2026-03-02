@@ -19,6 +19,7 @@ from fam.models.customer_order import (
     get_order_vendor_summary, update_customer_order_status,
     get_customer_prior_match
 )
+from fam.models.market_day import get_open_market_day
 
 logger = logging.getLogger('fam.ui.payment_screen')
 from fam.utils.calculations import calculate_payment_breakdown
@@ -180,6 +181,7 @@ class PaymentScreen(QWidget):
 
         # ── Bottom area: collection checklist + action buttons ──────
         bottom_frame = QFrame()
+        self.bottom_frame = bottom_frame  # expose for tutorial hints
         bottom_frame.setStyleSheet(f"""
             QFrame {{
                 background-color: {WHITE};
@@ -682,8 +684,11 @@ class PaymentScreen(QWidget):
         try:
             self._distribute_and_save_payments(items, receipt_total, commit=False)
 
+            # Use the active market day's volunteer name for audit trail
+            open_md = get_open_market_day()
+            confirmed_by = (open_md.get('opened_by') if open_md else None) or 'Volunteer'
             for t in self._order_transactions:
-                confirm_transaction(t['id'], confirmed_by="Volunteer", commit=False)
+                confirm_transaction(t['id'], confirmed_by=confirmed_by, commit=False)
 
             if self._current_order_id:
                 update_customer_order_status(self._current_order_id, 'Confirmed',

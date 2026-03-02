@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate
 )
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QPalette
-from PySide6.QtCore import Qt, Signal, QEvent, QDate
+from PySide6.QtCore import Qt, Signal, QEvent, QDate, QTimer
 from fam.ui.styles import (
     FIELD_LABEL_BG, ERROR_COLOR, PRIMARY_GREEN, TEXT_COLOR, LIGHT_GRAY, WHITE
 )
@@ -36,17 +36,37 @@ class ColorPreservingDelegate(QStyledItemDelegate):
 # Prevent accidental value changes when scrolling the page.
 
 class NoScrollSpinBox(QSpinBox):
-    """QSpinBox that ignores mouse wheel events."""
+    """QSpinBox that ignores mouse wheel events and supports
+    select-all-on-focus and type-to-replace behavior."""
 
     def wheelEvent(self, event):
         event.ignore()
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        QTimer.singleShot(0, self.selectAll)
+
+    def keyPressEvent(self, event):
+        if self.lineEdit().hasSelectedText() and event.text() in '0123456789':
+            self.lineEdit().del_()
+        super().keyPressEvent(event)
 
 
 class NoScrollDoubleSpinBox(QDoubleSpinBox):
-    """QDoubleSpinBox that ignores mouse wheel events."""
+    """QDoubleSpinBox that ignores mouse wheel events and supports
+    select-all-on-focus and type-to-replace behavior."""
 
     def wheelEvent(self, event):
         event.ignore()
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        QTimer.singleShot(0, self.selectAll)
+
+    def keyPressEvent(self, event):
+        if self.lineEdit().hasSelectedText() and event.text() in '0123456789.':
+            self.lineEdit().del_()
+        super().keyPressEvent(event)
 
 
 class NoScrollComboBox(QComboBox):
