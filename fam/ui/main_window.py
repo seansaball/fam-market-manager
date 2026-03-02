@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QLabel, QButtonGroup, QFrame, QSizePolicy,
     QDialog, QDialogButtonBox
 )
-from PySide6.QtCore import Qt, QRect, QEvent, QUrl
+from PySide6.QtCore import Qt, QRect, QEvent, QUrl, QTimer
 from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush, QIcon, QDesktopServices
 
 from fam.ui.styles import PRIMARY_GREEN, WHITE, LIGHT_GRAY, SUBTITLE_GRAY
@@ -133,7 +133,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addStretch()
 
         # About button (version + clickable)
-        self._about_btn = QPushButton("  v1.5.0  \u2022  About")
+        self._about_btn = QPushButton("  v1.5.1  \u2022  About")
         self._about_btn.setCursor(Qt.PointingHandCursor)
         self._about_btn.setStyleSheet("""
             QPushButton {
@@ -238,6 +238,9 @@ class MainWindow(QMainWindow):
         self._tutorial_overlay = None
         self.centralWidget().installEventFilter(self)
 
+        # Auto-launch tutorial on first run (after the window is painted)
+        QTimer.singleShot(500, self._maybe_auto_tutorial)
+
     def _navigate(self, idx):
         self.stack.setCurrentIndex(idx)
         # Refresh the target screen
@@ -303,7 +306,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         # Version
-        version = QLabel("Version 1.5.0")
+        version = QLabel("Version 1.5.1")
         version.setAlignment(Qt.AlignCenter)
         version.setStyleSheet(f"""
             font-size: 13px; color: {TEXT_COLOR}; background: transparent;
@@ -358,6 +361,40 @@ class MainWindow(QMainWindow):
     # Tutorial
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # First-run detection (app_settings table)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_first_run() -> bool:
+        """Return True if the tutorial has never been shown."""
+        from fam.database.connection import get_connection
+        try:
+            row = get_connection().execute(
+                "SELECT value FROM app_settings WHERE key = 'tutorial_shown'"
+            ).fetchone()
+            return row is None or row[0] != '1'
+        except Exception:
+            return False  # table might not exist yet — don't crash
+
+    @staticmethod
+    def _mark_tutorial_shown():
+        """Record that the tutorial has been shown so it won't auto-launch again."""
+        from fam.database.connection import get_connection
+        try:
+            conn = get_connection()
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('tutorial_shown', '1')"
+            )
+            conn.commit()
+        except Exception:
+            pass  # best-effort — never crash
+
+    def _maybe_auto_tutorial(self):
+        """Launch the tutorial automatically on first run only."""
+        if self._is_first_run():
+            self.start_tutorial()
+
     def start_tutorial(self):
         """Launch the guided tutorial overlay."""
         from fam.ui.tutorial_overlay import TutorialOverlay, TUTORIAL_STEPS
@@ -371,6 +408,7 @@ class MainWindow(QMainWindow):
             self._tutorial_overlay.hide()
             self._tutorial_overlay.deleteLater()
             self._tutorial_overlay = None
+            self._mark_tutorial_shown()
 
     def eventFilter(self, obj, event):
         """Resize the tutorial overlay when the central widget resizes."""

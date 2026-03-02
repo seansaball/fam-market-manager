@@ -1,5 +1,6 @@
 """QApplication setup and initialization."""
 
+import ctypes
 import logging
 import sys
 import os
@@ -15,9 +16,34 @@ from fam.ui.main_window import MainWindow
 
 logger = logging.getLogger('fam.app')
 
+# ── Single-instance prevention (Windows named mutex) ───────────
+_ERROR_ALREADY_EXISTS = 183
+_mutex_handle = None  # kept alive for the process lifetime
+
+
+def _ensure_single_instance():
+    """Create a named mutex; exit with a warning if another instance is running."""
+    global _mutex_handle
+    kernel32 = ctypes.windll.kernel32
+    _mutex_handle = kernel32.CreateMutexW(None, False, "FAM_MarketManager_SingleInstance")
+    if kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+        logger.warning("Another instance of FAM Manager is already running — exiting")
+        _app = QApplication.instance() or QApplication(sys.argv)
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            None, "Already Running",
+            "FAM Market Manager is already open.\n\n"
+            "Only one copy can run at a time to protect your data.\n"
+            "Check your taskbar for the existing window."
+        )
+        sys.exit(0)
+
 
 def run():
     """Initialize and run the FAM Market Day Transaction Manager."""
+    # ── Single-instance check (before anything else) ───────────
+    _ensure_single_instance()
+
     # Set database path — next to the .exe when frozen, or project root in dev
     if getattr(sys, 'frozen', False):
         project_dir = os.path.dirname(sys.executable)

@@ -7,7 +7,7 @@ from .connection import get_connection
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS market_payment_methods (
     FOREIGN KEY (market_id) REFERENCES markets(id),
     FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id),
     UNIQUE(market_id, payment_method_id)
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -381,6 +386,19 @@ def _migrate_v8_to_v9(conn):
     logger.info("Migration v8->v9 complete: market_payment_methods table created")
 
 
+def _migrate_v9_to_v10(conn):
+    """Add app_settings key-value table for application preferences."""
+    logger.info("Running migration v9 to v10: app_settings table")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    conn.commit()
+    logger.info("Migration v9->v10 complete: app_settings table created")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -443,6 +461,10 @@ def initialize_database():
     if current_version < 9:
         _migrate_v8_to_v9(conn)
         current_version = 9
+
+    if current_version < 10:
+        _migrate_v9_to_v10(conn)
+        current_version = 10
 
     # Record the final version (avoid duplicate if already at this version)
     existing = conn.execute(
