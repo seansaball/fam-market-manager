@@ -1,7 +1,10 @@
 """Main window with sidebar navigation."""
 
+import logging
 import os
 import sys
+
+logger = logging.getLogger('fam.ui.main_window')
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
@@ -11,6 +14,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QRect, QEvent, QUrl, QTimer
 from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush, QIcon, QDesktopServices
 
+from fam import __version__
 from fam.ui.styles import PRIMARY_GREEN, WHITE, LIGHT_GRAY, SUBTITLE_GRAY
 
 
@@ -63,7 +67,12 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FAM Market Day Transaction Manager")
+        from fam.utils.app_settings import get_market_code
+        market_code = get_market_code()
+        title = "FAM Market Day Transaction Manager"
+        if market_code:
+            title += f"  [{market_code}]"
+        self.setWindowTitle(title)
         icon_path = _resolve_asset("fam_icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -133,7 +142,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addStretch()
 
         # About button (version + clickable)
-        self._about_btn = QPushButton("  v1.5.1  \u2022  About")
+        self._about_btn = QPushButton(f"  v{__version__}  \u2022  About")
         self._about_btn.setCursor(Qt.PointingHandCursor)
         self._about_btn.setStyleSheet("""
             QPushButton {
@@ -241,6 +250,14 @@ class MainWindow(QMainWindow):
         # Auto-launch tutorial on first run (after the window is painted)
         QTimer.singleShot(500, self._maybe_auto_tutorial)
 
+        # Periodic database backup timer (active only while a market day is open)
+        self._backup_timer = QTimer(self)
+        self._backup_timer.setInterval(5 * 60 * 1000)  # 5 minutes
+        self._backup_timer.timeout.connect(self._on_backup_timer)
+
+        # If a market day is already open at startup (e.g. after crash), start timer
+        QTimer.singleShot(1000, self._update_backup_timer)
+
     def _navigate(self, idx):
         self.stack.setCurrentIndex(idx)
         # Refresh the target screen
@@ -251,6 +268,31 @@ class MainWindow(QMainWindow):
     def _on_market_day_changed(self):
         """Refresh dependent screens when market day changes."""
         self.receipt_intake_screen.refresh()
+        self._update_backup_timer()
+        self._update_title_bar()
+
+    def _update_title_bar(self):
+        """Update the title bar to reflect the current market code."""
+        from fam.utils.app_settings import get_market_code
+        market_code = get_market_code()
+        title = "FAM Market Day Transaction Manager"
+        if market_code:
+            title += f"  [{market_code}]"
+        self.setWindowTitle(title)
+
+    def _update_backup_timer(self):
+        """Start or stop periodic backup based on market day state."""
+        from fam.models.market_day import get_open_market_day
+        if get_open_market_day():
+            if not self._backup_timer.isActive():
+                self._backup_timer.start()
+        else:
+            self._backup_timer.stop()
+
+    def _on_backup_timer(self):
+        """5-minute periodic backup while market day is open."""
+        from fam.database.backup import create_backup
+        create_backup(reason="auto")
 
     def _on_customer_order_ready(self, order_id):
         """Navigate to payment screen with the customer order."""
@@ -306,7 +348,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         # Version
-        version = QLabel("Version 1.5.1")
+        version = QLabel(f"Version {__version__}")
         version.setAlignment(Qt.AlignCenter)
         version.setStyleSheet(f"""
             font-size: 13px; color: {TEXT_COLOR}; background: transparent;
@@ -327,6 +369,40 @@ class MainWindow(QMainWindow):
             padding: 8px 12px; background: transparent;
         """)
         layout.addWidget(desc)
+
+        # Data location
+        from fam.database.connection import get_db_path
+        data_folder = os.path.dirname(os.path.abspath(get_db_path()))
+        data_label = QLabel(f"Data folder:\n{data_folder}")
+        data_label.setWordWrap(True)
+        data_label.setAlignment(Qt.AlignCenter)
+        data_label.setStyleSheet(f"""
+            font-size: 11px; color: {TEXT_COLOR};
+            padding: 6px 12px; background: transparent;
+        """)
+        layout.addWidget(data_label)
+
+        # Open Data Folder button
+        open_data_btn = QPushButton("Open Data Folder")
+        open_data_btn.setCursor(Qt.PointingHandCursor)
+        open_data_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 16px; font-size: 12px; min-height: 0px;
+                border: 1px solid {LIGHT_GRAY}; border-radius: 6px;
+                background-color: {WHITE}; color: {PRIMARY_GREEN};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #F0EFEB;
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        open_data_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(data_folder)
+            )
+        )
+        layout.addWidget(open_data_btn, alignment=Qt.AlignCenter)
 
         # GitHub link
         repo_btn = QPushButton("View Source Code on GitHub")
@@ -368,27 +444,15 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _is_first_run() -> bool:
         """Return True if the tutorial has never been shown."""
-        from fam.database.connection import get_connection
-        try:
-            row = get_connection().execute(
-                "SELECT value FROM app_settings WHERE key = 'tutorial_shown'"
-            ).fetchone()
-            return row is None or row[0] != '1'
-        except Exception:
-            return False  # table might not exist yet — don't crash
+        from fam.utils.app_settings import get_setting
+        val = get_setting('tutorial_shown')
+        return val is None or val != '1'
 
     @staticmethod
     def _mark_tutorial_shown():
         """Record that the tutorial has been shown so it won't auto-launch again."""
-        from fam.database.connection import get_connection
-        try:
-            conn = get_connection()
-            conn.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('tutorial_shown', '1')"
-            )
-            conn.commit()
-        except Exception:
-            pass  # best-effort — never crash
+        from fam.utils.app_settings import set_setting
+        set_setting('tutorial_shown', '1')
 
     def _maybe_auto_tutorial(self):
         """Launch the tutorial automatically on first run only."""
@@ -401,6 +465,18 @@ class MainWindow(QMainWindow):
         self._end_tutorial()
         self._tutorial_overlay = TutorialOverlay(self, TUTORIAL_STEPS)
         self._tutorial_overlay.finished.connect(self._end_tutorial)
+        self._tutorial_overlay.auto_configure_requested.connect(self._auto_configure)
+
+    def _auto_configure(self):
+        """Load default seed data when user clicks Yes during tutorial."""
+        from fam.database.seed import seed_sample_data
+        success = seed_sample_data()
+        if success:
+            self.settings_screen.refresh()
+            self.market_day_screen.refresh()
+            logger.info("Auto-configure: default data loaded successfully")
+        else:
+            logger.warning("Auto-configure: data already exists, skipping")
 
     def _end_tutorial(self):
         """Remove the tutorial overlay if active."""

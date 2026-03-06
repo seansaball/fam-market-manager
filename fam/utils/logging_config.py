@@ -8,14 +8,22 @@ from logging.handlers import RotatingFileHandler
 _log_path = None
 
 
-def setup_logging():
-    """Set up file-based rotating log next to the database.
+def setup_logging(data_dir: str | None = None):
+    """Set up file-based rotating log in the data directory.
+
+    Parameters
+    ----------
+    data_dir : str, optional
+        Directory for the log file.  When ``None``, falls back to the
+        legacy behaviour (next to the executable or project root).
 
     Returns the log file path.  5 MB per file, 3 backups = 20 MB max.
     """
     global _log_path
 
-    if getattr(sys, 'frozen', False):
+    if data_dir:
+        log_dir = data_dir
+    elif getattr(sys, 'frozen', False):
         log_dir = os.path.dirname(sys.executable)
     else:
         log_dir = os.path.dirname(

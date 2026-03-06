@@ -233,7 +233,7 @@ class PaymentScreen(QWidget):
 
         layout.addWidget(bottom_frame)
 
-        # Success message
+        # Success message + Print Receipt button
         self.success_frame = QFrame()
         self.success_frame.setStyleSheet(f"""
             QFrame {{
@@ -244,12 +244,31 @@ class PaymentScreen(QWidget):
             }}
         """)
         self.success_frame.setVisible(False)
-        success_layout = QVBoxLayout(self.success_frame)
+        success_layout = QHBoxLayout(self.success_frame)
         self.success_msg = QLabel("")
         self.success_msg.setStyleSheet(
             f"font-size: 15px; font-weight: bold; color: {PRIMARY_GREEN};"
         )
-        success_layout.addWidget(self.success_msg)
+        success_layout.addWidget(self.success_msg, 1)
+
+        self._print_receipt_btn = QPushButton("\U0001F5A8  Print Receipt")
+        self._print_receipt_btn.setCursor(Qt.PointingHandCursor)
+        self._print_receipt_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 6px 16px; font-size: 13px; min-height: 0px;
+                border: 1px solid {ACCENT_GREEN}; border-radius: 6px;
+                background-color: {WHITE}; color: {PRIMARY_GREEN};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #F0EFEB;
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        self._print_receipt_btn.clicked.connect(self._print_receipt)
+        success_layout.addWidget(self._print_receipt_btn)
+
+        self._last_receipt_data = None
         layout.addWidget(self.success_frame)
 
         layout.addStretch()
@@ -622,12 +641,16 @@ class PaymentScreen(QWidget):
             self._show_error(f"Error saving draft: {e}")
 
     def _confirm_payment(self):
+        # Prevent double-click from triggering duplicate processing
+        self.confirm_btn.setEnabled(False)
+
         self.error_label.setVisible(False)
         self.error_label.setText("")
         self.success_frame.setVisible(False)
 
         if not self._order_transactions:
             self._show_error("No transactions loaded.")
+            self.confirm_btn.setEnabled(True)
             return
 
         receipt_total = self._order_total
@@ -635,6 +658,7 @@ class PaymentScreen(QWidget):
 
         if not items:
             self._show_error("At least one payment method with an amount is required.")
+            self.confirm_btn.setEnabled(True)
             return
 
         entries = [
@@ -647,6 +671,7 @@ class PaymentScreen(QWidget):
 
         if not result['is_valid']:
             self._show_error("\n".join(result['errors']))
+            self.confirm_btn.setEnabled(True)
             return
 
         # ── Pre-confirmation dialog: list what to collect ─────────
@@ -677,6 +702,7 @@ class PaymentScreen(QWidget):
             QMessageBox.Yes | QMessageBox.No
         )
         if answer != QMessageBox.Yes:
+            self.confirm_btn.setEnabled(True)
             return
 
         # ── Process the confirmed payment (atomic) ─────────────
@@ -699,11 +725,16 @@ class PaymentScreen(QWidget):
             conn.rollback()
             logger.exception("Payment confirmation failed — rolled back")
             self._show_error(f"Payment failed: {e}")
+            self.confirm_btn.setEnabled(True)
             return
 
         txn_ids = ", ".join(t['fam_transaction_id'] for t in self._order_transactions)
         logger.info("Payment confirmed for: %s", txn_ids)
         write_ledger_backup()
+
+        # Snapshot receipt data for the optional print button
+        self._last_receipt_data = self._build_receipt_data()
+
         self.success_frame.setVisible(True)
         self.success_msg.setText(f"Payment Confirmed!  Transactions: {txn_ids}")
         self.confirm_btn.setEnabled(False)
@@ -817,3 +848,238 @@ class PaymentScreen(QWidget):
     def _show_error(self, msg):
         self.error_label.setText(msg)
         self.error_label.setVisible(True)
+
+    # ------------------------------------------------------------------
+    # Receipt printing
+    # ------------------------------------------------------------------
+
+    def _build_receipt_data(self) -> dict | None:
+        """Snapshot all data needed to print a customer receipt."""
+        try:
+            order = None
+            if self._current_order_id:
+                order = get_customer_order(self._current_order_id)
+
+            open_md = get_open_market_day()
+            market_name = ''
+            market_date = ''
+            if order:
+                market_name = order.get('market_name', '')
+                market_date = order.get('market_day_date', '')
+            if not market_name and open_md:
+                market_name = open_md.get('market_name', '')
+                market_date = open_md.get('date', '')
+
+            customer_label = order.get('customer_label', '') if order else ''
+            confirmed_by = (open_md.get('opened_by', '') if open_md else '') or 'Volunteer'
+
+            txns = []
+            total_receipt = 0.0
+            total_customer = 0.0
+            total_match = 0.0
+            payment_totals: dict[str, dict] = {}
+
+            for t in self._order_transactions:
+                txn = get_transaction_by_id(t['id'])
+                receipt = float(txn['receipt_total'])
+                total_receipt += receipt
+                line_items = get_payment_line_items(t['id'])
+
+                txns.append({
+                    'fam_id': txn['fam_transaction_id'],
+                    'vendor': txn.get('vendor_name', ''),
+                    'receipt_total': receipt,
+                })
+
+                for li in line_items:
+                    method = li['method_name_snapshot']
+                    amt = float(li['method_amount'])
+                    match = float(li['match_amount'])
+                    cust = float(li['customer_charged'])
+                    total_customer += cust
+                    total_match += match
+                    if method not in payment_totals:
+                        payment_totals[method] = {
+                            'amount': 0.0, 'match': 0.0, 'customer': 0.0,
+                        }
+                    payment_totals[method]['amount'] += amt
+                    payment_totals[method]['match'] += match
+                    payment_totals[method]['customer'] += cust
+
+            return {
+                'market_name': market_name,
+                'market_date': market_date,
+                'customer_label': customer_label,
+                'confirmed_by': confirmed_by,
+                'transactions': txns,
+                'payment_totals': payment_totals,
+                'total_receipt': round(total_receipt, 2),
+                'total_customer': round(total_customer, 2),
+                'total_match': round(total_match, 2),
+            }
+        except Exception:
+            logger.exception("Failed to build receipt data")
+            return None
+
+    def _print_receipt(self):
+        """Open a print dialog with a formatted customer receipt."""
+        data = self._last_receipt_data
+        if not data:
+            QMessageBox.information(self, "Print Receipt",
+                                    "No receipt data available.")
+            return
+
+        html = self._format_receipt_html(data)
+
+        from PySide6.QtPrintSupport import QPrinter, QPrintDialog
+        from PySide6.QtGui import QTextDocument
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setDocName("FAM_Receipt")
+
+        dlg = QPrintDialog(printer, self)
+        dlg.setWindowTitle("Print Customer Receipt")
+        if dlg.exec() == QPrintDialog.Accepted:
+            doc = QTextDocument()
+            doc.setHtml(html)
+            doc.print_(printer)
+            logger.info("Customer receipt printed for %s", data.get('customer_label'))
+
+    @staticmethod
+    def _format_receipt_html(data: dict) -> str:
+        """Build a clean HTML receipt from the snapshot data.
+
+        The *data* dict may contain an optional ``status`` key.  When the
+        status is ``'Voided'`` a prominent red banner is displayed at the
+        top of the receipt so it cannot be mistaken for a live transaction.
+        """
+        market = data['market_name'] or 'Market'
+        date = data['market_date'] or ''
+        customer = data['customer_label'] or ''
+        status = data.get('status', 'Confirmed')
+
+        # Voided banner (only shown for voided transactions)
+        voided_banner = ""
+        if status == 'Voided':
+            voided_banner = (
+                "<div style='text-align:center; padding:6px; margin-bottom:8px; "
+                "background-color:#fde8e8; border:2px solid #c0392b; "
+                "border-radius:4px;'>"
+                "<span style='font-size:14pt; font-weight:bold; color:#c0392b; "
+                "letter-spacing:3px;'>VOIDED</span></div>"
+            )
+
+        rows = ""
+        for i, t in enumerate(data['transactions'], 1):
+            rows += (
+                f"<tr>"
+                f"<td style='padding:2px 8px 2px 0;'>{i}</td>"
+                f"<td style='padding:2px 8px;'>{t['vendor']}</td>"
+                f"<td style='padding:2px 0 2px 8px;text-align:right;'>"
+                f"${t['receipt_total']:,.2f}</td>"
+                f"</tr>"
+            )
+
+        payment_rows = ""
+        for method, totals in data['payment_totals'].items():
+            amt = totals['amount']
+            match = totals['match']
+            cust = totals['customer']
+            payment_rows += (
+                f"<tr>"
+                f"<td style='padding:2px 8px 2px 0;'>{method}</td>"
+                f"<td style='padding:2px 8px;text-align:right;'>${amt:,.2f}</td>"
+                f"<td style='padding:2px 0 2px 8px;text-align:right;'>"
+                f"${match:,.2f}</td>"
+                f"</tr>"
+            )
+
+        from fam.utils.app_settings import get_market_code
+        receipt_code = get_market_code() or ''
+
+        return f"""
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 400px;
+                    margin: 0 auto; font-size: 11pt;">
+
+            <h2 style="text-align:center; margin-bottom:2px; color:#2b493b;">
+                FAM Market Manager</h2>
+            <p style="text-align:center; margin-top:0; color:#666; font-size:10pt;">
+                Customer Receipt{f'  ({receipt_code})' if receipt_code else ''}</p>
+
+            {voided_banner}
+
+            <hr style="border: 1px solid #2b493b;">
+
+            <table style="width:100%; font-size:11pt; margin-bottom:8px;">
+                <tr>
+                    <td><b>Market:</b></td>
+                    <td style="text-align:right;">{market}</td>
+                </tr>
+                <tr>
+                    <td><b>Date:</b></td>
+                    <td style="text-align:right;">{date}</td>
+                </tr>
+                <tr>
+                    <td><b>Customer:</b></td>
+                    <td style="text-align:right;">{customer}</td>
+                </tr>
+            </table>
+
+            <hr style="border: 0.5px solid #ccc;">
+
+            <p style="font-weight:bold; margin-bottom:4px;">Purchases</p>
+            <table style="width:100%; font-size:11pt; border-collapse:collapse;">
+                <tr style="border-bottom:1px solid #ccc;">
+                    <th style="text-align:left; padding:2px 8px 2px 0;">#</th>
+                    <th style="text-align:left; padding:2px 8px;">Vendor</th>
+                    <th style="text-align:right; padding:2px 0 2px 8px;">Amount</th>
+                </tr>
+                {rows}
+                <tr style="border-top:1px solid #999;">
+                    <td></td>
+                    <td style="padding:4px 8px; font-weight:bold;">Subtotal</td>
+                    <td style="padding:4px 0 4px 8px; text-align:right; font-weight:bold;">
+                        ${data['total_receipt']:,.2f}</td>
+                </tr>
+            </table>
+
+            <hr style="border: 0.5px solid #ccc;">
+
+            <p style="font-weight:bold; margin-bottom:4px;">Payment Summary</p>
+            <table style="width:100%; font-size:11pt; border-collapse:collapse;">
+                <tr style="border-bottom:1px solid #ccc;">
+                    <th style="text-align:left; padding:2px 8px 2px 0;">Method</th>
+                    <th style="text-align:right; padding:2px 8px;">Amount</th>
+                    <th style="text-align:right; padding:2px 0 2px 8px;">FAM Match</th>
+                </tr>
+                {payment_rows}
+            </table>
+
+            <hr style="border: 0.5px solid #ccc;">
+
+            <table style="width:100%; font-size:12pt; margin:8px 0;">
+                <tr>
+                    <td><b>You paid:</b></td>
+                    <td style="text-align:right; font-weight:bold; color:#2b493b;">
+                        ${data['total_customer']:,.2f}</td>
+                </tr>
+                <tr>
+                    <td><b>FAM matched:</b></td>
+                    <td style="text-align:right; font-weight:bold; color:#469a45;">
+                        ${data['total_match']:,.2f}</td>
+                </tr>
+                <tr style="border-top:1px solid #999;">
+                    <td style="padding-top:4px;"><b>Vendor total:</b></td>
+                    <td style="padding-top:4px; text-align:right; font-weight:bold;">
+                        ${data['total_receipt']:,.2f}</td>
+                </tr>
+            </table>
+
+            <hr style="border: 1px solid #2b493b;">
+
+            <p style="text-align:center; font-size:11pt; color:#2b493b; margin:8px 0 2px;">
+                Thank you for shopping at the market!</p>
+            <p style="text-align:center; font-size:9pt; color:#999; margin:0;">
+                Confirmed by: {data['confirmed_by']}</p>
+        </div>
+        """

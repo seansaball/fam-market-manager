@@ -1,12 +1,13 @@
 """Settings screen for managing markets, vendors, and payment methods."""
 
 import logging
+import os
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
-    QCheckBox, QMessageBox, QDialog,
-    QFormLayout, QDialogButtonBox
+    QCheckBox, QMessageBox, QDialog, QFileDialog, QScrollArea,
+    QFormLayout, QDialogButtonBox, QSizePolicy
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
@@ -26,7 +27,7 @@ from fam.models.payment_method import (
 )
 from fam.ui.styles import (
     WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ACCENT_GREEN,
-    BACKGROUND, TEXT_COLOR
+    BACKGROUND, TEXT_COLOR, SUBTITLE_GRAY
 )
 from fam.ui.helpers import (
     make_field_label, make_item, make_action_btn, configure_table,
@@ -407,6 +408,210 @@ class AssignMarketsDialog(QDialog):
         }
 
 
+# ── Import Preview Dialog ─────────────────────────────────────
+
+class ImportPreviewDialog(QDialog):
+    """Shows a preview of what will be imported before applying changes."""
+
+    def __init__(self, result, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Import Settings — Preview")
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(480)
+        self.result = result
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {BACKGROUND}; }}
+            QLabel {{ background-color: transparent; color: {TEXT_COLOR}; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 16, 20, 14)
+
+        title = QLabel("Import Preview")
+        title.setStyleSheet(f"""
+            font-size: 18px; font-weight: bold;
+            color: {PRIMARY_GREEN}; background: transparent;
+        """)
+        layout.addWidget(title)
+
+        # Show errors if any
+        if result.errors:
+            err_label = QLabel(
+                f"⚠ {len(result.errors)} warning(s) during parsing:"
+            )
+            err_label.setStyleSheet(f"""
+                font-size: 12px; font-weight: bold;
+                color: {ERROR_COLOR}; background: transparent;
+            """)
+            layout.addWidget(err_label)
+            for err in result.errors[:5]:  # Show max 5 errors
+                el = QLabel(f"  • {err}")
+                el.setWordWrap(True)
+                el.setStyleSheet(f"font-size: 11px; color: {ERROR_COLOR}; background: transparent;")
+                layout.addWidget(el)
+            if len(result.errors) > 5:
+                more = QLabel(f"  … and {len(result.errors) - 5} more")
+                more.setStyleSheet(f"font-size: 11px; color: {ERROR_COLOR}; background: transparent;")
+                layout.addWidget(more)
+
+        # Scrollable preview content
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{ border: 1px solid {LIGHT_GRAY}; border-radius: 6px; }}
+        """)
+        scroll_widget = QWidget()
+        scroll_widget.setStyleSheet(f"background-color: {WHITE};")
+        sl = QVBoxLayout(scroll_widget)
+        sl.setSpacing(8)
+        sl.setContentsMargins(14, 10, 14, 10)
+
+        # Markets section
+        self._add_section(sl, "Markets",
+                          result.new_markets, result.skipped_markets,
+                          lambda m: m.name,
+                          lambda m: f"${m.daily_match_limit:.2f} limit" + (
+                              "" if m.limit_active else " (off)"))
+
+        # Vendors section
+        self._add_section(sl, "Vendors",
+                          result.new_vendors, result.skipped_vendors,
+                          lambda v: v.name,
+                          lambda v: v.contact_info or "")
+
+        # Payment Methods section
+        self._add_section(sl, "Payment Methods",
+                          result.new_payment_methods, result.skipped_payment_methods,
+                          lambda p: p.name,
+                          lambda p: f"{p.match_percent}% match")
+
+        # Assignments summary
+        if result.vendor_assignments or result.pm_assignments:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.HLine)
+            sep.setStyleSheet(f"background-color: {LIGHT_GRAY};")
+            sl.addWidget(sep)
+            assign_label = QLabel("Assignments")
+            assign_label.setStyleSheet(f"""
+                font-size: 14px; font-weight: bold;
+                color: {TEXT_COLOR}; background: transparent;
+            """)
+            sl.addWidget(assign_label)
+            if result.vendor_assignments:
+                va = QLabel(f"  {len(result.vendor_assignments)} vendor → market assignment(s)")
+                va.setStyleSheet("font-size: 12px; background: transparent;")
+                sl.addWidget(va)
+            if result.pm_assignments:
+                pa = QLabel(f"  {len(result.pm_assignments)} payment method → market assignment(s)")
+                pa.setStyleSheet("font-size: 12px; background: transparent;")
+                sl.addWidget(pa)
+
+        sl.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        # Summary line
+        total_new = (len(result.new_markets) + len(result.new_vendors)
+                     + len(result.new_payment_methods))
+        total_skipped = (len(result.skipped_markets) + len(result.skipped_vendors)
+                         + len(result.skipped_payment_methods))
+
+        if total_new == 0:
+            summary_text = "Nothing new to import — all items already exist."
+            summary_color = SUBTITLE_GRAY
+        else:
+            summary_text = (
+                f"Will add {total_new} new item(s)"
+                + (f", skip {total_skipped} existing" if total_skipped else "")
+                + "."
+            )
+            summary_color = ACCENT_GREEN
+
+        summary = QLabel(summary_text)
+        summary.setStyleSheet(f"""
+            font-size: 13px; font-weight: bold;
+            color: {summary_color}; background: transparent;
+            padding: 6px 0;
+        """)
+        layout.addWidget(summary)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 20px; font-size: 13px; min-height: 0px;
+                border: 1px solid {LIGHT_GRAY}; border-radius: 6px;
+                background-color: {WHITE}; color: {TEXT_COLOR};
+            }}
+            QPushButton:hover {{
+                background-color: #F0EFEB;
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        self.import_btn = QPushButton("Import")
+        self.import_btn.setCursor(Qt.PointingHandCursor)
+        self.import_btn.setObjectName("primary_btn")
+        self.import_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 24px; font-size: 13px; min-height: 0px;
+                border-radius: 6px; background-color: {PRIMARY_GREEN};
+                color: white; font-weight: bold; border: none;
+            }}
+            QPushButton:hover {{
+                background-color: {ACCENT_GREEN};
+            }}
+            QPushButton:disabled {{
+                background-color: {LIGHT_GRAY}; color: #999;
+            }}
+        """)
+        self.import_btn.setEnabled(total_new > 0)
+        self.import_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self.import_btn)
+
+        layout.addLayout(btn_row)
+
+    def _add_section(self, layout, title, new_items, skipped_items,
+                     name_fn, detail_fn):
+        """Add a preview section for one entity type."""
+        if not new_items and not skipped_items:
+            return
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"background-color: {LIGHT_GRAY};")
+        layout.addWidget(sep)
+
+        header = QLabel(f"{title}  ({len(new_items)} new, {len(skipped_items)} existing)")
+        header.setStyleSheet(f"""
+            font-size: 14px; font-weight: bold;
+            color: {TEXT_COLOR}; background: transparent;
+        """)
+        layout.addWidget(header)
+
+        for item in new_items:
+            detail = detail_fn(item)
+            text = f"  ✚  {name_fn(item)}"
+            if detail:
+                text += f"  —  {detail}"
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f"font-size: 12px; color: {ACCENT_GREEN}; background: transparent;")
+            layout.addWidget(lbl)
+
+        for item in skipped_items:
+            text = f"  ━  {name_fn(item)}  (already exists)"
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f"font-size: 12px; color: {SUBTITLE_GRAY}; background: transparent;")
+            layout.addWidget(lbl)
+
+
 # ── Main Settings Screen ─────────────────────────────────────
 
 class SettingsScreen(QWidget):
@@ -422,14 +627,58 @@ class SettingsScreen(QWidget):
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(6)
 
+        # Header row with title + Import/Export buttons
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+
         title = QLabel("Settings")
         title.setObjectName("screen_title")
-        layout.addWidget(title)
+        header_row.addWidget(title)
+
+        header_row.addStretch()
+
+        self.import_btn = QPushButton("\U0001F4E5  Import Settings")
+        self.import_btn.setObjectName("settings_import_btn")
+        self.import_btn.setCursor(Qt.PointingHandCursor)
+        self.import_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 7px 16px; font-size: 12px; min-height: 0px;
+                border: 1px solid {PRIMARY_GREEN}; border-radius: 6px;
+                background-color: {PRIMARY_GREEN}; color: white;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {ACCENT_GREEN};
+                border-color: {ACCENT_GREEN};
+            }}
+        """)
+        self.import_btn.clicked.connect(self._import_settings)
+        header_row.addWidget(self.import_btn)
+
+        export_btn = QPushButton("\U0001F4E4  Export Settings")
+        export_btn.setCursor(Qt.PointingHandCursor)
+        export_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 7px 16px; font-size: 12px; min-height: 0px;
+                border: 1px solid {LIGHT_GRAY}; border-radius: 6px;
+                background-color: {WHITE}; color: {TEXT_COLOR};
+            }}
+            QPushButton:hover {{
+                background-color: #F0EFEB;
+                border-color: {PRIMARY_GREEN};
+                color: {PRIMARY_GREEN};
+            }}
+        """)
+        export_btn.clicked.connect(self._export_settings)
+        header_row.addWidget(export_btn)
+
+        layout.addLayout(header_row)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_markets_tab(), "Markets")
         self.tabs.addTab(self._build_vendors_tab(), "Vendors")
         self.tabs.addTab(self._build_payment_methods_tab(), "Payment Methods")
+        self.tabs.addTab(self._build_preferences_tab(), "Preferences")
         self.tabs.addTab(self._build_reset_tab(), "Reset")
 
         layout.addWidget(self.tabs)
@@ -563,6 +812,142 @@ class SettingsScreen(QWidget):
 
         return tab
 
+    # ── Preferences Tab ───────────────────────────────────────
+
+    def _build_preferences_tab(self):
+        from fam.utils.app_settings import (
+            get_large_receipt_threshold, set_large_receipt_threshold,
+            get_market_code, get_device_id
+        )
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(16)
+
+        # ── Section: Device Identity ──────────────────────────
+        id_label = QLabel("Device Identity")
+        id_label.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {PRIMARY_GREEN}; "
+            "padding: 8px 0 0 0; background: transparent;"
+        )
+        layout.addWidget(id_label)
+
+        id_desc = QLabel(
+            "These identifiers distinguish this device's data when "
+            "multiple markets send reports to the finance team. "
+            "The market code is automatically derived from the market "
+            "name when a market day is opened."
+        )
+        id_desc.setWordWrap(True)
+        id_desc.setStyleSheet(
+            f"font-size: 13px; color: {TEXT_COLOR}; padding: 0 0 4px 0; "
+            "background: transparent;"
+        )
+        layout.addWidget(id_desc)
+
+        id_frame = QFrame()
+        id_frame.setStyleSheet(_COMPACT_FRAME)
+        id_fl = QHBoxLayout(id_frame)
+
+        code_lbl = make_field_label("Market Code")
+        code_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        id_fl.addWidget(code_lbl)
+
+        self._market_code_display = QLabel(get_market_code() or "Not Set")
+        self._market_code_display.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {TEXT_COLOR}; "
+            "letter-spacing: 3px; background: transparent; padding: 0 8px;"
+        )
+        self._market_code_display.setFixedHeight(_FORM_ROW_HEIGHT)
+        id_fl.addWidget(self._market_code_display)
+
+        id_fl.addSpacing(20)
+
+        device_lbl = make_field_label("Device ID")
+        device_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        id_fl.addWidget(device_lbl)
+
+        device_id = get_device_id() or "Unknown"
+        # Show first 8 chars for brevity
+        short_id = device_id[:8] + "..." if len(device_id) > 12 else device_id
+        device_display = QLabel(short_id)
+        device_display.setToolTip(device_id)
+        device_display.setStyleSheet(
+            f"font-size: 12px; color: {SUBTITLE_GRAY}; "
+            "background: transparent; padding: 0 8px;"
+        )
+        device_display.setFixedHeight(_FORM_ROW_HEIGHT)
+        id_fl.addWidget(device_display)
+
+        id_fl.addStretch()
+        layout.addWidget(id_frame)
+
+        # ── Section: Receipt Warnings ──────────────────────────
+        section_label = QLabel("Receipt Warnings")
+        section_label.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {PRIMARY_GREEN}; "
+            "padding: 8px 0 0 0; background: transparent;"
+        )
+        layout.addWidget(section_label)
+
+        desc = QLabel(
+            "Show a confirmation dialog when a receipt total exceeds the "
+            "threshold below. This helps catch data-entry mistakes like "
+            "typing $1,000 instead of $10.00."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(
+            f"font-size: 13px; color: {TEXT_COLOR}; padding: 0 0 4px 0; "
+            "background: transparent;"
+        )
+        layout.addWidget(desc)
+
+        form = QFrame()
+        form.setStyleSheet(_COMPACT_FRAME)
+        fl = QHBoxLayout(form)
+
+        lbl = make_field_label("Warning threshold ($)")
+        lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        fl.addWidget(lbl)
+
+        self._threshold_spin = NoScrollDoubleSpinBox()
+        self._threshold_spin.setRange(1.00, 99_999.99)
+        self._threshold_spin.setDecimals(2)
+        self._threshold_spin.setPrefix("$ ")
+        self._threshold_spin.setValue(get_large_receipt_threshold())
+        self._threshold_spin.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._threshold_spin.setFixedWidth(160)
+        self._threshold_spin.setStyleSheet(_FORM_INPUT_STYLE)
+        fl.addWidget(self._threshold_spin)
+
+        save_btn = QPushButton("Save")
+        save_btn.setObjectName("primary_btn")
+        save_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        save_btn.setStyleSheet(_FORM_BTN_STYLE)
+        save_btn.clicked.connect(self._save_preferences)
+        fl.addWidget(save_btn)
+
+        self._pref_status = QLabel("")
+        self._pref_status.setStyleSheet(
+            f"color: {ACCENT_GREEN}; font-weight: bold; background: transparent;"
+        )
+        self._pref_status.setVisible(False)
+        fl.addWidget(self._pref_status)
+
+        fl.addStretch()
+        layout.addWidget(form)
+
+        layout.addStretch()
+        return tab
+
+    def _save_preferences(self):
+        from fam.utils.app_settings import set_large_receipt_threshold
+        value = self._threshold_spin.value()
+        set_large_receipt_threshold(value)
+        self._pref_status.setText(f"Saved — warnings will appear above ${value:.2f}")
+        self._pref_status.setVisible(True)
+        logger.info("Large receipt threshold set to %.2f", value)
+
     # ── Reset Tab ────────────────────────────────────────────
 
     def _build_reset_tab(self):
@@ -571,10 +956,13 @@ class SettingsScreen(QWidget):
         layout.setSpacing(20)
 
         info = QLabel(
-            "Use this to reset all stored data back to the default generic data.\n"
-            "This will delete all market days, transactions, FMNP entries, "
-            "audit log entries, and restore the default markets, vendors, "
-            "and payment methods."
+            "Use this to clear all data and start fresh.\n\n"
+            "This will permanently delete all market days, transactions, "
+            "FMNP entries, audit log entries, and all configured markets, "
+            "vendors, and payment methods.\n\n"
+            "After reset, the app will be empty — ready for a fresh "
+            "configuration via the Settings tabs or by importing a .fam "
+            "settings file."
         )
         info.setWordWrap(True)
         info.setStyleSheet("font-size: 14px; padding: 12px;")
@@ -587,7 +975,7 @@ class SettingsScreen(QWidget):
         warning.setStyleSheet(f"color: {ERROR_COLOR}; font-weight: bold; font-size: 14px; padding: 12px;")
         layout.addWidget(warning)
 
-        reset_btn = QPushButton("Reset to Default")
+        reset_btn = QPushButton("Reset All Data")
         reset_btn.setObjectName("danger_btn")
         reset_btn.setMaximumWidth(250)
         reset_btn.clicked.connect(self._reset_to_default)
@@ -602,6 +990,9 @@ class SettingsScreen(QWidget):
         self._load_markets()
         self._load_vendors()
         self._load_payment_methods()
+        # Update the market code display in Preferences tab
+        from fam.utils.app_settings import get_market_code
+        self._market_code_display.setText(get_market_code() or "Not Set")
 
     def _load_markets(self):
         conn = get_connection()
@@ -1010,19 +1401,102 @@ class SettingsScreen(QWidget):
         update_payment_method(mid, is_active=not current_active)
         self._load_payment_methods()
 
+    # ── Import / Export ────────────────────────────────────────
+
+    def _export_settings(self):
+        """Export all settings to a .fam file."""
+        from fam.settings_io import export_settings
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export Settings",
+            os.path.expanduser("~/FAM_Settings.fam"),
+            "FAM Settings Files (*.fam);;All Files (*)"
+        )
+        if not filepath:
+            return
+
+        try:
+            export_settings(filepath)
+            QMessageBox.information(
+                self, "Export Complete",
+                f"Settings exported successfully to:\n\n{filepath}\n\n"
+                "You can open this file with any text editor to review or "
+                "edit the settings before importing on another machine."
+            )
+        except Exception as e:
+            logger.exception("Failed to export settings")
+            QMessageBox.warning(self, "Export Error", f"Could not export settings:\n\n{e}")
+
+    def _import_settings(self):
+        """Import settings from a .fam file with validation and preview."""
+        from fam.settings_io import parse_settings_file, apply_import
+
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Import Settings",
+            os.path.expanduser("~"),
+            "FAM Settings Files (*.fam);;All Files (*)"
+        )
+        if not filepath:
+            return
+
+        # Parse and validate the file
+        result = parse_settings_file(filepath)
+
+        # Check for fatal errors (couldn't parse at all)
+        if result.errors and not result.markets and not result.vendors and not result.payment_methods:
+            QMessageBox.warning(
+                self, "Import Error",
+                "Could not parse the settings file:\n\n" + "\n".join(result.errors[:5])
+            )
+            return
+
+        # Show preview dialog
+        preview = ImportPreviewDialog(result, self)
+        if preview.exec() != QDialog.Accepted:
+            return
+
+        # Apply the import
+        try:
+            counts = apply_import(result)
+            self.refresh()
+
+            # Build summary message
+            parts = []
+            if counts['markets_added']:
+                parts.append(f"{counts['markets_added']} market(s)")
+            if counts['vendors_added']:
+                parts.append(f"{counts['vendors_added']} vendor(s)")
+            if counts['payment_methods_added']:
+                parts.append(f"{counts['payment_methods_added']} payment method(s)")
+
+            assignments = counts['vendor_assignments_added'] + counts['pm_assignments_added']
+            if assignments:
+                parts.append(f"{assignments} assignment(s)")
+
+            if parts:
+                msg = "Successfully imported:\n\n  • " + "\n  • ".join(parts)
+            else:
+                msg = "No new items were imported."
+
+            QMessageBox.information(self, "Import Complete", msg)
+        except Exception as e:
+            logger.exception("Failed to apply import")
+            QMessageBox.warning(self, "Import Error", f"Could not apply import:\n\n{e}")
+
     # ── Reset to Default ─────────────────────────────────────
 
     def _reset_to_default(self):
         result = QMessageBox.warning(
             self, "Confirm Reset",
-            "Are you sure you want to reset ALL data to defaults?\n\n"
+            "Are you sure you want to reset ALL data?\n\n"
             "This will permanently delete:\n"
-            "  - All market days\n"
-            "  - All transactions and payment records\n"
-            "  - All FMNP entries\n"
-            "  - All audit log entries\n"
-            "  - All custom markets, vendors, and payment methods\n\n"
-            "Default sample data will be restored.\n\n"
+            "  • All market days\n"
+            "  • All transactions and payment records\n"
+            "  • All FMNP entries\n"
+            "  • All audit log entries\n"
+            "  • All markets, vendors, and payment methods\n\n"
+            "The app will be completely empty after reset.\n"
+            "You can re-configure via Settings or import a .fam file.\n\n"
             "This action CANNOT be undone!",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
@@ -1056,12 +1530,12 @@ class SettingsScreen(QWidget):
             conn.execute("DELETE FROM markets")
             conn.commit()
 
-            # Re-seed with defaults
-            from fam.database.seed import seed_if_empty
-            seed_if_empty()
-
             self.refresh()
-            QMessageBox.information(self, "Reset Complete",
-                                    "All data has been reset to defaults.")
+            QMessageBox.information(
+                self, "Reset Complete",
+                "All data has been cleared.\n\n"
+                "Use the Settings tabs to add new markets, vendors, and "
+                "payment methods, or import a .fam settings file."
+            )
         except Exception as e:
             QMessageBox.critical(self, "Reset Error", f"Failed to reset: {str(e)}")

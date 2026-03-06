@@ -179,7 +179,7 @@ def _query_vendor_reimbursement(conn):
             'fmnp_match': vm.get('fmnp_match', 0),
         }
 
-    # Merge external FMNP entries
+    # Merge external FMNP entries (exclude soft-deleted)
     fmnp_rows = conn.execute("""
         SELECT v.name as vendor,
                COALESCE(SUM(fe.amount), 0) as fmnp_entry_total,
@@ -187,6 +187,7 @@ def _query_vendor_reimbursement(conn):
         FROM fmnp_entries fe
         JOIN vendors v ON fe.vendor_id = v.id
         JOIN market_days md ON fe.market_day_id = md.id
+        WHERE fe.status = 'Active'
         GROUP BY v.id, v.name
     """).fetchall()
 
@@ -240,11 +241,12 @@ def _query_fam_match(conn):
             'fam_match': fam_match,
         })
 
-    # External FMNP
+    # External FMNP (exclude soft-deleted)
     fmnp_ext = conn.execute("""
         SELECT COALESCE(SUM(fe.amount), 0) as total
         FROM fmnp_entries fe
         JOIN market_days md ON fe.market_day_id = md.id
+        WHERE fe.status = 'Active'
     """).fetchone()['total']
 
     if fmnp_ext > 0:
@@ -297,6 +299,7 @@ def _query_ledger(conn):
         FROM fmnp_entries fe
         JOIN vendors v ON fe.vendor_id = v.id
         JOIN market_days md ON fe.market_day_id = md.id
+        WHERE fe.status = 'Active'
         ORDER BY md.date, fe.id
     """).fetchall()
 
@@ -647,11 +650,19 @@ class TestFMNPCrudAndAudit:
         assert entry['notes'] == 'Updated'
 
     def test_delete_entry(self, fresh_db):
-        """delete_fmnp_entry removes entry."""
+        """delete_fmnp_entry soft-deletes: row preserved with status='Deleted'."""
         self._setup_minimal(fresh_db)
         eid = create_fmnp_entry(1, 1, 50.00, 'Admin')
         delete_fmnp_entry(eid)
-        assert get_fmnp_entry_by_id(eid) is None
+        # Row still exists in the database with status='Deleted'
+        row = fresh_db.execute(
+            "SELECT status FROM fmnp_entries WHERE id=?", (eid,)
+        ).fetchone()
+        assert row is not None
+        assert row['status'] == 'Deleted'
+        # But get_fmnp_entries() no longer returns it
+        entries = get_fmnp_entries(market_day_id=1)
+        assert all(e['id'] != eid for e in entries)
 
     def test_create_logged(self, fresh_db):
         """INSERT audit log entry created on create."""
@@ -681,7 +692,7 @@ class TestFMNPCrudAndAudit:
         assert row['new_value'] == '99.0'
 
     def test_delete_logged(self, fresh_db):
-        """DELETE audit log entry recorded before removal."""
+        """DELETE audit log entry recorded for soft-delete."""
         self._setup_minimal(fresh_db)
         eid = create_fmnp_entry(1, 1, 50.00, 'Admin')
         log_action('fmnp_entries', eid, 'DELETE', 'Charlie', notes='Removed')
@@ -707,6 +718,28 @@ class TestFMNPCrudAndAudit:
         assert len(entries_md1) == 2
         assert len(entries_md2) == 1
         assert entries_md2[0]['amount'] == 20.00
+
+    def test_deleted_entry_excluded_from_reports(self, fresh_db):
+        """Soft-deleted FMNP entries are excluded from report queries."""
+        self._setup_minimal(fresh_db)
+        eid_keep = create_fmnp_entry(1, 1, 40.00, 'Admin')
+        eid_del = create_fmnp_entry(1, 1, 60.00, 'Admin')
+        delete_fmnp_entry(eid_del)
+
+        # Vendor reimbursement query should only include the active entry
+        report = _query_vendor_reimbursement(fresh_db)
+        assert len(report) == 1
+        assert report[0]['fmnp_match'] == 40.00  # only the kept entry
+
+        # FAM match query should exclude deleted
+        _, _, total_match, fmnp_ext = _query_fam_match(fresh_db)
+        assert fmnp_ext == 40.00
+
+        # Detailed ledger should exclude deleted
+        ledger = _query_ledger(fresh_db)
+        fmnp_ids = [r['id'] for r in ledger if str(r['id']).startswith('FMNP-')]
+        assert f'FMNP-{eid_keep}' in fmnp_ids
+        assert f'FMNP-{eid_del}' not in fmnp_ids
 
 
 # ══════════════════════════════════════════════════════════════════

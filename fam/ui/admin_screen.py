@@ -85,7 +85,8 @@ class AdjustmentDialog(QDialog):
         self.receipt_spin.setDecimals(2)
         self.receipt_spin.setPrefix("$")
         self.receipt_spin.setValue(txn['receipt_total'])
-        self.receipt_spin.valueChanged.connect(self._update_customer_impact)
+        self._last_receipt_total = txn['receipt_total']  # track for proportional rescale
+        self.receipt_spin.valueChanged.connect(self._on_receipt_total_changed)
         form.addRow("Receipt Total:", self.receipt_spin)
 
         self.vendor_combo = NoScrollComboBox()
@@ -235,6 +236,34 @@ class AdjustmentDialog(QDialog):
             row.set_excluded_methods(selected_ids)
 
         self.add_method_btn.setVisible(len(self._payment_rows) < len(methods))
+
+    # ── Receipt total change → proportional rescale ──────────
+
+    def _on_receipt_total_changed(self, new_total):
+        """When receipt total changes, proportionally rescale all payment amounts."""
+        old_total = self._last_receipt_total
+        if old_total > 0 and abs(new_total - old_total) > 0.001:
+            # Collect current amounts
+            amounts = []
+            for row in self._payment_rows:
+                amounts.append(row.amount_spin.value())
+            current_sum = sum(amounts)
+            # Only rescale if payments previously matched the old total (within tolerance)
+            if current_sum > 0 and abs(current_sum - old_total) < 0.02:
+                scale = new_total / current_sum
+                rescaled = [round(a * scale, 2) for a in amounts]
+                # Fix rounding drift — adjust the largest row
+                drift = round(new_total - sum(rescaled), 2)
+                if abs(drift) > 0 and rescaled:
+                    idx = rescaled.index(max(rescaled))
+                    rescaled[idx] = round(rescaled[idx] + drift, 2)
+                # Apply new amounts (block signals to avoid recursion)
+                for row, amt in zip(self._payment_rows, rescaled):
+                    row.amount_spin.blockSignals(True)
+                    row.amount_spin.setValue(amt)
+                    row.amount_spin.blockSignals(False)
+        self._last_receipt_total = new_total
+        self._update_customer_impact()
 
     # ── Customer impact calculation ───────────────────────────
 
@@ -451,7 +480,7 @@ class AdminScreen(QWidget):
             ["Transaction ID", "Customer ID", "Market", "Vendor", "Receipt Total",
              "Status", "Created", "Actions"]
         )
-        configure_table(self.table, actions_col=7, actions_width=120)
+        configure_table(self.table, actions_col=7, actions_width=170)
         layout.addWidget(self.table)
 
         # Audit log preview (includes Changed By column)
@@ -522,6 +551,11 @@ class AdminScreen(QWidget):
                 void_btn.clicked.connect(lambda checked, tid=txn_id: self._void_transaction(tid))
                 action_layout.addWidget(void_btn)
 
+            if t['status'] != 'Draft':
+                print_btn = make_action_btn("Print", 44)
+                print_btn.clicked.connect(lambda checked, tid=txn_id: self._print_receipt(tid))
+                action_layout.addWidget(print_btn)
+
             self.table.setCellWidget(i, 7, action_widget)
             self.table.setRowHeight(i, 42)
 
@@ -555,6 +589,20 @@ class AdminScreen(QWidget):
                 QMessageBox.warning(self, "Error",
                                     "Receipt total must be greater than $0.00.")
                 return
+
+            # Warn if adjusted total exceeds the configurable threshold
+            from fam.utils.app_settings import get_large_receipt_threshold
+            threshold = get_large_receipt_threshold()
+            if new_total > threshold:
+                answer = QMessageBox.warning(
+                    self, "Large Receipt",
+                    f"Adjusted receipt total ${new_total:,.2f} exceeds the "
+                    f"warning threshold of ${threshold:,.2f}.\n\n"
+                    f"Are you sure this amount is correct?",
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if answer != QMessageBox.Yes:
+                    return
 
             # Validate payment allocation if payments were edited
             new_items = dialog.get_new_line_items()
@@ -711,3 +759,110 @@ class AdminScreen(QWidget):
             self.audit_table.setItem(i, 7, make_item(str(e.get('new_value') or '')))
             self.audit_table.setRowHeight(i, 30)
         self.audit_table.setSortingEnabled(True)
+
+    # ------------------------------------------------------------------
+    # Receipt printing
+    # ------------------------------------------------------------------
+
+    def _build_receipt_data_for_transaction(self, txn_id: int) -> dict | None:
+        """Build receipt data dict for a transaction (and its sibling order transactions)."""
+        try:
+            from fam.models.customer_order import get_customer_order, get_order_transactions
+
+            txn = get_transaction_by_id(txn_id)
+            if not txn:
+                return None
+
+            market_name = txn.get('market_name', '')
+            market_date = txn.get('market_day_date', '')
+            confirmed_by = txn.get('confirmed_by', '') or 'Volunteer'
+            status = txn.get('status', 'Confirmed')
+            customer_label = ''
+
+            # Gather all transactions belonging to the same customer order
+            order_txns = []
+            order_id = txn.get('customer_order_id')
+            if order_id:
+                order = get_customer_order(order_id)
+                if order:
+                    customer_label = order.get('customer_label', '')
+                # Include all non-voided sibling transactions
+                order_txns = get_order_transactions(order_id)
+            if not order_txns:
+                # Standalone transaction (no order) — just use this one
+                order_txns = [txn]
+
+            txns = []
+            total_receipt = 0.0
+            total_customer = 0.0
+            total_match = 0.0
+            payment_totals: dict[str, dict] = {}
+
+            for t in order_txns:
+                tid = t['id']
+                full_txn = get_transaction_by_id(tid)
+                receipt = float(full_txn['receipt_total'])
+                total_receipt += receipt
+                line_items = get_payment_line_items(tid)
+
+                txns.append({
+                    'fam_id': full_txn['fam_transaction_id'],
+                    'vendor': full_txn.get('vendor_name', ''),
+                    'receipt_total': receipt,
+                })
+
+                for li in line_items:
+                    method = li['method_name_snapshot']
+                    amt = float(li['method_amount'])
+                    match = float(li['match_amount'])
+                    cust = float(li['customer_charged'])
+                    total_customer += cust
+                    total_match += match
+                    if method not in payment_totals:
+                        payment_totals[method] = {
+                            'amount': 0.0, 'match': 0.0, 'customer': 0.0,
+                        }
+                    payment_totals[method]['amount'] += amt
+                    payment_totals[method]['match'] += match
+                    payment_totals[method]['customer'] += cust
+
+            return {
+                'market_name': market_name,
+                'market_date': market_date,
+                'customer_label': customer_label,
+                'confirmed_by': confirmed_by,
+                'status': status,
+                'transactions': txns,
+                'payment_totals': payment_totals,
+                'total_receipt': round(total_receipt, 2),
+                'total_customer': round(total_customer, 2),
+                'total_match': round(total_match, 2),
+            }
+        except Exception:
+            logger.exception("Failed to build receipt data for txn %s", txn_id)
+            return None
+
+    def _print_receipt(self, txn_id: int):
+        """Open a print dialog with a formatted customer receipt for a transaction."""
+        data = self._build_receipt_data_for_transaction(txn_id)
+        if not data:
+            QMessageBox.information(self, "Print Receipt",
+                                    "No receipt data available for this transaction.")
+            return
+
+        from fam.ui.payment_screen import PaymentScreen
+        html = PaymentScreen._format_receipt_html(data)
+
+        from PySide6.QtPrintSupport import QPrinter, QPrintDialog
+        from PySide6.QtGui import QTextDocument
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setDocName("FAM_Receipt")
+
+        dlg = QPrintDialog(printer, self)
+        dlg.setWindowTitle("Print Customer Receipt")
+        if dlg.exec() == QPrintDialog.Accepted:
+            doc = QTextDocument()
+            doc.setHtml(html)
+            doc.print_(printer)
+            logger.info("Receipt printed from Adjustments for txn %s", txn_id)

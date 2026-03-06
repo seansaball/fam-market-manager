@@ -583,6 +583,21 @@ class ReceiptIntakeScreen(QWidget):
             self.add_receipt_btn.setEnabled(True)
             return
 
+        # Warn if receipt exceeds the configurable threshold
+        from fam.utils.app_settings import get_large_receipt_threshold
+        threshold = get_large_receipt_threshold()
+        if receipt_total > threshold:
+            answer = QMessageBox.warning(
+                self, "Large Receipt",
+                f"Receipt total ${receipt_total:,.2f} exceeds the warning "
+                f"threshold of ${threshold:,.2f}.\n\n"
+                f"Are you sure this amount is correct?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self.add_receipt_btn.setEnabled(True)
+                return
+
         notes_text = self.notes_input.text().strip() or None
         vendor_name = self.vendor_combo.currentText()
 

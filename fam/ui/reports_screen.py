@@ -438,7 +438,7 @@ class ReportsScreen(QWidget):
 
     def _build_fmnp_where(self):
         """Return (where_sql, params) for fmnp_entries queries, applying active filters."""
-        clauses = []
+        clauses = ["fe.status = 'Active'"]
         params = []
 
         from_date, to_date = self.date_range.get_date_range()

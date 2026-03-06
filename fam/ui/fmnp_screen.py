@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 
 from fam.models.market_day import get_all_market_days
 from fam.models.vendor import get_all_vendors, get_vendors_for_market
@@ -16,6 +17,7 @@ from fam.models.fmnp import (
     get_fmnp_entry_by_id
 )
 from fam.models.audit import log_action
+from fam.utils.export import write_ledger_backup
 from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG, SUBTITLE_GRAY
 from fam.ui.helpers import (
     make_field_label, make_item, make_section_label, make_action_btn,
@@ -135,11 +137,11 @@ class FMNPScreen(QWidget):
         # Entries table
         layout.addWidget(make_section_label("FMNP Entries for Selected Market"))
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels(
-            ["ID", "Vendor", "Amount", "Checks", "Entered By", "Notes", "Actions"]
+            ["ID", "Vendor", "Amount", "Checks", "Entered By", "Notes", "Status", "Actions"]
         )
-        configure_table(self.table, actions_col=6, actions_width=120)
+        configure_table(self.table, actions_col=7, actions_width=120)
         layout.addWidget(self.table)
 
     def refresh(self):
@@ -192,11 +194,15 @@ class FMNPScreen(QWidget):
             self.table.setRowCount(0)
             return
 
-        entries = get_fmnp_entries(md_id)
+        entries = get_fmnp_entries(md_id, active_only=False)
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(entries))
 
+        grey = QColor(SUBTITLE_GRAY)
+
         for i, e in enumerate(entries):
+            is_deleted = e.get('status') == 'Deleted'
+
             self.table.setItem(i, 0, make_item(str(e['id']), e['id']))
             self.table.setItem(i, 1, make_item(e['vendor_name']))
             self.table.setItem(i, 2, make_item(f"${e['amount']:.2f}", e['amount']))
@@ -204,23 +210,32 @@ class FMNPScreen(QWidget):
                                                 e.get('check_count') or 0))
             self.table.setItem(i, 4, make_item(e['entered_by']))
             self.table.setItem(i, 5, make_item(e.get('notes') or ''))
+            self.table.setItem(i, 6, make_item(e.get('status', 'Active')))
 
-            # Action buttons
+            # Grey out all cells for deleted entries
+            if is_deleted:
+                for col in range(7):
+                    item = self.table.item(i, col)
+                    if item:
+                        item.setForeground(grey)
+
+            # Action buttons (hidden for deleted entries)
             action_widget = QWidget()
             action_layout = QHBoxLayout(action_widget)
             action_layout.setContentsMargins(2, 2, 2, 2)
             action_layout.setSpacing(3)
 
-            entry_id = e['id']
-            edit_btn = make_action_btn("Edit", 45)
-            edit_btn.clicked.connect(lambda checked, eid=entry_id: self._edit_entry(eid))
-            action_layout.addWidget(edit_btn)
+            if not is_deleted:
+                entry_id = e['id']
+                edit_btn = make_action_btn("Edit", 45)
+                edit_btn.clicked.connect(lambda checked, eid=entry_id: self._edit_entry(eid))
+                action_layout.addWidget(edit_btn)
 
-            del_btn = make_action_btn("Delete", 55, danger=True)
-            del_btn.clicked.connect(lambda checked, eid=entry_id: self._delete_entry(eid))
-            action_layout.addWidget(del_btn)
+                del_btn = make_action_btn("Delete", 55, danger=True)
+                del_btn.clicked.connect(lambda checked, eid=entry_id: self._delete_entry(eid))
+                action_layout.addWidget(del_btn)
 
-            self.table.setCellWidget(i, 6, action_widget)
+            self.table.setCellWidget(i, 7, action_widget)
             self.table.setRowHeight(i, 42)
 
         self.table.setSortingEnabled(True)
@@ -303,6 +318,7 @@ class FMNPScreen(QWidget):
                 log_action('fmnp_entries', entry_id, 'DELETE', entered_by,
                             notes='FMNP entry deleted')
                 delete_fmnp_entry(entry_id)
+                write_ledger_backup()
                 self._load_entries()
             except Exception as e:
                 logger.exception("Failed to delete FMNP entry %s", entry_id)

@@ -2,8 +2,10 @@
 
 import ctypes
 import logging
+import shutil
 import sys
 import os
+import traceback
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont
 
@@ -16,9 +18,118 @@ from fam.ui.main_window import MainWindow
 
 logger = logging.getLogger('fam.app')
 
+
+# ── Global exception handler ──────────────────────────────────
+# In windowed mode (no console), unhandled exceptions inside Qt
+# callbacks vanish silently.  This hook ensures they are always
+# logged and shown to the user so bugs are visible.
+
+def _global_exception_handler(exc_type, exc_value, exc_tb):
+    """Log the exception and show an error dialog if the app is running."""
+    # KeyboardInterrupt should still exit immediately
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+
+    # Format the full traceback for the log file
+    tb_text = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    logger.critical("Unhandled exception:\n%s", tb_text)
+
+    # Try to show a user-facing dialog
+    try:
+        from PySide6.QtWidgets import QMessageBox
+        app = QApplication.instance()
+        if app:
+            from fam.utils.logging_config import get_log_path
+            log_path = get_log_path()
+            QMessageBox.critical(
+                None, "Unexpected Error",
+                "An unexpected error occurred. Your data has been saved.\n\n"
+                f"Error: {exc_value}\n\n"
+                f"Details have been written to the log file:\n{log_path}\n\n"
+                "You can continue using the application, but if problems "
+                "persist, please restart."
+            )
+    except Exception:
+        pass  # dialog failed — at least the log entry exists
+
+
+sys.excepthook = _global_exception_handler
+
+# ── Data directory ─────────────────────────────────────────────
+# All persistent data (database, log, ledger backup) lives in
+# %APPDATA%/FAM Market Manager/ so the application folder can be
+# freely replaced during upgrades without losing data.
+APP_DATA_DIR_NAME = "FAM Market Manager"
+
 # ── Single-instance prevention (Windows named mutex) ───────────
 _ERROR_ALREADY_EXISTS = 183
 _mutex_handle = None  # kept alive for the process lifetime
+
+
+def get_data_dir() -> str:
+    """Return the data directory for persistent files.
+
+    Frozen (PyInstaller):  %APPDATA%/FAM Market Manager/
+    Development:           <project_root>/   (keeps dev experience unchanged)
+
+    The directory is created if it does not exist.
+    """
+    if getattr(sys, 'frozen', False):
+        appdata = os.environ.get('APPDATA', os.path.expanduser('~'))
+        data_dir = os.path.join(appdata, APP_DATA_DIR_NAME)
+    else:
+        # Development — project root (same as before)
+        data_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.makedirs(data_dir, exist_ok=True)
+    return data_dir
+
+
+def get_app_dir() -> str:
+    """Return the application install directory (where the .exe lives).
+
+    Frozen:      directory containing the .exe
+    Development: project root
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _migrate_legacy_data(data_dir: str):
+    """One-time migration: move data files from the old exe-adjacent location
+    to the new %APPDATA% data directory.
+
+    Only runs for frozen builds when the AppData DB does not yet exist
+    but an old fam_data.db sits next to the executable.
+    """
+    if not getattr(sys, 'frozen', False):
+        return  # nothing to migrate in dev
+
+    app_dir = os.path.dirname(sys.executable)
+    new_db = os.path.join(data_dir, 'fam_data.db')
+
+    if os.path.exists(new_db):
+        return  # already migrated
+
+    old_db = os.path.join(app_dir, 'fam_data.db')
+    if not os.path.exists(old_db):
+        return  # clean install, nothing to migrate
+
+    # Move the database (and optional companions) to AppData
+    files_to_move = ['fam_data.db', 'fam_ledger_backup.txt', 'fam_manager.log']
+    for filename in files_to_move:
+        src = os.path.join(app_dir, filename)
+        dst = os.path.join(data_dir, filename)
+        if os.path.exists(src):
+            try:
+                shutil.move(src, dst)
+            except Exception:
+                # Fall back to copy if move fails (e.g. file in use)
+                try:
+                    shutil.copy2(src, dst)
+                except Exception:
+                    pass  # will be logged once logging is set up
 
 
 def _ensure_single_instance():
@@ -44,23 +155,30 @@ def run():
     # ── Single-instance check (before anything else) ───────────
     _ensure_single_instance()
 
-    # Set database path — next to the .exe when frozen, or project root in dev
-    if getattr(sys, 'frozen', False):
-        project_dir = os.path.dirname(sys.executable)
-    else:
-        project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    db_path = os.path.join(project_dir, 'fam_data.db')
+    # ── Resolve data directory and migrate legacy installs ─────
+    data_dir = get_data_dir()
+    _migrate_legacy_data(data_dir)
+
+    db_path = os.path.join(data_dir, 'fam_data.db')
     set_db_path(db_path)
 
-    # Set up file logging (before anything else touches the DB)
-    log_path = setup_logging()
-    logger.info("FAM Manager starting up — db=%s  log=%s", db_path, log_path)
+    # Set up file logging (writes to data directory)
+    log_path = setup_logging(data_dir)
+    logger.info("FAM Manager starting up — db=%s  log=%s  data_dir=%s",
+                db_path, log_path, data_dir)
 
     # Initialize database — show user-friendly error if this fails
     try:
         initialize_database()
         seed_if_empty()
         logger.info("Database initialized")
+        from fam.database.backup import get_backup_dir
+        logger.info("Backup directory: %s", get_backup_dir())
+
+        # Capture device fingerprint on every launch
+        from fam.utils.app_settings import capture_device_id
+        device_id = capture_device_id()
+        logger.info("Device ID: %s", device_id)
     except Exception as e:
         logger.exception("Failed to initialize database")
         # Need a QApplication to show a dialog

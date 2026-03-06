@@ -4,27 +4,30 @@ from datetime import datetime
 from fam.database.connection import get_connection
 
 
-def get_fmnp_entries(market_day_id=None):
+def get_fmnp_entries(market_day_id=None, active_only=True):
     conn = get_connection()
+    status_filter = "AND f.status = 'Active'" if active_only else ""
     if market_day_id:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT f.*, v.name as vendor_name, md.date as market_day_date,
                    m.name as market_name
             FROM fmnp_entries f
             JOIN vendors v ON f.vendor_id = v.id
             JOIN market_days md ON f.market_day_id = md.id
             JOIN markets m ON md.market_id = m.id
-            WHERE f.market_day_id=?
+            WHERE f.market_day_id=? {status_filter}
             ORDER BY f.created_at DESC
         """, (market_day_id,)).fetchall()
     else:
-        rows = conn.execute("""
+        where = "WHERE f.status = 'Active'" if active_only else ""
+        rows = conn.execute(f"""
             SELECT f.*, v.name as vendor_name, md.date as market_day_date,
                    m.name as market_name
             FROM fmnp_entries f
             JOIN vendors v ON f.vendor_id = v.id
             JOIN market_days md ON f.market_day_id = md.id
             JOIN markets m ON md.market_id = m.id
+            {where}
             ORDER BY f.created_at DESC
         """).fetchall()
     return [dict(r) for r in rows]
@@ -76,6 +79,10 @@ def update_fmnp_entry(entry_id, amount=None, vendor_id=None, check_count=None, n
 
 
 def delete_fmnp_entry(entry_id):
+    """Soft-delete an FMNP entry by setting status to 'Deleted'."""
     conn = get_connection()
-    conn.execute("DELETE FROM fmnp_entries WHERE id=?", (entry_id,))
+    conn.execute(
+        "UPDATE fmnp_entries SET status = 'Deleted', updated_at = ? WHERE id = ?",
+        (datetime.now().isoformat(), entry_id),
+    )
     conn.commit()

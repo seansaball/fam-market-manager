@@ -43,6 +43,7 @@ class TutorialStep:
     padding: int = 8
     top_offset: int = 0       # extra px to push card down from default position
     hints: list[TutorialHint] | None = None
+    is_setup_prompt: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +319,14 @@ TUTORIAL_STEPS = [
         top_offset=350,
         hints=[
             TutorialHint(
+                "Import Settings",
+                "New to the app? Click Import Settings to load "
+                "your markets, vendors, and payment methods from "
+                "a .fam file. You can also export your current "
+                "settings to share with another machine.",
+                "settings_screen.import_btn",
+            ),
+            TutorialHint(
                 "Configuration Tabs",
                 "Markets: add locations and set match limits. "
                 "Vendors: manage the vendor list. Payment Methods: "
@@ -332,17 +341,18 @@ TUTORIAL_STEPS = [
             "If something goes wrong, you're covered:\n\n"
             "\u2022 Backup Ledger \u2014 A plain-text file "
             "(fam_ledger_backup.txt) is saved automatically "
-            "next to the database after every payment, "
-            "adjustment, or market-day close. Open it with "
-            "Notepad to review transactions even if the app "
-            "won't start.\n\n"
+            "after every payment, adjustment, or market-day "
+            "close. Open it with Notepad to review "
+            "transactions even if the app won't start.\n\n"
             "\u2022 Activity Log \u2014 Every action is recorded in "
             "an append-only audit log. View it on the "
             "Adjustments screen or export it from the "
             "Reports \u2192 Transaction Log tab.\n\n"
-            "\u2022 Database \u2014 All data lives in a single "
-            "fam_market.db file. Back it up regularly by "
-            "copying it to a safe location."
+            "\u2022 Your Data \u2014 All data lives in:\n"
+            "   %APPDATA%\\FAM Market Manager\\\n"
+            "Back it up regularly by copying this folder "
+            "to a safe location. Upgrading the app will "
+            "never touch your data."
         ),
         widget_path="settings_screen",
         position="right",
@@ -351,15 +361,22 @@ TUTORIAL_STEPS = [
         padding=0,
     ),
     TutorialStep(
-        title="You're All Set!",
+        title="Quick Setup",
         description=(
-            "That's the complete tour!\n\n"
-            "You can restart this tutorial anytime by clicking "
-            "the \"Start Tutorial\" button in the top-right corner.\n\n"
-            "Happy market day!"
+            "Would you like to load FAM's default configuration?\n\n"
+            "This adds 3 markets (Bethel Park, Bellevue, "
+            "Cranberry), 8 vendors, and 6 payment methods "
+            "so you can start right away.\n\n"
+            "You can always add, edit, or remove items later "
+            "in Settings."
         ),
-        widget_path="_tutorial_btn",
-        position="below",
+        widget_path="settings_screen",
+        position="right",
+        screen_index=6,
+        nav_index=6,
+        padding=0,
+        top_offset=350,
+        is_setup_prompt=True,
     ),
 ]
 
@@ -372,6 +389,7 @@ class TutorialOverlay(QWidget):
     """Full-window overlay that guides the user through the tutorial steps."""
 
     finished = Signal()
+    auto_configure_requested = Signal()
 
     # Overlay dimming (0-255)
     _OVERLAY_ALPHA = 160
@@ -608,6 +626,51 @@ class TutorialOverlay(QWidget):
         btn_row.addWidget(self._close_btn)
 
         layout.addLayout(btn_row)
+
+        # Setup-prompt action buttons (hidden by default, shown on final step)
+        self._setup_row = QHBoxLayout()
+        self._setup_row.setSpacing(10)
+
+        self._setup_yes_btn = QPushButton("Yes \u2014 Load Default Data")
+        self._setup_yes_btn.setObjectName("tut_setup_yes")
+        self._setup_yes_btn.setCursor(Qt.PointingHandCursor)
+        self._setup_yes_btn.setStyleSheet(f"""
+            #tut_setup_yes {{
+                padding: 10px 18px; font-size: 13px; min-height: 0px;
+                border-radius: 8px; background-color: {HARVEST_GOLD};
+                color: white; font-weight: bold; border: none;
+            }}
+            #tut_setup_yes:hover {{
+                background-color: #d47a2e;
+            }}
+        """)
+        self._setup_yes_btn.clicked.connect(self._on_setup_yes)
+        self._setup_row.addWidget(self._setup_yes_btn)
+
+        self._setup_no_btn = QPushButton("No Thanks \u2014 Start Blank")
+        self._setup_no_btn.setObjectName("tut_setup_no")
+        self._setup_no_btn.setCursor(Qt.PointingHandCursor)
+        self._setup_no_btn.setStyleSheet(f"""
+            #tut_setup_no {{
+                padding: 10px 18px; font-size: 13px; min-height: 0px;
+                border-radius: 8px; border: 1px solid {LIGHT_GRAY};
+                background-color: {WHITE}; color: {TEXT_COLOR};
+            }}
+            #tut_setup_no:hover {{
+                background-color: #F0EFEB;
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        self._setup_no_btn.clicked.connect(self._on_setup_no)
+        self._setup_row.addWidget(self._setup_no_btn)
+
+        # Wrap in a widget for easy show/hide
+        self._setup_widget = QWidget()
+        self._setup_widget.setStyleSheet("background: transparent;")
+        self._setup_widget.setLayout(self._setup_row)
+        self._setup_widget.setVisible(False)
+        layout.addWidget(self._setup_widget)
+
         return card
 
     # ------------------------------------------------------------------
@@ -705,12 +768,30 @@ class TutorialOverlay(QWidget):
         is_last = index == total - 1
         self._next_btn.setText("Finish" if is_last else "Next")
 
-        # Show/hide detail-mode vs normal-mode buttons
+        # Show/hide detail-mode vs normal-mode vs setup-prompt buttons
+        is_setup = getattr(step, 'is_setup_prompt', False)
         has_hints = bool(step.hints)
-        self._more_details_btn.setVisible(has_hints)
-        self._next_btn.setVisible(True)
-        self._next_hint_btn.setVisible(False)
-        self._next_step_btn.setVisible(False)
+
+        if is_setup:
+            # Setup prompt: show Yes/No, hide everything else
+            self._more_details_btn.setVisible(False)
+            self._next_btn.setVisible(False)
+            self._next_hint_btn.setVisible(False)
+            self._next_step_btn.setVisible(False)
+            self._back_btn.setVisible(False)
+            self._step_label.setVisible(False)
+            self._progress_bg.setVisible(False)
+            self._setup_widget.setVisible(True)
+        else:
+            # Normal step
+            self._setup_widget.setVisible(False)
+            self._back_btn.setVisible(True)
+            self._step_label.setVisible(True)
+            self._progress_bg.setVisible(True)
+            self._more_details_btn.setVisible(has_hints)
+            self._next_btn.setVisible(True)
+            self._next_hint_btn.setVisible(False)
+            self._next_step_btn.setVisible(False)
 
         # Position the card
         self._dragging = False
@@ -973,6 +1054,15 @@ class TutorialOverlay(QWidget):
         else:
             if self._current_index > 0:
                 self._show_step(self._current_index - 1)
+
+    def _on_setup_yes(self):
+        """User chose to load default data."""
+        self.auto_configure_requested.emit()
+        self._close_tutorial()
+
+    def _on_setup_no(self):
+        """User chose to start blank."""
+        self._close_tutorial()
 
     def _close_tutorial(self):
         self.finished.emit()

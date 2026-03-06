@@ -670,7 +670,7 @@ class TestLedgerBackup:
         # Total customer: $25 + $30 = $55
         assert '$55.00' in text
         # Total match: $25 + $0 = $25
-        assert 'Transaction Count:   2' in text
+        assert 'Transaction Count:     2' in text
 
     def test_ledger_with_fmnp_entries(self, tmp_path):
         """FMNP external entries appear in ledger with correct amounts."""
@@ -709,7 +709,7 @@ class TestLedgerBackup:
         assert '$45.00' in text
         # Customer paid: $25 (only from transaction)
         # Transaction count: 1 txn + 1 FMNP = 2
-        assert 'Transaction Count:   2' in text
+        assert 'Transaction Count:     2' in text
 
     def test_ledger_shows_payment_methods(self, tmp_path):
         """Ledger line shows the payment method names and amounts."""
@@ -725,15 +725,21 @@ class TestLedgerBackup:
         assert 'Cash: $20.00' in text
 
     def test_ledger_header_info(self, tmp_path):
-        """Ledger includes market name, date, and status."""
+        """Ledger includes database summary, and market day section headers."""
         items = [_make_line_item(2, 'Cash', 0.0, 10.00, 0.00, 10.00)]
         _create_confirmed_txn(10.00, line_items=items)
         write_ledger_backup()
 
         text = self._read_ledger(tmp_path)
+        # Top-level header
+        assert 'LEDGER BACKUP' in text
+        assert 'Backup at:' in text
+        assert 'Markets: 1' in text
+        assert 'Market Days: 1' in text
+        # Market day section header
         assert 'Downtown Market' in text
         assert '2026-03-01' in text
-        assert 'Open' in text
+        assert 'OPEN (in progress)' in text
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1121,13 +1127,13 @@ class TestVoidedTransactionLedgerTotals:
 
         # Totals should only include the $30 Cash transaction
         # Total receipts: $30 (not $80)
-        assert 'Total Receipts:      $30.00' in text
+        assert 'Total Receipts:        $30.00' in text
         # Customer paid: $30 (not $55)
-        assert 'Customer Paid:       $30.00' in text
+        assert 'Total Customer Paid:   $30.00' in text
         # FAM Match: $0 (not $25)
-        assert 'FAM Match:           $0.00' in text
+        assert 'Total FAM Match:       $0.00' in text
         # But both transactions should still be listed (2 rows)
-        assert 'Transaction Count:   2' in text
+        assert 'Transaction Count:     2' in text
 
     def test_all_voided_zeroes_totals(self, tmp_path):
         """If all transactions are voided, totals should be zero."""
@@ -1138,9 +1144,9 @@ class TestVoidedTransactionLedgerTotals:
         write_ledger_backup()
         text = self._read_ledger(tmp_path)
 
-        assert 'Total Receipts:      $0.00' in text
-        assert 'Customer Paid:       $0.00' in text
-        assert 'FAM Match:           $0.00' in text
+        assert 'Total Receipts:        $0.00' in text
+        assert 'Total Customer Paid:   $0.00' in text
+        assert 'Total FAM Match:       $0.00' in text
         assert 'Voided' in text
 
     def test_voided_still_appears_in_listing(self, tmp_path):
@@ -1284,12 +1290,12 @@ class TestMultiMethodLedgerAccuracy:
         text = self._read_ledger(tmp_path)
 
         # Receipt total should be $100, NOT $100 * 3 = $300
-        assert 'Total Receipts:      $100.00' in text
+        assert 'Total Receipts:        $100.00' in text
         # Customer paid: $20 + $30 + $25 = $75
-        assert 'Customer Paid:       $75.00' in text
+        assert 'Total Customer Paid:   $75.00' in text
         # FAM match: $20 + $0 + $5 = $25
-        assert 'FAM Match:           $25.00' in text
-        assert 'Transaction Count:   1' in text
+        assert 'Total FAM Match:       $25.00' in text
+        assert 'Transaction Count:     1' in text
 
     def test_two_txns_multi_method_totals(self, tmp_path):
         """Two multi-method transactions: totals should be exact sum."""
@@ -1308,9 +1314,9 @@ class TestMultiMethodLedgerAccuracy:
         text = self._read_ledger(tmp_path)
 
         # Total receipts: $50 + $60 = $110
-        assert 'Total Receipts:      $110.00' in text
+        assert 'Total Receipts:        $110.00' in text
         # Customer paid: $15 + $20 + $35 = $70
-        assert 'Customer Paid:       $70.00' in text
+        assert 'Total Customer Paid:   $70.00' in text
         # FAM match: $15 + $0 + $25 = $40
-        assert 'FAM Match:           $40.00' in text
-        assert 'Transaction Count:   2' in text
+        assert 'Total FAM Match:       $40.00' in text
+        assert 'Transaction Count:     2' in text

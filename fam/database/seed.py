@@ -1,17 +1,38 @@
-"""Seed data for first-run initialization."""
+"""Seed data for first-run initialization.
+
+As of v1.6, first run starts with a clean slate — no pre-loaded markets,
+vendors, or payment methods. Users configure their own data via the Settings
+screen or by importing a .fam settings file.
+
+The seed_if_empty() function is retained for backward compatibility with
+the Reset feature and test infrastructure, but it no longer auto-runs
+sample data on first launch.
+"""
 
 from .connection import get_connection
 
 
 def seed_if_empty():
-    """Populate the database with initial test data if tables are empty."""
+    """No-op on first run — the app starts with a clean slate.
+
+    Returns False to indicate no data was seeded.
+    """
+    return False
+
+
+def seed_sample_data():
+    """Populate the database with sample data for testing or reset purposes.
+
+    This is called by the Reset feature and test infrastructure, not on
+    first launch.
+    """
     conn = get_connection()
     cursor = conn.cursor()
 
     # Check if markets already have data
     cursor.execute("SELECT COUNT(*) FROM markets")
     if cursor.fetchone()[0] > 0:
-        return False  # Already seeded
+        return False  # Already has data
 
     # Markets
     markets = [

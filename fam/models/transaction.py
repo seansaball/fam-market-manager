@@ -9,14 +9,27 @@ logger = logging.getLogger('fam.models.transaction')
 
 
 def generate_transaction_id(market_day_date: str) -> str:
-    """Generate a unique FAM-YYYYMMDD-NNNN transaction ID."""
+    """Generate a unique FAM-{CODE}-YYYYMMDD-NNNN transaction ID.
+
+    When a market code is configured the ID includes it (e.g. FAM-DT-20260306-0001).
+    Falls back to the legacy FAM-YYYYMMDD-NNNN format if no code is set.
+    Sequence numbering checks both formats for backward compatibility.
+    """
+    from fam.utils.app_settings import get_market_code
     conn = get_connection()
     date_part = market_day_date.replace("-", "")
-    prefix = f"FAM-{date_part}-"
 
-    # Find the highest sequence number for this date
+    market_code = get_market_code()
+    if market_code:
+        prefix = f"FAM-{market_code}-{date_part}-"
+    else:
+        prefix = f"FAM-{date_part}-"
+
+    # Check current-format IDs first
     row = conn.execute(
-        "SELECT fam_transaction_id FROM transactions WHERE fam_transaction_id LIKE ? ORDER BY fam_transaction_id DESC LIMIT 1",
+        "SELECT fam_transaction_id FROM transactions "
+        "WHERE fam_transaction_id LIKE ? "
+        "ORDER BY fam_transaction_id DESC LIMIT 1",
         (prefix + "%",)
     ).fetchone()
 
@@ -24,7 +37,22 @@ def generate_transaction_id(market_day_date: str) -> str:
         last_seq = int(row[0].split("-")[-1])
         next_seq = last_seq + 1
     else:
-        next_seq = 1
+        # Also check old format (FAM-YYYYMMDD-NNNN) for sequence continuity
+        old_prefix = f"FAM-{date_part}-"
+        if old_prefix != prefix:
+            row = conn.execute(
+                "SELECT fam_transaction_id FROM transactions "
+                "WHERE fam_transaction_id LIKE ? "
+                "ORDER BY fam_transaction_id DESC LIMIT 1",
+                (old_prefix + "%",)
+            ).fetchone()
+            if row:
+                last_seq = int(row[0].split("-")[-1])
+                next_seq = last_seq + 1
+            else:
+                next_seq = 1
+        else:
+            next_seq = 1
 
     return f"{prefix}{next_seq:04d}"
 

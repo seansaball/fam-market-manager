@@ -1,7 +1,7 @@
 # FAM Market Manager — User Guide
 
 > **For volunteers, coordinators, and market day staff**
-> Version 1.4.1
+> Version 1.6.1
 
 ---
 
@@ -15,15 +15,22 @@ This guide walks you through everything you need to know.
 
 ## Getting Started
 
-### Opening the Application
+### First Launch
 
-Double-click **FAM Manager.exe** to launch. The first time you open it, the app creates a database file with default markets, vendors, and payment methods already loaded.
+Double-click **FAM Manager.exe** to launch. On first launch:
+
+1. The app creates a data folder at `%APPDATA%\FAM Market Manager\`
+2. A guided tutorial automatically starts, walking you through every section
+3. On the final tutorial step, you'll see **"Quick Setup"** — click **"Yes — Load Default Data"** to auto-configure 3 markets, 8 vendors, and 6 payment methods
+4. If you prefer, click **"No Thanks — Start Blank"** to configure everything manually or import a `.fam` settings file
+
+> **Windows SmartScreen:** On first run, Windows may show a warning. Click **"More info"** then **"Run anyway."**
 
 ### Understanding the Layout
 
 The application has two main areas:
 
-- **Sidebar (left):** A green menu with buttons for each section of the app. Click a button to switch screens.
+- **Sidebar (left):** A green menu with buttons for each section. Click a button to switch screens.
 - **Content area (right):** The active screen where you do your work.
 
 The sidebar sections are:
@@ -66,12 +73,13 @@ Before you can record any transactions, you need to open a market day.
 2. Enter your **name** in the Volunteer Name field
 3. Click **"Open Market Day (Today)"**
 
-The screen will update to show the active market day with an **Open** status.
+The screen will update to show the active market day with an **Open** status. The title bar will show the market code in brackets (e.g., `[BPFM]`).
 
 **Things to know:**
 - Only one market day can be open at a time
 - If a market day already exists for today's date, the app will offer to reopen it instead of creating a duplicate
-- You can view past market days using the dropdown at the bottom of the screen
+- A market code is automatically derived from the market name (e.g., "Bethel Park Farmers Market" → `BPFM`)
+- Automatic database backups run every 5 minutes while a market day is open
 
 ---
 
@@ -150,7 +158,15 @@ When the **Remaining** card shows **$0.00**:
 2. Review the collection summary in the popup
 3. Click **Yes** to confirm
 
-The app records the payment, generates transaction IDs, and returns you to Receipt Intake for the next customer.
+The app records the payment, generates transaction IDs (e.g., `FAM-BPFM-20260306-0001`), and returns you to Receipt Intake for the next customer.
+
+### Printing a receipt
+
+After payment is confirmed, a **"Print Receipt"** button appears. Click it to print a customer receipt showing:
+- Market name and date
+- Vendor listing with per-vendor totals
+- Payment method breakdown (amount, FAM match, customer paid)
+- Grand totals
 
 ### Save as Draft
 
@@ -190,7 +206,7 @@ If you need to correct a transaction after it was confirmed, use the Adjustments
 Use the filters at the top:
 - **Market:** Filter by market location
 - **Status:** Filter by Draft, Confirmed, Adjusted, or Voided
-- **Transaction ID:** Search by the FAM transaction ID (e.g., FAM-20260301-0001)
+- **Transaction ID:** Search by the FAM transaction ID (e.g., FAM-BPFM-20260306-0001)
 
 Click **"Search"** to find matching transactions.
 
@@ -251,7 +267,9 @@ Use the controls at the top of the screen to narrow your view:
 
 ### Exporting data
 
-Each report tab has an **Export** button that saves the data as a CSV file. The file name is automatically generated with a timestamp.
+Each report tab has an **Export** button that saves the data as a CSV file. The file name is automatically generated with a timestamp and market code (e.g., `fam_BPFM_vendor_reimbursement_20260306_140530.csv`).
+
+All CSV exports include `market_code` and `device_id` as the first two columns, allowing the FAM finance team to identify which market and device generated each report.
 
 ---
 
@@ -285,9 +303,21 @@ Use the Settings screen to manage the reference data used throughout the applica
 - **Reorder:** Use the up/down arrows to change the display order
 - **Activate/Deactivate:** Make a payment method available or unavailable
 
+### Preferences tab
+
+- **Device Identity:** Shows the auto-derived market code and device ID (read-only)
+- **Large Receipt Threshold:** Configure the warning threshold for unusually large receipts
+
+### Import & Export Settings
+
+- **Export Settings:** Click the **Export** button at the top of the Settings screen to save your current markets, vendors, and payment methods to a `.fam` file. This is useful for backing up your configuration or sharing it with another machine.
+- **Import Settings:** Click the **Import** button to load markets, vendors, and payment methods from a `.fam` file. The app will show you a preview of what will be imported and skip any items that already exist.
+
+A default settings file (`FAM_Default_Settings.fam`) is included with the application if you prefer manual import over the tutorial auto-configure.
+
 ### Reset tab
 
-The Reset tab allows you to erase all data and restore the original default markets, vendors, and payment methods. This requires two confirmations to prevent accidental data loss.
+The Reset tab allows you to erase all data and start with a clean slate. This requires two confirmations to prevent accidental data loss.
 
 > **Warning:** Resetting deletes all market days, transactions, FMNP entries, and audit log entries permanently.
 
@@ -321,19 +351,50 @@ The FAM matching system is the core of what this application calculates. Here is
 
 ### Where data is stored
 
-All data is saved in a file called **fam_data.db** in the same folder as the application. This one file contains everything — market days, transactions, customer orders, payment records, and the audit log.
+All data is saved in your Windows **AppData** folder:
 
-### Backing up your data
+```
+%APPDATA%\FAM Market Manager\
+├── fam_data.db             ← your database (all transactions, settings, etc.)
+├── fam_ledger_backup.txt   ← auto-generated human-readable ledger backup
+├── fam_manager.log         ← application log file
+└── backups/                ← automatic database backups (20 most recent)
+```
 
-To back up, simply copy the `fam_data.db` file to a safe location (USB drive, cloud storage, etc.).
+You can quickly open this folder from the app: click the **About** button in the sidebar, then click **"Open Data Folder"**.
 
-### Moving to another computer
+Because your data lives separately from the application, you can safely upgrade to a new version by simply replacing the application folder — your data will not be affected.
 
-Copy the entire FAM Manager folder (including the database file) to the new computer. Everything will work exactly as before.
+### Automatic backups
+
+The app automatically creates database backups:
+- When a market day is opened
+- When a market day is closed
+- Every 5 minutes while a market day is active
+
+Backups are stored in the `backups/` subfolder. The 20 most recent backups are kept; older ones are automatically deleted.
 
 ### Ledger backup
 
-The app automatically maintains a text-based backup file called `fam_ledger_backup.txt` in the same folder. This is a human-readable summary of the most recent market day that can be opened in any text editor, even if the application is not available.
+The app automatically maintains a text-based backup file called `fam_ledger_backup.txt` in the data folder. This is a human-readable summary of **all transactions from every market day** that can be opened in any text editor, even if the application is not available. It is updated after every payment confirmation, adjustment, void, and market-day close.
+
+### Backing up your data
+
+To back up, copy the `fam_data.db` file from your data folder to a safe location (USB drive, cloud storage, etc.).
+
+### Moving to another computer
+
+1. Install FAM Manager on the new computer (extract the zip and run once)
+2. Copy `fam_data.db` from the old computer's `%APPDATA%\FAM Market Manager\` folder to the same location on the new computer
+3. Launch the app — everything will be exactly as before
+
+### Upgrading to a new version
+
+1. Download the new `FAM_Manager_vX.X.X.zip`
+2. Delete the old application folder (or extract over it)
+3. Launch the new version — it will find your existing data automatically
+
+Your database, log file, and ledger backup are never inside the application folder, so upgrading is completely safe.
 
 ---
 
@@ -357,7 +418,7 @@ If the Remaining card shows a number other than $0.00, adjust the payment method
 
 ### Something went wrong
 
-Check the log file (`fam_manager.log`) in the application folder for details. Share this file with your coordinator or technical support if you need help.
+If you see an "Unexpected Error" dialog, the error details have been saved to `fam_manager.log` in your data folder (`%APPDATA%\FAM Market Manager\`). You can also open this folder from the About dialog. Share the log file with your coordinator or technical support if you need help.
 
 ---
 
@@ -380,14 +441,18 @@ Check the log file (`fam_manager.log`) in the application folder for details. Sh
 | **Adjusted** | Corrected after confirmation |
 | **Voided** | Cancelled, excluded from totals |
 
-### Common Transaction ID Format
+### Transaction ID Format
 
-Transaction IDs follow the pattern: **FAM-YYYYMMDD-NNNN**
+Transaction IDs include the market code: **FAM-{CODE}-YYYYMMDD-NNNN**
 
-Example: `FAM-20260301-0005` means the 5th transaction on March 1, 2026.
+Example: `FAM-BPFM-20260306-0005` means the 5th transaction at Bethel Park Farmers Market on March 6, 2026.
 
 ### Customer Label Format
 
 Customer labels follow the pattern: **C-001**, **C-002**, etc.
 
 These reset at the start of each new market day.
+
+### Backup Retention
+
+The app keeps the **20 most recent** database backups. A typical market day produces ~3 backups (open, auto, close), so this retains approximately the last 6-7 market days of snapshots.

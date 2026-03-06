@@ -272,6 +272,13 @@ class MarketDayScreen(QWidget):
         else:
             create_market_day(market_id, today, opened_by=volunteer)
 
+        # Derive market code from the selected market name
+        from fam.utils.app_settings import update_market_code_from_name
+        update_market_code_from_name(self.market_combo.currentText())
+
+        from fam.database.backup import create_backup
+        create_backup(reason="market_open")
+
         self.refresh()
         self.market_day_changed.emit()
 
@@ -304,6 +311,10 @@ class MarketDayScreen(QWidget):
                 return
 
         close_market_day(open_md['id'], closed_by=volunteer)
+
+        from fam.database.backup import create_backup
+        create_backup(reason="market_close")
+
         write_ledger_backup()
         self.refresh()
         self.market_day_changed.emit()
@@ -333,5 +344,15 @@ class MarketDayScreen(QWidget):
         volunteer = volunteer.strip()
 
         reopen_market_day(md_id, opened_by=volunteer)
+
+        # Derive market code from the reopened market day's market name
+        md_info = get_market_day_by_id(md_id)
+        if md_info:
+            from fam.utils.app_settings import update_market_code_from_name
+            update_market_code_from_name(md_info['market_name'])
+
+        from fam.database.backup import create_backup
+        create_backup(reason="market_open")
+
         self.refresh()
         self.market_day_changed.emit()

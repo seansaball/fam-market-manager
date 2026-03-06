@@ -1,13 +1,15 @@
 """Database schema creation and migrations."""
 
 import logging
+import os
+import shutil
 import sqlite3
 
-from .connection import get_connection
+from .connection import get_connection, get_db_path
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS fmnp_entries (
     entered_by TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT,
+    status TEXT DEFAULT 'Active',
     FOREIGN KEY (market_day_id) REFERENCES market_days(id),
     FOREIGN KEY (vendor_id) REFERENCES vendors(id)
 );
@@ -399,6 +402,17 @@ def _migrate_v9_to_v10(conn):
     logger.info("Migration v9->v10 complete: app_settings table created")
 
 
+def _migrate_v10_to_v11(conn):
+    """Add status column to fmnp_entries for soft-delete support."""
+    logger.info("Running migration v10 to v11: fmnp_entries soft-delete")
+    conn.execute(
+        "ALTER TABLE fmnp_entries ADD COLUMN status TEXT DEFAULT 'Active'"
+    )
+    conn.execute("UPDATE fmnp_entries SET status = 'Active' WHERE status IS NULL")
+    conn.commit()
+    logger.info("Migration v10->v11 complete: fmnp_entries.status column added")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -429,6 +443,20 @@ def initialize_database():
         conn.commit()
         logger.info("Fresh install: schema at version %s", CURRENT_SCHEMA_VERSION)
         return True
+
+    # ── Pre-migration backup ──────────────────────────────────
+    # Snapshot the database before modifying it so a failed
+    # migration can be recovered by restoring the .bak file.
+    if current_version < CURRENT_SCHEMA_VERSION:
+        db_file = get_db_path()
+        if os.path.exists(db_file):
+            backup_path = db_file + '.pre-migration.bak'
+            try:
+                shutil.copy2(db_file, backup_path)
+                logger.info("Pre-migration backup created: %s (v%s → v%s)",
+                            backup_path, current_version, CURRENT_SCHEMA_VERSION)
+            except Exception:
+                logger.warning("Could not create pre-migration backup", exc_info=True)
 
     if current_version < 2:
         _migrate_v1_to_v2(conn)
@@ -465,6 +493,10 @@ def initialize_database():
     if current_version < 10:
         _migrate_v9_to_v10(conn)
         current_version = 10
+
+    if current_version < 11:
+        _migrate_v10_to_v11(conn)
+        current_version = 11
 
     # Record the final version (avoid duplicate if already at this version)
     existing = conn.execute(
