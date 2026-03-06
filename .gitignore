@@ -15,8 +15,11 @@ build_venv/
 
 # Database (local data — never commit)
 *.db
+*.db.bak
+*.bak
 *.sqlite
 *.sqlite3
+backups/
 
 # IDE / Editor
 .vscode/
@@ -40,6 +43,17 @@ desktop.ini
 # Exports / generated files
 *.csv
 *.png
+*.pdf
+*.docx
+
+# Release binaries (use GitHub Releases instead)
+releases/
+*.zip
 
 # Log files
 *.log
+
+# Runtime artifacts (ledger backups, pytest)
+fam_ledger_backup*.txt
+fam_*_ledger_backup*.txt
+.pytest_cache/
