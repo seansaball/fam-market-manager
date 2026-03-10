@@ -18,6 +18,8 @@ A desktop application for managing Food Assistance Match (FAM) market day transa
 - **Automatic Backups** — Periodic database backups with 20-file retention, plus human-readable ledger backup
 - **Data Export** — CSV exports with market code and device ID columns for finance team consolidation
 - **First-Run Tutorial** — Interactive guided walkthrough with one-click auto-configure option
+- **Cloud Sync** — Optional one-way sync of end-of-day reports to Google Sheets for remote viewing
+- **Auto-Update** — Check GitHub Releases for new versions, download and install updates with one click
 
 ## Installation
 
@@ -34,7 +36,13 @@ No Python installation required. Works on Windows 10/11 (64-bit).
 
 Your data is stored separately in `%APPDATA%\FAM Market Manager\`, so upgrading is safe and simple:
 
-1. Download the new zip
+**Option A — In-App Auto-Update (recommended):**
+1. Go to **Settings → Updates**
+2. Click **"Check for Updates"**
+3. If available, click **"Download & Install"** — the app restarts with the new version
+
+**Option B — Manual:**
+1. Download the new zip from [Releases](https://github.com/seansaball/fam-market-manager/releases)
 2. Replace the old application folder with the new one (or extract to a new location)
 3. Launch — the app finds your existing data automatically
 
@@ -60,7 +68,7 @@ python run.py
 python -m pytest tests/ -v
 ```
 
-479 tests across 10 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, and settings import/export.
+618 tests across 13 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, settings import/export, cloud sync, and auto-update.
 
 ## Building the Executable
 
@@ -77,12 +85,14 @@ Output: `dist\FAM Manager\FAM Manager.exe`
 - **Matplotlib** for charts
 - **Pandas** for CSV export
 - **Folium + pgeocode** for geolocation heat maps
+- **gspread + google-auth** for Google Sheets cloud sync
 - **PyInstaller** for standalone packaging
 
 ## Version History
 
 | Version | Summary |
 |---------|---------|
+| v1.7.0 | Google Sheets cloud sync, auto-update from GitHub Releases, 618 tests |
 | v1.6.1 | Tutorial auto-configure, market code/device ID tracking, receipt printing, settings import/export, database backups, ledger backup, data directory migration |
 | v1.5.1 | First-run tutorial, single-instance prevention, PyInstaller fixes |
 | v1.5.0 | Interactive tutorial overlay, production-readiness improvements |

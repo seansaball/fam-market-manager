@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QLabel, QButtonGroup, QFrame, QSizePolicy,
     QDialog, QDialogButtonBox
 )
-from PySide6.QtCore import Qt, QRect, QEvent, QUrl, QTimer
+from PySide6.QtCore import Qt, QRect, QEvent, QUrl, QTimer, QThread
 from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush, QIcon, QDesktopServices
 
 from fam import __version__
@@ -184,6 +184,38 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(16, 4, 16, 4)
         header_layout.addStretch()
 
+        # ── Sync indicator + button (hidden until configured) ───
+        self._sync_indicator = QLabel("")
+        self._sync_indicator.setVisible(False)
+        header_layout.addWidget(self._sync_indicator)
+        self._set_sync_indicator("offline")
+
+        self._sync_btn = QPushButton("\U0001F4E4  Sync to Sheets")
+        self._sync_btn.setCursor(Qt.PointingHandCursor)
+        self._sync_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 5px 14px;
+                font-size: 12px;
+                min-height: 0px;
+                border: 1px solid {LIGHT_GRAY};
+                border-radius: 6px;
+                background-color: {WHITE};
+                color: {SUBTITLE_GRAY};
+            }}
+            QPushButton:hover {{
+                background-color: #F0EFEB;
+                color: {PRIMARY_GREEN};
+                border-color: {PRIMARY_GREEN};
+            }}
+            QPushButton:disabled {{
+                color: #ccc;
+                border-color: #ddd;
+            }}
+        """)
+        self._sync_btn.clicked.connect(self._trigger_sync)
+        self._sync_btn.setVisible(False)
+        header_layout.addWidget(self._sync_btn)
+
         self._tutorial_btn = QPushButton("\U0001F4D6  Start Tutorial")
         self._tutorial_btn.setCursor(Qt.PointingHandCursor)
         self._tutorial_btn.setStyleSheet(f"""
@@ -255,8 +287,23 @@ class MainWindow(QMainWindow):
         self._backup_timer.setInterval(5 * 60 * 1000)  # 5 minutes
         self._backup_timer.timeout.connect(self._on_backup_timer)
 
-        # If a market day is already open at startup (e.g. after crash), start timer
+        # Periodic sync timer (opt-in, active only while a market day is open)
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setInterval(5 * 60 * 1000)  # 5 minutes
+        self._sync_timer.timeout.connect(self._on_sync_timer)
+        self._sync_thread = None
+        self._sync_worker = None
+
+        # Auto-update check thread tracking
+        self._update_check_thread = None
+        self._update_check_worker = None
+
+        # If a market day is already open at startup (e.g. after crash), start timers
         QTimer.singleShot(1000, self._update_backup_timer)
+        QTimer.singleShot(1500, self._update_sync_visibility)
+
+        # Auto-check for updates 5 seconds after launch
+        QTimer.singleShot(5000, self._auto_check_for_updates)
 
     def _navigate(self, idx):
         self.stack.setCurrentIndex(idx)
@@ -264,12 +311,15 @@ class MainWindow(QMainWindow):
         widget = self.stack.widget(idx)
         if hasattr(widget, 'refresh'):
             widget.refresh()
+        # Refresh sync indicator (e.g. after saving sync settings)
+        self._update_sync_visibility()
 
     def _on_market_day_changed(self):
         """Refresh dependent screens when market day changes."""
         self.receipt_intake_screen.refresh()
         self._update_backup_timer()
         self._update_title_bar()
+        self._maybe_sync_on_close()
 
     def _update_title_bar(self):
         """Update the title bar to reflect the current market code."""
@@ -293,6 +343,246 @@ class MainWindow(QMainWindow):
         """5-minute periodic backup while market day is open."""
         from fam.database.backup import create_backup
         create_backup(reason="auto")
+
+    # ── Cloud sync ─────────────────────────────────────────────
+
+    def _set_sync_indicator(self, state: str, detail: str = ""):
+        """Update the online/offline indicator.
+
+        *state*: ``"online"``, ``"offline"``, ``"syncing"``, or ``"error"``.
+        *detail*: optional extra text (e.g. timestamp or error summary).
+        """
+        if state == "online":
+            color = PRIMARY_GREEN
+            label = "Online"
+        elif state == "syncing":
+            color = "#F5A623"  # amber
+            label = "Syncing…"
+        elif state == "error":
+            color = "#d32f2f"
+            label = "Sync Error"
+        else:
+            color = SUBTITLE_GRAY
+            label = "Offline"
+
+        text = f"<span style='color:{color}; font-size:14px;'>●</span>"
+        text += f"&nbsp;<span style='color:{color}; font-weight:600; font-size:12px;'>{label}</span>"
+        if detail:
+            text += f"&nbsp;&nbsp;<span style='color:{SUBTITLE_GRAY}; font-size:11px;'>{detail}</span>"
+        self._sync_indicator.setText(text)
+        self._sync_indicator.setStyleSheet("background: transparent; padding: 0 8px;")
+
+    def _update_sync_visibility(self):
+        """Show/hide the sync button + indicator based on configuration."""
+        try:
+            from fam.utils.app_settings import is_sync_configured, get_last_sync_at
+            configured = is_sync_configured()
+            self._sync_btn.setVisible(configured)
+            self._sync_indicator.setVisible(configured)
+            if configured:
+                last = get_last_sync_at()
+                if last:
+                    short = last[11:16] if len(last) > 16 else last
+                    self._set_sync_indicator("online", f"Last sync: {short}")
+                else:
+                    self._set_sync_indicator("offline")
+            else:
+                self._set_sync_indicator("offline")
+        except Exception:
+            pass
+
+    def _maybe_sync_on_close(self):
+        """Trigger sync when market day closes, if enabled."""
+        from fam.utils.app_settings import get_setting
+        from fam.models.market_day import get_open_market_day
+        if get_open_market_day() is None and get_setting('sync_on_close') == '1':
+            self._trigger_sync()
+        # Also update sync timer state
+        self._update_sync_timer()
+
+    def _update_sync_timer(self):
+        """Start or stop the periodic sync timer."""
+        from fam.utils.app_settings import get_setting
+        from fam.models.market_day import get_open_market_day
+        if (get_open_market_day() and
+                get_setting('sync_periodic') == '1'):
+            if not self._sync_timer.isActive():
+                self._sync_timer.start()
+        else:
+            self._sync_timer.stop()
+
+    def _on_sync_timer(self):
+        """Periodic sync while market day is open."""
+        self._trigger_sync()
+
+    def _trigger_sync(self):
+        """Execute a background sync. Never blocks the UI."""
+        if self._sync_thread and self._sync_thread.isRunning():
+            logger.info("Sync already in progress — skipping")
+            return
+
+        try:
+            from fam.sync.gsheets import GoogleSheetsBackend
+            from fam.sync.manager import SyncManager
+            from fam.sync.data_collector import collect_sync_data
+            from fam.sync.worker import SyncWorker
+
+            backend = GoogleSheetsBackend()
+            if not backend.is_configured():
+                return
+
+            data = collect_sync_data()
+            if not data:
+                return
+
+            manager = SyncManager(backend)
+            self._sync_thread = QThread()
+            self._sync_worker = SyncWorker(manager, data)
+            self._sync_worker.moveToThread(self._sync_thread)
+            self._sync_thread.started.connect(self._sync_worker.run)
+            self._sync_worker.finished.connect(self._on_sync_finished)
+            self._sync_worker.error.connect(self._on_sync_error)
+            self._sync_worker.finished.connect(self._sync_thread.quit)
+            self._sync_worker.error.connect(self._sync_thread.quit)
+
+            self._sync_btn.setEnabled(False)
+            self._sync_btn.setText("Syncing...")
+            self._set_sync_indicator("syncing")
+            self._sync_thread.start()
+
+        except ImportError:
+            pass  # gspread not installed
+        except Exception:
+            logger.exception("Failed to trigger sync")
+
+    def _on_sync_finished(self, results):
+        """Handle sync completion."""
+        self._sync_btn.setEnabled(True)
+        self._sync_btn.setText("\U0001F4E4  Sync to Sheets")
+        failed = [name for name, r in results.items() if not r.success]
+        total = sum(r.rows_synced for r in results.values() if r.success)
+        if failed:
+            self._set_sync_indicator(
+                "error", f"{len(failed)} tab(s) failed")
+        else:
+            from fam.utils.app_settings import get_last_sync_at
+            last = get_last_sync_at() or ''
+            short = last[11:16] if len(last) > 16 else 'now'
+            self._set_sync_indicator("online", f"Last sync: {short}")
+        logger.info("Sync finished: %d tabs, %d failed",
+                    len(results), len(failed))
+
+    def _on_sync_error(self, error_msg):
+        """Handle sync failure."""
+        self._sync_btn.setEnabled(True)
+        self._sync_btn.setText("\U0001F4E4  Sync to Sheets")
+        self._set_sync_indicator("error", "Sync failed")
+        self._sync_indicator.setToolTip(error_msg)
+        logger.error("Sync failed: %s", error_msg)
+
+    # ------------------------------------------------------------------
+    # Auto-update check on launch
+    # ------------------------------------------------------------------
+
+    def _auto_check_for_updates(self):
+        """Silently check for app updates on launch (once per 24 hours)."""
+        try:
+            from fam.utils.app_settings import (
+                get_update_repo_url, is_auto_update_check_enabled,
+                get_last_update_check, get_setting, set_setting,
+                set_last_update_check,
+            )
+
+            if not is_auto_update_check_enabled():
+                return
+            repo_url = get_update_repo_url()
+            if not repo_url:
+                return
+
+            # Rate limit: max once per 24 hours
+            last = get_last_update_check()
+            if last:
+                from datetime import datetime, timedelta
+                try:
+                    last_dt = datetime.fromisoformat(last)
+                    if datetime.now() - last_dt < timedelta(hours=24):
+                        return
+                except (ValueError, TypeError):
+                    pass
+
+            from fam.update.checker import parse_github_repo_url
+            parsed = parse_github_repo_url(repo_url)
+            if not parsed:
+                return
+
+            owner, repo = parsed
+
+            # Prevent overlapping checks
+            if (self._update_check_thread and
+                    self._update_check_thread.isRunning()):
+                return
+
+            from fam import __version__
+            from fam.update.worker import UpdateCheckWorker
+
+            self._update_check_thread = QThread()
+            self._update_check_worker = UpdateCheckWorker(
+                owner, repo, __version__)
+            self._update_check_worker.moveToThread(
+                self._update_check_thread)
+            self._update_check_thread.started.connect(
+                self._update_check_worker.run)
+            self._update_check_worker.finished.connect(
+                self._on_auto_update_check_finished)
+            self._update_check_worker.error.connect(
+                lambda msg: logger.info("Auto-update check failed: %s", msg))
+            self._update_check_worker.finished.connect(
+                self._update_check_thread.quit)
+            self._update_check_worker.error.connect(
+                self._update_check_thread.quit)
+
+            self._update_check_thread.start()
+            logger.info("Auto-update check started")
+
+        except Exception:
+            logger.debug("Auto-update check skipped", exc_info=True)
+
+    def _on_auto_update_check_finished(self, result: dict):
+        """Handle the background update check result."""
+        from datetime import datetime
+        from fam.utils.app_settings import (
+            set_last_update_check, set_setting, get_setting,
+        )
+
+        set_last_update_check(datetime.now().isoformat())
+
+        if not result or not result.get('update_available'):
+            return
+
+        version = result.get('version', '?')
+        set_setting('update_last_version', version)
+
+        # Don't nag if the user dismissed this version
+        dismissed = get_setting('update_dismissed_version')
+        if dismissed == version:
+            return
+
+        from fam import __version__
+        reply = QMessageBox.information(
+            self,
+            "Update Available",
+            f"A new version of FAM Manager is available!\n\n"
+            f"Current version: v{__version__}\n"
+            f"Latest version:  v{version}\n\n"
+            f"Go to Settings → Updates to download and install.",
+            QMessageBox.StandardButton.Ok |
+            QMessageBox.StandardButton.Ignore,
+            QMessageBox.StandardButton.Ok,
+        )
+
+        if reply == QMessageBox.StandardButton.Ignore:
+            set_setting('update_dismissed_version', version)
+            logger.info("User dismissed update notification for v%s", version)
 
     def _on_customer_order_ready(self, order_id):
         """Navigate to payment screen with the customer order."""
@@ -419,10 +709,10 @@ class MainWindow(QMainWindow):
                 border-color: {ACCENT_GREEN};
             }}
         """)
+        from fam.utils.app_settings import DEFAULT_REPO_URL, get_update_repo_url
+        _repo_url = get_update_repo_url() or DEFAULT_REPO_URL
         repo_btn.clicked.connect(
-            lambda: QDesktopServices.openUrl(
-                QUrl("https://github.com/seansaball/fam-market-manager")
-            )
+            lambda: QDesktopServices.openUrl(QUrl(_repo_url))
         )
         layout.addWidget(repo_btn, alignment=Qt.AlignCenter)
 

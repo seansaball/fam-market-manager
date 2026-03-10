@@ -1,6 +1,6 @@
 # FAM Market Manager — Technical Overview
 
-> **Version:** 1.6.1
+> **Version:** 1.7.0
 > **Last Updated:** March 2026
 > **Audience:** Developers, administrators, and stakeholders
 
@@ -20,8 +20,10 @@ FAM Market Manager is a desktop point-of-sale and back-office application for fa
 - Adjust or void transactions with a full audit trail
 - Manage markets, vendors, and payment method configuration
 - Import/export settings across devices via `.fam` files
+- One-way sync of reports to Google Sheets for remote viewing
+- Check for and install application updates from GitHub Releases
 
-The application runs as a standalone Windows desktop executable with no server, no internet requirement, and no external database — all data is stored locally in a single SQLite file.
+The application runs as a standalone Windows desktop executable with local SQLite storage. Internet connectivity is optional — required only for cloud sync and auto-update features.
 
 ---
 
@@ -61,6 +63,17 @@ The application runs as a standalone Windows desktop executable with no server, 
         ▲            ▲             ▲
         └────────────┼─────────────┘
                      │
+        ┌────────────┼─────────────┐
+        ▼            │             ▼
+┌──────────┐         │      ┌──────────┐
+│   sync   │         │      │  update  │
+├──────────┤         │      ├──────────┤
+│ gsheets  │         │      │ checker  │
+│ manager  │         │      │ worker   │
+│data_coll.│         │      └──────────┘
+│ worker   │         │
+│ base     │         │
+└──────────┘         │
                      ▼
 ┌──────────────────────────────────────────────────┐
 │                   fam/ui/                        │
@@ -96,8 +109,10 @@ The application runs as a standalone Windows desktop executable with no server, 
 | Charts | Matplotlib (QtAgg backend) | Report visualizations |
 | Data Export | Pandas | CSV file generation |
 | Geolocation | Folium + pgeocode | Zip code heat maps |
+| Cloud Sync | gspread + google-auth | Google Sheets integration |
+| Auto-Update | urllib.request (stdlib) | GitHub Releases API |
 | Packaging | PyInstaller | Standalone Windows executable |
-| Testing | pytest | Unit and integration tests (479 tests) |
+| Testing | pytest | Unit and integration tests (618 tests) |
 
 **Runtime Dependencies** (`requirements.txt`):
 - `PySide6 >= 6.5.0`
@@ -105,6 +120,8 @@ The application runs as a standalone Windows desktop executable with no server, 
 - `matplotlib >= 3.7.0`
 - `folium >= 0.14.0`
 - `pgeocode >= 0.4.0`
+- `gspread >= 6.0.0`
+- `google-auth >= 2.20.0`
 
 ---
 
@@ -131,22 +148,31 @@ fam-market-manager/
 │   │   ├── fmnp.py             # FMNP check entry CRUD
 │   │   └── audit.py            # Append-only audit log
 │   ├── ui/
-│   │   ├── main_window.py      # MainWindow + sidebar + tutorial + backup timer
+│   │   ├── main_window.py      # MainWindow + sidebar + tutorial + backup timer + auto-update check
 │   │   ├── market_day_screen.py
 │   │   ├── receipt_intake_screen.py
 │   │   ├── payment_screen.py   # Includes receipt printing
 │   │   ├── fmnp_screen.py
 │   │   ├── admin_screen.py
 │   │   ├── reports_screen.py
-│   │   ├── settings_screen.py  # Includes ImportPreviewDialog
+│   │   ├── settings_screen.py  # Includes ImportPreviewDialog, Cloud Sync, Updates tabs
 │   │   ├── tutorial_overlay.py # Guided tutorial + auto-configure prompt
 │   │   ├── styles.py           # Color palette + global stylesheet
 │   │   ├── helpers.py          # Shared widgets + table utilities
 │   │   └── widgets/
 │   │       ├── payment_row.py  # Payment method entry widget
 │   │       └── summary_card.py # Metric display cards
+│   ├── sync/
+│   │   ├── base.py             # SyncResult dataclass
+│   │   ├── manager.py          # SyncManager orchestration
+│   │   ├── gsheets.py          # Google Sheets API via gspread
+│   │   ├── data_collector.py   # Collects report data for sync
+│   │   └── worker.py           # QThread worker for background sync
+│   ├── update/
+│   │   ├── checker.py          # GitHub API, version comparison, download, batch script
+│   │   └── worker.py           # QThread workers for check + download
 │   └── utils/
-│       ├── app_settings.py     # Market code, device ID, key-value settings
+│       ├── app_settings.py     # Market code, device ID, sync/update settings, key-value store
 │       ├── calculations.py     # Match formula + payment breakdown
 │       ├── export.py           # CSV export + ledger backup
 │       └── logging_config.py   # Rotating file logger
@@ -160,9 +186,11 @@ fam-market-manager/
 │   ├── test_market_code.py     # 44 tests — market code, device ID, exports
 │   ├── test_backup.py          # 12 tests — backup creation + retention
 │   ├── test_schema.py          # 30 tests — migrations, triggers, indexes
-│   └── test_settings_io.py     # 102 tests — import/export round-trip
+│   ├── test_settings_io.py     # 102 tests — import/export round-trip
+│   ├── test_sync.py            # 90 tests — cloud sync, data collection, Google Sheets
+│   └── test_update.py          # 77 tests — URL parsing, version comparison, update flow
 ├── releases/
-│   └── FAM_Manager_v1.6.1.zip # Distribution package
+│   └── FAM_Manager_v1.7.0.zip # Distribution package
 ├── fam_manager.spec            # PyInstaller build configuration
 ├── build.bat                   # Windows build script
 ├── requirements.txt
@@ -198,7 +226,7 @@ The database file (`fam_data.db`) is stored in `%APPDATA%\FAM Market Manager\` i
 | `payment_line_items` | Payment breakdown per receipt | transaction_id, method_amount, match_amount, customer_charged |
 | `fmnp_entries` | FMNP check records | market_day_id, vendor_id, amount, check_count, status |
 | `audit_log` | Append-only change history | table_name, record_id, action, old_value, new_value, changed_by |
-| `app_settings` | Key-value configuration store | key, value (market_code, device_id, tutorial_shown, etc.) |
+| `app_settings` | Key-value configuration store | key, value (market_code, device_id, tutorial_shown, sync_*, update_*, etc.) |
 
 **Junction Tables:**
 
@@ -299,9 +327,128 @@ All CSV exports inject `market_code` and `device_id` as the first two columns, a
 
 ---
 
-## 8. Core Business Logic
+## 8. Cloud Sync (Google Sheets)
 
-### 8.1 The FAM Match Formula
+### 8.1 Architecture
+
+The `fam/sync/` package provides optional one-way sync from local SQLite to Google Sheets.
+
+```
+Settings → Load Credentials → sync_credentials.json stored in AppData
+Settings → Save Spreadsheet ID → app_settings table
+
+User clicks "Sync Now" → SyncWorker (QThread)
+    → DataCollector gathers report data from SQLite
+    → SyncManager orchestrates sheet-by-sheet upload
+    → GSheetsSyncBackend writes via gspread API
+    → SyncResult per sheet returned to UI
+```
+
+### 8.2 Components
+
+| Module | Purpose |
+|--------|---------|
+| `sync/base.py` | `SyncResult` dataclass (rows_synced, status, error) |
+| `sync/data_collector.py` | Queries database for summary, vendor, payment, and transaction data |
+| `sync/gsheets.py` | Google Sheets backend using `gspread` with service account auth |
+| `sync/manager.py` | `SyncManager` — orchestrates data collection + backend calls |
+| `sync/worker.py` | `SyncWorker(QObject)` — runs sync in background QThread |
+
+### 8.3 Credentials and Configuration
+
+- **Service account JSON** stored at `{data_dir}/sync_credentials.json`
+- **Spreadsheet ID** stored in `app_settings` (key: `sync_spreadsheet_id`)
+- **Credentials loaded flag** in `app_settings` (key: `sync_credentials_loaded`)
+- **Last sync timestamp** in `app_settings` (key: `last_sync_at`)
+- **Last sync error** in `app_settings` (key: `last_sync_error`)
+
+### 8.4 Data Sheets
+
+The sync writes multiple sheets to the target spreadsheet:
+
+| Sheet | Content |
+|-------|---------|
+| Summary | Market day totals, customer count, FAM match total |
+| Vendor Reimbursement | Per-vendor receipt totals and FAM subsidy breakdown |
+| Payment Methods | Per-method totals and match amounts |
+| Transactions | Full transaction ledger with payment line items |
+
+---
+
+## 9. Auto-Update System
+
+### 9.1 Architecture
+
+The `fam/update/` package provides self-update capability via GitHub Releases.
+
+```
+Launch → 5s timer → _auto_check_for_updates()
+    → Rate limit check (once per 24h)
+    → UpdateCheckWorker → GET /repos/{owner}/{repo}/releases/latest
+    → If update available + not dismissed → notification dialog
+
+Settings → Updates tab → "Check for Updates"
+    → UpdateCheckWorker → GitHub API → UI shows version info
+
+Settings → "Download & Install"
+    → Safety checks (frozen mode, market day not open)
+    → UpdateDownloadWorker → downloads .zip to AppData
+    → verify_download() → file size check
+    → generate_update_script() → writes _fam_update.bat
+    → subprocess.Popen(.bat) → QApplication.quit()
+
+Batch script:
+    → Waits for exe to exit (30s timeout)
+    → Backs up current app dir to AppData\_update_backup\
+    → PowerShell Expand-Archive → copies over app dir
+    → Relaunches FAM Manager.exe → self-deletes
+```
+
+### 9.2 Components
+
+| Module | Purpose |
+|--------|---------|
+| `update/checker.py` | URL parsing, version comparison, GitHub API, download, script generation |
+| `update/worker.py` | `UpdateCheckWorker` + `UpdateDownloadWorker` (QThread workers) |
+
+### 9.3 Key Functions in `checker.py`
+
+| Function | Purpose |
+|----------|---------|
+| `parse_github_repo_url(url)` | Validates GitHub URL, extracts (owner, repo) |
+| `compare_versions(current, remote)` | Semantic version comparison (-1/0/1) |
+| `check_for_update(owner, repo, version)` | Calls GitHub API, finds .zip asset, returns release info |
+| `download_update(url, dest, callback)` | Downloads in 64KB chunks with progress |
+| `verify_download(path, expected_size)` | File size verification |
+| `generate_update_script(app_dir, zip)` | Writes batch script to AppData |
+
+### 9.4 Settings
+
+| Key | Purpose |
+|-----|---------|
+| `update_repo_url` | GitHub repository URL |
+| `update_auto_check` | Enable/disable auto-check on launch (default: enabled) |
+| `update_last_check` | ISO timestamp of last check (rate limit) |
+| `update_last_version` | Latest version found |
+| `update_dismissed_version` | Version the user clicked "Skip" on |
+
+### 9.5 Safety Features
+
+| Concern | Solution |
+|---------|----------|
+| Running exe can't replace itself | Batch script waits for app to exit first |
+| Corrupt download | File size verified against GitHub API |
+| Bad update breaks app | Full backup at `AppData\_update_backup\` |
+| Market day in progress | Download & Install blocked while market day is open |
+| No internet | Silent skip on auto-check; clear error on manual check |
+| Dev mode (not frozen) | Install button disabled with explanatory message |
+| API rate limiting | Auto-check max once per 24 hours |
+
+---
+
+## 10. Core Business Logic
+
+### 10.1 The FAM Match Formula
 
 ```
 match_amount = method_amount × (match_percent / (100 + match_percent))
@@ -317,22 +464,22 @@ customer_charged = method_amount − match_amount
 3. `fam/ui/widgets/payment_row.py` → `get_data()` — data collection
 4. `fam/ui/payment_screen.py` → `_distribute_and_save_payments()` — multi-receipt distribution
 
-### 8.2 Daily Match Limit (Cap)
+### 10.2 Daily Match Limit (Cap)
 
 Each market can set a per-customer daily FAM match cap. When exceeded:
 1. Compute `ratio = match_limit / uncapped_total`
 2. Scale each line item's `match_amount` proportionally
 3. Apply penny adjustment to the largest line item for rounding
 
-### 8.3 Multi-Receipt Payment Distribution
+### 10.3 Multi-Receipt Payment Distribution
 
 When a customer order contains multiple receipts, payments are distributed proportionally across receipts based on receipt total. Rounding remainder applied to the last receipt.
 
 ---
 
-## 9. Application Lifecycle
+## 11. Application Lifecycle
 
-### 9.1 Startup Sequence
+### 11.1 Startup Sequence
 
 1. `run.py` adds project root to `sys.path`, calls `fam.app.run()`
 2. `app.py` detects frozen (PyInstaller) vs. development mode
@@ -344,9 +491,10 @@ When a customer order contains multiple receipts, payments are distributed propo
 8. `QApplication` created with global stylesheet and exception handler
 9. `MainWindow` instantiated and displayed
 10. First-run tutorial auto-launches if `tutorial_shown` not set
-11. Qt event loop starts
+11. Auto-update check scheduled via `QTimer.singleShot(5000, ...)` (rate-limited to once per 24h)
+12. Qt event loop starts
 
-### 9.2 First Run Experience
+### 11.2 First Run Experience
 
 1. Tutorial overlay guides user through all 11 steps
 2. Final step offers "Quick Setup" — one-click auto-configure
@@ -356,9 +504,9 @@ When a customer order contains multiple receipts, payments are distributed propo
 
 ---
 
-## 10. Testing
+## 12. Testing
 
-**479 tests** across 10 test files:
+**618 tests** across 13 test files:
 
 | File | Tests | Coverage |
 |------|-------|----------|
@@ -372,14 +520,16 @@ When a customer order contains multiple receipts, payments are distributed propo
 | `test_backup.py` | 12 | Backup creation, retention enforcement |
 | `test_schema.py` | 30 | Migrations, triggers, indexes, defaults |
 | `test_settings_io.py` | 102 | Import/export parsing, round-trip, sanitization |
+| `test_sync.py` | 90 | Cloud sync, data collection, Google Sheets mocking |
+| `test_update.py` | 77 | URL parsing, version comparison, GitHub API, update flow |
 
 **Run:** `python -m pytest tests/ -v`
 
 ---
 
-## 11. Build and Deployment
+## 13. Build and Deployment
 
-### 11.1 Development
+### 13.1 Development
 
 ```bash
 python -m venv venv
@@ -388,7 +538,7 @@ pip install -r requirements.txt
 python run.py
 ```
 
-### 11.2 Windows Executable
+### 13.2 Windows Executable
 
 ```bash
 build.bat
@@ -398,13 +548,13 @@ build.bat
 
 The PyInstaller spec bundles all Python dependencies, UI assets, and hidden imports. Excludes unused backends and test frameworks.
 
-### 11.3 Distribution
+### 13.3 Distribution
 
 Zip the `dist\FAM Manager` folder (include `FAM_Default_Settings.fam` for manual import). End users extract the zip and double-click the executable. No Python installation required. Works on Windows 10/11 (64-bit).
 
 > **Windows SmartScreen:** Unsigned executables trigger a SmartScreen warning on first run. Users click "More info" → "Run anyway." Code signing certificate is a planned future enhancement.
 
-### 11.4 Data Persistence
+### 13.4 Data Persistence
 
 All persistent data is stored in `%APPDATA%\FAM Market Manager\`:
 
@@ -413,6 +563,8 @@ All persistent data is stored in `%APPDATA%\FAM Market Manager\`:
 | `fam_data.db` | SQLite database — all application data |
 | `fam_ledger_backup.txt` | Auto-generated human-readable ledger backup |
 | `fam_manager.log` | Rotating log file (5 MB × 3 backups) |
+| `sync_credentials.json` | Google Sheets service account credentials (if configured) |
 | `backups/` | Automatic database backups (20 most recent) |
+| `_update_backup/` | Previous app version backup (created during auto-update) |
 
 **Upgrades are seamless:** replace the application folder and launch. Schema migrations run automatically. Legacy data (v1.5.1 and earlier) is auto-migrated from the exe directory to AppData on first launch.

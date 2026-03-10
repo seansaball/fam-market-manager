@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
     QCheckBox, QMessageBox, QDialog, QFileDialog, QScrollArea,
-    QFormLayout, QDialogButtonBox, QSizePolicy
+    QFormLayout, QDialogButtonBox, QSizePolicy, QProgressBar
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
@@ -679,6 +679,10 @@ class SettingsScreen(QWidget):
         self.tabs.addTab(self._build_vendors_tab(), "Vendors")
         self.tabs.addTab(self._build_payment_methods_tab(), "Payment Methods")
         self.tabs.addTab(self._build_preferences_tab(), "Preferences")
+        self.cloud_sync_tab = self._build_cloud_sync_tab()
+        self.tabs.addTab(self.cloud_sync_tab, "Cloud Sync")
+        self.updates_tab = self._build_updates_tab()
+        self.tabs.addTab(self.updates_tab, "Updates")
         self.tabs.addTab(self._build_reset_tab(), "Reset")
 
         layout.addWidget(self.tabs)
@@ -940,6 +944,177 @@ class SettingsScreen(QWidget):
         layout.addStretch()
         return tab
 
+    # ── Cloud Sync Tab ────────────────────────────────────────────
+
+    def _build_cloud_sync_tab(self):
+        from fam.utils.app_settings import get_sync_spreadsheet_id, get_setting
+
+        tab = QWidget()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setSpacing(16)
+
+        sync_desc = QLabel(
+            "Sync market day data to a shared Google Sheet for centralized "
+            "reporting. This feature is optional \u2014 the app works fully "
+            "offline without it."
+        )
+        sync_desc.setWordWrap(True)
+        sync_desc.setStyleSheet(
+            f"font-size: 13px; color: {TEXT_COLOR}; padding: 0 0 4px 0; "
+            "background: transparent;"
+        )
+        layout.addWidget(sync_desc)
+
+        sync_frame = QFrame()
+        sync_frame.setStyleSheet(_COMPACT_FRAME)
+        sync_fl = QVBoxLayout(sync_frame)
+        sync_fl.setSpacing(8)
+
+        # ─ Credentials row ─
+        creds_row = QHBoxLayout()
+        creds_lbl = make_field_label("Credentials")
+        creds_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        creds_row.addWidget(creds_lbl)
+
+        self._sync_creds_status = QLabel("Not configured")
+        self._sync_creds_status.setStyleSheet(
+            f"font-size: 13px; color: {SUBTITLE_GRAY}; "
+            "background: transparent; padding: 0 8px;"
+        )
+        self._sync_creds_status.setFixedHeight(_FORM_ROW_HEIGHT)
+        creds_row.addWidget(self._sync_creds_status)
+
+        browse_btn = QPushButton("Browse...")
+        browse_btn.setObjectName("secondary_btn")
+        browse_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        browse_btn.setStyleSheet(_FORM_BTN_STYLE)
+        browse_btn.clicked.connect(self._browse_credentials)
+        creds_row.addWidget(browse_btn)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        remove_btn.setStyleSheet(_FORM_BTN_STYLE)
+        remove_btn.clicked.connect(self._remove_credentials)
+        creds_row.addWidget(remove_btn)
+
+        creds_row.addStretch()
+        sync_fl.addLayout(creds_row)
+
+        # ─ Spreadsheet ID row ─
+        sheet_row = QHBoxLayout()
+        sheet_lbl = make_field_label("Spreadsheet ID")
+        sheet_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        sheet_row.addWidget(sheet_lbl)
+
+        self._sheet_id_input = QLineEdit()
+        self._sheet_id_input.setPlaceholderText(
+            "Paste spreadsheet ID from the Google Sheet URL")
+        self._sheet_id_input.setText(get_sync_spreadsheet_id() or '')
+        self._sheet_id_input.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._sheet_id_input.setMinimumWidth(300)
+        self._sheet_id_input.setStyleSheet(_FORM_INPUT_STYLE)
+        sheet_row.addWidget(self._sheet_id_input)
+
+        sheet_row.addStretch()
+        sync_fl.addLayout(sheet_row)
+
+        sheet_hint = QLabel(
+            "Found in the Google Sheet URL: "
+            "docs.google.com/spreadsheets/d/<b>THIS_PART</b>/edit"
+        )
+        sheet_hint.setStyleSheet(
+            f"font-size: 11px; color: {SUBTITLE_GRAY}; "
+            "background: transparent; padding: 0 0 0 4px;"
+        )
+        sync_fl.addWidget(sheet_hint)
+
+        # ─ Test Connection + status ─
+        conn_row = QHBoxLayout()
+        test_btn = QPushButton("Test Connection")
+        test_btn.setObjectName("secondary_btn")
+        test_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        test_btn.setStyleSheet(_FORM_BTN_STYLE)
+        test_btn.clicked.connect(self._test_sync_connection)
+        conn_row.addWidget(test_btn)
+
+        self._sync_conn_status = QLabel("")
+        self._sync_conn_status.setStyleSheet(
+            f"font-weight: bold; background: transparent; "
+            f"padding: 0 8px;"
+        )
+        self._sync_conn_status.setVisible(False)
+        conn_row.addWidget(self._sync_conn_status)
+
+        conn_row.addStretch()
+        sync_fl.addLayout(conn_row)
+
+        # ─ Auto-sync checkboxes ─
+        self._sync_on_close_cb = QCheckBox(
+            "Auto-sync when market day closes")
+        self._sync_on_close_cb.setChecked(
+            get_setting('sync_on_close') == '1')
+        _sync_cb_style = f"""
+            QCheckBox {{
+                font-size: 13px; padding: 4px; background-color: {WHITE};
+            }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                background-color: {WHITE};
+                border: 2px solid #AAAAAA;
+                border-radius: 3px;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {ACCENT_GREEN};
+                border-color: {PRIMARY_GREEN};
+            }}
+        """
+        self._sync_on_close_cb.setStyleSheet(_sync_cb_style)
+        sync_fl.addWidget(self._sync_on_close_cb)
+
+        self._sync_periodic_cb = QCheckBox(
+            "Also sync every 5 minutes while market day is open")
+        self._sync_periodic_cb.setChecked(
+            get_setting('sync_periodic') == '1')
+        self._sync_periodic_cb.setStyleSheet(_sync_cb_style)
+        sync_fl.addWidget(self._sync_periodic_cb)
+
+        # ─ Save Sync Settings button ─
+        save_row = QHBoxLayout()
+        sync_save_btn = QPushButton("Save Sync Settings")
+        sync_save_btn.setObjectName("primary_btn")
+        sync_save_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        sync_save_btn.setStyleSheet(_FORM_BTN_STYLE)
+        sync_save_btn.clicked.connect(self._save_sync_settings)
+        save_row.addWidget(sync_save_btn)
+
+        self._sync_save_status = QLabel("")
+        self._sync_save_status.setStyleSheet(
+            f"color: {ACCENT_GREEN}; font-weight: bold; "
+            "background: transparent;"
+        )
+        self._sync_save_status.setVisible(False)
+        save_row.addWidget(self._sync_save_status)
+
+        save_row.addStretch()
+        sync_fl.addLayout(save_row)
+
+        layout.addWidget(sync_frame)
+
+        # Update credentials status on load
+        self._refresh_sync_creds_status()
+
+        layout.addStretch()
+        scroll.setWidget(inner)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+        return tab
+
     def _save_preferences(self):
         from fam.utils.app_settings import set_large_receipt_threshold
         value = self._threshold_spin.value()
@@ -947,6 +1122,726 @@ class SettingsScreen(QWidget):
         self._pref_status.setText(f"Saved — warnings will appear above ${value:.2f}")
         self._pref_status.setVisible(True)
         logger.info("Large receipt threshold set to %.2f", value)
+
+    # ── Sync settings handlers ─────────────────────────────────
+
+    def _refresh_sync_creds_status(self):
+        """Update the credentials status label."""
+        from fam.sync.gsheets import _get_credentials_path
+        path = _get_credentials_path()
+        if os.path.isfile(path):
+            self._sync_creds_status.setText("google_credentials.json loaded")
+            self._sync_creds_status.setStyleSheet(
+                f"font-size: 13px; color: {ACCENT_GREEN}; font-weight: bold; "
+                "background: transparent; padding: 0 8px;"
+            )
+        else:
+            self._sync_creds_status.setText("Not configured")
+            self._sync_creds_status.setStyleSheet(
+                f"font-size: 13px; color: {SUBTITLE_GRAY}; "
+                "background: transparent; padding: 0 8px;"
+            )
+
+    def _browse_credentials(self):
+        """Open a file dialog to select a Google credentials JSON file."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Select Google Service Account Credentials",
+            "", "JSON Files (*.json)")
+        if not filepath:
+            return
+
+        from fam.sync.gsheets import validate_credentials_file, _get_credentials_path
+        valid, msg = validate_credentials_file(filepath)
+        if not valid:
+            QMessageBox.warning(self, "Invalid Credentials", msg)
+            return
+
+        # Copy to data directory
+        import shutil
+        dest = _get_credentials_path()
+        shutil.copy2(filepath, dest)
+
+        from fam.utils.app_settings import set_setting
+        set_setting('sync_credentials_loaded', '1')
+        self._refresh_sync_creds_status()
+        logger.info("Google credentials loaded from %s", filepath)
+
+    def _remove_credentials(self):
+        """Remove the stored credentials file."""
+        from fam.sync.gsheets import _get_credentials_path
+        path = _get_credentials_path()
+        if os.path.isfile(path):
+            os.remove(path)
+        from fam.utils.app_settings import set_setting
+        set_setting('sync_credentials_loaded', '0')
+        self._refresh_sync_creds_status()
+        self._sync_conn_status.setVisible(False)
+        logger.info("Google credentials removed")
+
+    def _test_sync_connection(self):
+        """Test the Google Sheets connection."""
+        # Save spreadsheet ID first
+        from fam.utils.app_settings import set_sync_spreadsheet_id
+        sheet_id = self._sheet_id_input.text().strip()
+        if sheet_id:
+            set_sync_spreadsheet_id(sheet_id)
+
+        try:
+            from fam.sync.gsheets import GoogleSheetsBackend
+            backend = GoogleSheetsBackend()
+            result = backend.validate_connection()
+            if result.success:
+                self._sync_conn_status.setText("Connected")
+                self._sync_conn_status.setStyleSheet(
+                    f"color: {ACCENT_GREEN}; font-weight: bold; "
+                    "background: transparent; padding: 0 8px;"
+                )
+            else:
+                self._sync_conn_status.setText(f"Failed: {result.error}")
+                self._sync_conn_status.setStyleSheet(
+                    f"color: {ERROR_COLOR}; font-weight: bold; "
+                    "background: transparent; padding: 0 8px;"
+                )
+        except ImportError:
+            self._sync_conn_status.setText(
+                "Failed: gspread not installed")
+            self._sync_conn_status.setStyleSheet(
+                f"color: {ERROR_COLOR}; font-weight: bold; "
+                "background: transparent; padding: 0 8px;"
+            )
+        except Exception as e:
+            self._sync_conn_status.setText(f"Failed: {e}")
+            self._sync_conn_status.setStyleSheet(
+                f"color: {ERROR_COLOR}; font-weight: bold; "
+                "background: transparent; padding: 0 8px;"
+            )
+        self._sync_conn_status.setVisible(True)
+
+    def _save_sync_settings(self):
+        """Persist sync configuration to app_settings."""
+        from fam.utils.app_settings import set_setting, set_sync_spreadsheet_id
+
+        sheet_id = self._sheet_id_input.text().strip()
+        if sheet_id:
+            set_sync_spreadsheet_id(sheet_id)
+
+        set_setting('sync_on_close',
+                     '1' if self._sync_on_close_cb.isChecked() else '0')
+        set_setting('sync_periodic',
+                     '1' if self._sync_periodic_cb.isChecked() else '0')
+
+        self._sync_save_status.setText("Sync settings saved")
+        self._sync_save_status.setVisible(True)
+        logger.info("Sync settings saved (on_close=%s, periodic=%s)",
+                    self._sync_on_close_cb.isChecked(),
+                    self._sync_periodic_cb.isChecked())
+
+        # Notify main window so the header indicator refreshes immediately
+        main = self.window()
+        if hasattr(main, '_update_sync_visibility'):
+            main._update_sync_visibility()
+
+    # ── Updates Tab ─────────────────────────────────────────────
+
+    def _build_updates_tab(self):
+        import sys
+        from fam import __version__
+        from fam.utils.app_settings import (
+            get_update_repo_url, get_setting, get_last_update_check,
+        )
+
+        tab = QWidget()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setSpacing(16)
+
+        desc = QLabel(
+            "Check for new versions of FAM Market Manager from GitHub "
+            "Releases. Your data is stored separately and is never "
+            "affected by updates."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(
+            f"font-size: 13px; color: {TEXT_COLOR}; padding: 0 0 4px 0; "
+            "background: transparent;"
+        )
+        layout.addWidget(desc)
+
+        # ─ Repository frame ─
+        repo_frame = QFrame()
+        repo_frame.setStyleSheet(_COMPACT_FRAME)
+        repo_fl = QVBoxLayout(repo_frame)
+        repo_fl.setSpacing(8)
+
+        repo_row = QHBoxLayout()
+        repo_lbl = make_field_label("Repository URL")
+        repo_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        repo_row.addWidget(repo_lbl)
+
+        from fam.utils.app_settings import DEFAULT_REPO_URL
+        self._update_repo_input = QLineEdit()
+        self._update_repo_input.setPlaceholderText(DEFAULT_REPO_URL)
+        saved_url = get_update_repo_url() or ''
+        self._update_repo_input.setText(saved_url if saved_url else DEFAULT_REPO_URL)
+        self._update_repo_input.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._update_repo_input.setMinimumWidth(350)
+        self._update_repo_input.setStyleSheet(_FORM_INPUT_STYLE)
+        repo_row.addWidget(self._update_repo_input)
+
+        validate_btn = QPushButton("Validate URL")
+        validate_btn.setObjectName("secondary_btn")
+        validate_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        validate_btn.setStyleSheet(_FORM_BTN_STYLE)
+        validate_btn.clicked.connect(self._validate_update_url)
+        repo_row.addWidget(validate_btn)
+
+        repo_row.addStretch()
+        repo_fl.addLayout(repo_row)
+
+        self._update_url_status = QLabel("")
+        self._update_url_status.setStyleSheet(
+            f"font-size: 12px; background: transparent; padding: 0 0 0 4px;")
+        self._update_url_status.setVisible(False)
+        repo_fl.addWidget(self._update_url_status)
+
+        repo_hint = QLabel(
+            "Enter a GitHub repository URL, e.g. "
+            "https://github.com/owner/repo"
+        )
+        repo_hint.setStyleSheet(
+            f"font-size: 11px; color: {SUBTITLE_GRAY}; "
+            "background: transparent; padding: 0 0 0 4px;"
+        )
+        repo_fl.addWidget(repo_hint)
+
+        layout.addWidget(repo_frame)
+
+        # ─ Version info frame ─
+        ver_frame = QFrame()
+        ver_frame.setStyleSheet(_COMPACT_FRAME)
+        ver_fl = QVBoxLayout(ver_frame)
+        ver_fl.setSpacing(8)
+
+        cur_row = QHBoxLayout()
+        cur_lbl = make_field_label("Current Version")
+        cur_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        cur_row.addWidget(cur_lbl)
+        self._update_current_lbl = QLabel(f"v{__version__}")
+        self._update_current_lbl.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; color: {TEXT_COLOR}; "
+            "background: transparent; padding: 0 8px;"
+        )
+        self._update_current_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        cur_row.addWidget(self._update_current_lbl)
+        cur_row.addStretch()
+        ver_fl.addLayout(cur_row)
+
+        latest_row = QHBoxLayout()
+        latest_lbl = make_field_label("Latest Version")
+        latest_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        latest_row.addWidget(latest_lbl)
+        cached_ver = get_setting('update_last_version')
+        self._update_latest_lbl = QLabel(
+            f"v{cached_ver}" if cached_ver else "Unknown")
+        self._update_latest_lbl.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; color: {SUBTITLE_GRAY}; "
+            "background: transparent; padding: 0 8px;"
+        )
+        self._update_latest_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        latest_row.addWidget(self._update_latest_lbl)
+        latest_row.addStretch()
+        ver_fl.addLayout(latest_row)
+
+        check_row = QHBoxLayout()
+        check_lbl = make_field_label("Last Checked")
+        check_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        check_row.addWidget(check_lbl)
+        last_check = get_last_update_check()
+        check_text = "Never"
+        if last_check:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(last_check)
+                check_text = dt.strftime("%b %d, %Y at %I:%M %p")
+            except (ValueError, TypeError):
+                check_text = last_check
+        self._update_last_check_lbl = QLabel(check_text)
+        self._update_last_check_lbl.setStyleSheet(
+            f"font-size: 13px; color: {SUBTITLE_GRAY}; "
+            "background: transparent; padding: 0 8px;"
+        )
+        self._update_last_check_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        check_row.addWidget(self._update_last_check_lbl)
+        check_row.addStretch()
+        ver_fl.addLayout(check_row)
+
+        layout.addWidget(ver_frame)
+
+        # ─ Actions frame ─
+        act_frame = QFrame()
+        act_frame.setStyleSheet(_COMPACT_FRAME)
+        act_fl = QVBoxLayout(act_frame)
+        act_fl.setSpacing(8)
+
+        btn_row = QHBoxLayout()
+        self._update_check_btn = QPushButton("Check for Updates")
+        self._update_check_btn.setObjectName("secondary_btn")
+        self._update_check_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._update_check_btn.setStyleSheet(_FORM_BTN_STYLE)
+        self._update_check_btn.clicked.connect(self._check_for_updates)
+        btn_row.addWidget(self._update_check_btn)
+
+        self._update_install_btn = QPushButton("Download && Install")
+        self._update_install_btn.setObjectName("primary_btn")
+        self._update_install_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._update_install_btn.setStyleSheet(_FORM_BTN_STYLE)
+        self._update_install_btn.setEnabled(False)
+        self._update_install_btn.clicked.connect(self._download_and_install)
+        btn_row.addWidget(self._update_install_btn)
+
+        btn_row.addStretch()
+        act_fl.addLayout(btn_row)
+
+        self._update_progress = QProgressBar()
+        self._update_progress.setFixedHeight(18)
+        self._update_progress.setVisible(False)
+        self._update_progress.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid #E2E2E2;
+                border-radius: 4px;
+                background-color: #F5F5F5;
+                text-align: center;
+                font-size: 11px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {PRIMARY_GREEN};
+                border-radius: 3px;
+            }}
+        """)
+        act_fl.addWidget(self._update_progress)
+
+        self._update_status_lbl = QLabel("")
+        self._update_status_lbl.setWordWrap(True)
+        self._update_status_lbl.setStyleSheet(
+            f"font-size: 13px; background: transparent; padding: 2px 0;"
+        )
+        self._update_status_lbl.setVisible(False)
+        act_fl.addWidget(self._update_status_lbl)
+
+        layout.addWidget(act_frame)
+
+        # ─ Auto-check checkbox ─
+        _update_cb_style = f"""
+            QCheckBox {{
+                font-size: 13px; padding: 4px; background-color: {WHITE};
+            }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                background-color: {WHITE};
+                border: 2px solid #AAAAAA;
+                border-radius: 3px;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {ACCENT_GREEN};
+                border-color: {PRIMARY_GREEN};
+            }}
+        """
+        self._update_auto_check_cb = QCheckBox(
+            "Auto-check for updates on launch")
+        self._update_auto_check_cb.setChecked(
+            get_setting('update_auto_check', '1') == '1')
+        self._update_auto_check_cb.setStyleSheet(_update_cb_style)
+        layout.addWidget(self._update_auto_check_cb)
+
+        # ─ Save button ─
+        save_row = QHBoxLayout()
+        save_btn = QPushButton("Save Update Settings")
+        save_btn.setObjectName("primary_btn")
+        save_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        save_btn.setStyleSheet(_FORM_BTN_STYLE)
+        save_btn.clicked.connect(self._save_update_settings)
+        save_row.addWidget(save_btn)
+
+        self._update_save_status = QLabel("")
+        self._update_save_status.setStyleSheet(
+            f"color: {ACCENT_GREEN}; font-weight: bold; "
+            "background: transparent;"
+        )
+        self._update_save_status.setVisible(False)
+        save_row.addWidget(self._update_save_status)
+
+        save_row.addStretch()
+        layout.addLayout(save_row)
+
+        # ─ Dev mode notice ─
+        if not getattr(sys, 'frozen', False):
+            dev_notice = QLabel(
+                "Note: Download & Install is only available in the "
+                "packaged version (.exe). Version checking works in "
+                "development mode."
+            )
+            dev_notice.setWordWrap(True)
+            dev_notice.setStyleSheet(
+                f"font-size: 11px; color: {SUBTITLE_GRAY}; "
+                "background: transparent; padding: 4px 0; "
+                "font-style: italic;"
+            )
+            layout.addWidget(dev_notice)
+
+        # ─ Thread tracking ─
+        self._update_check_thread = None
+        self._update_check_worker = None
+        self._update_dl_thread = None
+        self._update_dl_worker = None
+        self._update_info = None  # cached result from last check
+
+        layout.addStretch()
+        scroll.setWidget(inner)
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+        return tab
+
+    # ── Updates handlers ─────────────────────────────────────────
+
+    def _validate_update_url(self):
+        """Validate the entered GitHub URL."""
+        from fam.update.checker import parse_github_repo_url
+        url = self._update_repo_input.text().strip()
+        if not url:
+            self._update_url_status.setText("Please enter a repository URL")
+            self._update_url_status.setStyleSheet(
+                f"font-size: 12px; color: {ERROR_COLOR}; "
+                "background: transparent; padding: 0 0 0 4px;"
+            )
+            self._update_url_status.setVisible(True)
+            return
+
+        result = parse_github_repo_url(url)
+        if result:
+            owner, repo = result
+            self._update_url_status.setText(
+                f"Valid repository: {owner}/{repo}")
+            self._update_url_status.setStyleSheet(
+                f"font-size: 12px; color: {ACCENT_GREEN}; font-weight: bold; "
+                "background: transparent; padding: 0 0 0 4px;"
+            )
+        else:
+            self._update_url_status.setText(
+                "Invalid URL — must be a GitHub repository")
+            self._update_url_status.setStyleSheet(
+                f"font-size: 12px; color: {ERROR_COLOR}; "
+                "background: transparent; padding: 0 0 0 4px;"
+            )
+        self._update_url_status.setVisible(True)
+
+    def _save_update_settings(self):
+        """Persist update configuration to app_settings."""
+        from fam.utils.app_settings import set_update_repo_url, set_setting
+
+        url = self._update_repo_input.text().strip()
+        if url:
+            set_update_repo_url(url)
+        else:
+            set_setting('update_repo_url', '')
+
+        set_setting('update_auto_check',
+                     '1' if self._update_auto_check_cb.isChecked() else '0')
+
+        self._update_save_status.setText("Update settings saved")
+        self._update_save_status.setVisible(True)
+        logger.info("Update settings saved (repo=%s, auto_check=%s)",
+                    url, self._update_auto_check_cb.isChecked())
+
+    def _check_for_updates(self):
+        """Check GitHub for a newer release."""
+        from fam.update.checker import parse_github_repo_url
+        from fam import __version__
+
+        url = self._update_repo_input.text().strip()
+        if not url:
+            self._update_status_lbl.setText(
+                "Please enter a repository URL first.")
+            self._update_status_lbl.setStyleSheet(
+                f"font-size: 13px; color: {ERROR_COLOR}; "
+                "background: transparent; padding: 2px 0;"
+            )
+            self._update_status_lbl.setVisible(True)
+            return
+
+        parsed = parse_github_repo_url(url)
+        if not parsed:
+            self._update_status_lbl.setText(
+                "Invalid repository URL.")
+            self._update_status_lbl.setStyleSheet(
+                f"font-size: 13px; color: {ERROR_COLOR}; "
+                "background: transparent; padding: 2px 0;"
+            )
+            self._update_status_lbl.setVisible(True)
+            return
+
+        owner, repo = parsed
+
+        # Prevent overlapping checks
+        if (self._update_check_thread and
+                self._update_check_thread.isRunning()):
+            return
+
+        from PySide6.QtCore import QThread
+        from fam.update.worker import UpdateCheckWorker
+
+        self._update_check_btn.setEnabled(False)
+        self._update_check_btn.setText("Checking...")
+        self._update_status_lbl.setText("Checking for updates...")
+        self._update_status_lbl.setStyleSheet(
+            f"font-size: 13px; color: {TEXT_COLOR}; "
+            "background: transparent; padding: 2px 0;"
+        )
+        self._update_status_lbl.setVisible(True)
+
+        self._update_check_thread = QThread()
+        self._update_check_worker = UpdateCheckWorker(
+            owner, repo, __version__)
+        self._update_check_worker.moveToThread(self._update_check_thread)
+        self._update_check_thread.started.connect(
+            self._update_check_worker.run)
+        self._update_check_worker.finished.connect(
+            self._on_update_check_finished)
+        self._update_check_worker.error.connect(
+            self._on_update_check_error)
+        self._update_check_worker.finished.connect(
+            self._update_check_thread.quit)
+        self._update_check_worker.error.connect(
+            self._update_check_thread.quit)
+
+        self._update_check_thread.start()
+
+    def _on_update_check_finished(self, result: dict):
+        """Handle update check result."""
+        from datetime import datetime
+        from fam.utils.app_settings import set_setting, set_last_update_check
+
+        self._update_check_btn.setEnabled(True)
+        self._update_check_btn.setText("Check for Updates")
+
+        now = datetime.now()
+        set_last_update_check(now.isoformat())
+        self._update_last_check_lbl.setText(
+            now.strftime("%b %d, %Y at %I:%M %p"))
+
+        if not result:
+            self._update_status_lbl.setText(
+                "Could not check for updates. The repository may "
+                "have no releases.")
+            self._update_status_lbl.setStyleSheet(
+                f"font-size: 13px; color: {SUBTITLE_GRAY}; "
+                "background: transparent; padding: 2px 0;"
+            )
+            self._update_status_lbl.setVisible(True)
+            return
+
+        version = result.get('version', '?')
+        set_setting('update_last_version', version)
+
+        self._update_latest_lbl.setText(f"v{version}")
+
+        if result.get('update_available'):
+            self._update_info = result
+            self._update_latest_lbl.setStyleSheet(
+                f"font-size: 14px; font-weight: bold; "
+                f"color: {ACCENT_GREEN}; "
+                "background: transparent; padding: 0 8px;"
+            )
+            self._update_status_lbl.setText(
+                f"Update available: v{version}")
+            self._update_status_lbl.setStyleSheet(
+                f"font-size: 13px; color: {ACCENT_GREEN}; "
+                "font-weight: bold; background: transparent; "
+                "padding: 2px 0;"
+            )
+            self._update_install_btn.setEnabled(True)
+        else:
+            self._update_info = None
+            self._update_latest_lbl.setStyleSheet(
+                f"font-size: 14px; font-weight: bold; "
+                f"color: {TEXT_COLOR}; "
+                "background: transparent; padding: 0 8px;"
+            )
+            self._update_status_lbl.setText(
+                f"You are up to date (v{version})")
+            self._update_status_lbl.setStyleSheet(
+                f"font-size: 13px; color: {TEXT_COLOR}; "
+                "background: transparent; padding: 2px 0;"
+            )
+            self._update_install_btn.setEnabled(False)
+
+        self._update_status_lbl.setVisible(True)
+
+    def _on_update_check_error(self, msg: str):
+        """Handle update check failure."""
+        self._update_check_btn.setEnabled(True)
+        self._update_check_btn.setText("Check for Updates")
+        self._update_status_lbl.setText(
+            f"Could not check for updates: {msg}")
+        self._update_status_lbl.setStyleSheet(
+            f"font-size: 13px; color: {ERROR_COLOR}; "
+            "background: transparent; padding: 2px 0;"
+        )
+        self._update_status_lbl.setVisible(True)
+
+    def _download_and_install(self):
+        """Download the update and launch the update script."""
+        import sys
+
+        if not self._update_info:
+            return
+
+        version = self._update_info.get('version', '?')
+        asset_name = self._update_info.get('asset_name', '')
+
+        # ── Safety checks ──
+        if not getattr(sys, 'frozen', False):
+            QMessageBox.information(
+                self, "Development Mode",
+                "Download & Install is only available in the packaged "
+                "version (.exe). In development mode, please update "
+                "via git pull."
+            )
+            return
+
+        # Check for open market day
+        try:
+            from fam.models.market_day import get_open_market_day
+            if get_open_market_day():
+                QMessageBox.warning(
+                    self, "Market Day Open",
+                    "A market day is currently open. Please close the "
+                    "market day before updating to avoid data loss."
+                )
+                return
+        except Exception:
+            pass
+
+        # Confirmation
+        reply = QMessageBox.question(
+            self, "Download & Install Update",
+            f"Download and install FAM Manager v{version}?\n\n"
+            f"File: {asset_name}\n"
+            f"Size: {self._update_info.get('asset_size', 0) / 1024 / 1024:.1f} MB\n\n"
+            "The app will close and restart after the update.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # ── Start download ──
+        from fam.app import get_data_dir
+
+        dl_dir = os.path.join(get_data_dir(), '_update_download')
+        os.makedirs(dl_dir, exist_ok=True)
+        dest_path = os.path.join(dl_dir, asset_name)
+
+        # Prevent overlapping downloads
+        if self._update_dl_thread and self._update_dl_thread.isRunning():
+            return
+
+        from PySide6.QtCore import QThread
+        from fam.update.worker import UpdateDownloadWorker
+
+        self._update_check_btn.setEnabled(False)
+        self._update_install_btn.setEnabled(False)
+        self._update_progress.setValue(0)
+        self._update_progress.setVisible(True)
+        self._update_status_lbl.setText("Downloading update...")
+        self._update_status_lbl.setStyleSheet(
+            f"font-size: 13px; color: {TEXT_COLOR}; "
+            "background: transparent; padding: 2px 0;"
+        )
+        self._update_status_lbl.setVisible(True)
+
+        self._update_dl_thread = QThread()
+        self._update_dl_worker = UpdateDownloadWorker(
+            self._update_info['asset_url'],
+            self._update_info['asset_size'],
+            dest_path,
+        )
+        self._update_dl_worker.moveToThread(self._update_dl_thread)
+        self._update_dl_thread.started.connect(self._update_dl_worker.run)
+        self._update_dl_worker.progress.connect(self._on_download_progress)
+        self._update_dl_worker.finished.connect(self._on_download_finished)
+        self._update_dl_worker.error.connect(self._on_download_error)
+        self._update_dl_worker.finished.connect(
+            self._update_dl_thread.quit)
+        self._update_dl_worker.error.connect(self._update_dl_thread.quit)
+
+        self._update_dl_thread.start()
+
+    def _on_download_progress(self, downloaded: int, total: int):
+        """Update the progress bar."""
+        if total > 0:
+            pct = int(downloaded * 100 / total)
+            self._update_progress.setValue(pct)
+            mb_dl = downloaded / 1024 / 1024
+            mb_total = total / 1024 / 1024
+            self._update_status_lbl.setText(
+                f"Downloading... {mb_dl:.1f} / {mb_total:.1f} MB ({pct}%)")
+
+    def _on_download_finished(self, zip_path: str):
+        """Generate update script and restart."""
+        import subprocess
+        import sys
+        from fam.app import get_app_dir
+        from fam.update.checker import generate_update_script
+
+        self._update_progress.setValue(100)
+        self._update_status_lbl.setText(
+            "Download complete. Applying update...")
+        self._update_status_lbl.setStyleSheet(
+            f"font-size: 13px; color: {ACCENT_GREEN}; font-weight: bold; "
+            "background: transparent; padding: 2px 0;"
+        )
+
+        try:
+            app_dir = get_app_dir()
+            script_path = generate_update_script(app_dir, zip_path)
+
+            # Launch the batch script and exit
+            subprocess.Popen(
+                ['cmd', '/c', script_path],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+
+            from PySide6.QtWidgets import QApplication
+            QApplication.instance().quit()
+
+        except Exception as e:
+            logger.exception("Failed to launch update script")
+            self._update_status_lbl.setText(
+                f"Update failed: {e}")
+            self._update_status_lbl.setStyleSheet(
+                f"font-size: 13px; color: {ERROR_COLOR}; "
+                "background: transparent; padding: 2px 0;"
+            )
+            self._update_check_btn.setEnabled(True)
+            self._update_install_btn.setEnabled(True)
+            self._update_progress.setVisible(False)
+
+    def _on_download_error(self, msg: str):
+        """Handle download failure."""
+        self._update_status_lbl.setText(f"Download failed: {msg}")
+        self._update_status_lbl.setStyleSheet(
+            f"font-size: 13px; color: {ERROR_COLOR}; "
+            "background: transparent; padding: 2px 0;"
+        )
+        self._update_status_lbl.setVisible(True)
+        self._update_progress.setVisible(False)
+        self._update_check_btn.setEnabled(True)
+        self._update_install_btn.setEnabled(True)
 
     # ── Reset Tab ────────────────────────────────────────────
 

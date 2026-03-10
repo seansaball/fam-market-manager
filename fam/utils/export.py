@@ -97,6 +97,10 @@ def write_ledger_backup():
     transactions across every market day — grouped by market, then by
     date — with per-day subtotals and grand totals.
 
+    After writing the backup, this also notifies the main window to
+    trigger a cloud sync (if configured).  This ensures every data
+    change that updates the ledger is also pushed to Google Sheets.
+
     This function **never raises** — all errors are logged silently so it
     cannot interfere with the normal workflow.
     """
@@ -104,6 +108,18 @@ def write_ledger_backup():
         _write_ledger_backup_inner()
     except Exception:
         logger.exception("Failed to write ledger backup")
+
+    # Notify main window to sync (if configured and running)
+    try:
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            for widget in app.topLevelWidgets():
+                if hasattr(widget, '_trigger_sync'):
+                    widget._trigger_sync()
+                    break
+    except Exception:
+        pass  # sync is best-effort
 
 
 # ── Column-formatting helpers ─────────────────────────────────────

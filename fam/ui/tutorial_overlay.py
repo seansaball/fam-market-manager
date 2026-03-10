@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
-    QGraphicsDropShadowEffect, QScrollArea, QSizePolicy
+    QGraphicsDropShadowEffect, QScrollArea, QSizePolicy, QTabWidget
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPoint
 from PySide6.QtGui import QPainter, QColor, QPainterPath, QPen
@@ -333,6 +333,44 @@ TUTORIAL_STEPS = [
                 "configure match percentages and display order.",
                 "settings_screen.tabs",
             ),
+            TutorialHint(
+                "Cloud Sync (Google Sheets)",
+                "One-way sync that uploads your end-of-day "
+                "reports to Google Sheets so coordinators and "
+                "the finance team can view data remotely. "
+                "Data flows from the app to Sheets only.\n\n"
+                "To set up:\n"
+                "1. Obtain a Google service account credentials "
+                "file (JSON) from your coordinator\n"
+                "2. Click \u201cLoad Credentials\u201d to import it\n"
+                "3. Enter the Spreadsheet ID from your Google "
+                "Sheet URL\n"
+                "4. Click \u201cSave Sync Settings\u201d\n\n"
+                "Then click \u201cSync Now\u201d any time to upload "
+                "the current day\u2019s data. Sync requires an "
+                "internet connection \u2014 your local data is "
+                "never affected if it fails.",
+                "settings_screen.cloud_sync_tab",
+            ),
+            TutorialHint(
+                "Auto-Updates (GitHub Releases)",
+                "Check for new versions and install them "
+                "directly from the app \u2014 no manual downloads "
+                "needed.\n\n"
+                "The repository URL is pre-filled with the "
+                "official FAM Market Manager repository. "
+                "Click \u201cCheck for Updates\u201d to see if a "
+                "newer version is available.\n\n"
+                "If an update is found, click "
+                "\u201cDownload & Install\u201d \u2014 the app "
+                "downloads the update, verifies the file, and "
+                "restarts automatically. Your data is stored "
+                "separately and is never affected.\n\n"
+                "By default the app auto-checks once per day "
+                "on launch. You can disable this with the "
+                "checkbox at the bottom.",
+                "settings_screen.updates_tab",
+            ),
         ],
     ),
     TutorialStep(
@@ -608,24 +646,22 @@ class TutorialOverlay(QWidget):
         self._next_step_btn.setVisible(False)
         btn_row.addWidget(self._next_step_btn)
 
-        self._close_btn = QPushButton("\u2715")
+        self._close_btn = QPushButton("\u2715  Close")
         self._close_btn.setObjectName("tut_close_btn")
         self._close_btn.setCursor(Qt.PointingHandCursor)
         self._close_btn.setToolTip("Close tutorial")
-        self._close_btn.setStyleSheet(f"""
-            #tut_close_btn {{
-                padding: 4px 8px; font-size: 14px; min-height: 0px;
-                background: transparent; color: {SUBTITLE_GRAY};
-                border: none; font-weight: bold;
-            }}
-            #tut_close_btn:hover {{
-                color: {PRIMARY_GREEN};
-            }}
+        self._close_btn.setStyleSheet("""
+            #tut_close_btn {
+                padding: 6px 12px; font-size: 12px; min-height: 0px;
+                border-radius: 6px; background-color: #DC3545;
+                color: white; font-weight: bold; border: none;
+            }
+            #tut_close_btn:hover {
+                background-color: #C82333;
+            }
         """)
         self._close_btn.clicked.connect(self._close_tutorial)
         btn_row.addWidget(self._close_btn)
-
-        layout.addLayout(btn_row)
 
         # Setup-prompt action buttons (hidden by default, shown on final step)
         self._setup_row = QHBoxLayout()
@@ -671,6 +707,10 @@ class TutorialOverlay(QWidget):
         self._setup_widget.setVisible(False)
         layout.addWidget(self._setup_widget)
 
+        # Button row comes after setup widget so Close appears
+        # below the Yes/No buttons on the final setup screen
+        layout.addLayout(btn_row)
+
         return card
 
     # ------------------------------------------------------------------
@@ -703,12 +743,18 @@ class TutorialOverlay(QWidget):
             return None
 
     def _ensure_visible(self, widget: QWidget):
-        """Scroll any parent QScrollArea so the widget is visible."""
+        """Switch any parent QTabWidget and scroll any parent QScrollArea."""
         parent = widget.parent()
         while parent:
-            if isinstance(parent, QScrollArea):
+            if isinstance(parent, QTabWidget):
+                # Find which tab contains this widget and switch to it
+                for i in range(parent.count()):
+                    tab_w = parent.widget(i)
+                    if tab_w is widget or (tab_w and tab_w.isAncestorOf(widget)):
+                        parent.setCurrentIndex(i)
+                        break
+            elif isinstance(parent, QScrollArea):
                 parent.ensureWidgetVisible(widget, 50, 50)
-                break
             parent = parent.parent()
 
     # ------------------------------------------------------------------
@@ -773,14 +819,15 @@ class TutorialOverlay(QWidget):
         has_hints = bool(step.hints)
 
         if is_setup:
-            # Setup prompt: show Yes/No, hide everything else
+            # Setup prompt: show Yes/No, plus Back/progress/Close like other pages
             self._more_details_btn.setVisible(False)
             self._next_btn.setVisible(False)
             self._next_hint_btn.setVisible(False)
             self._next_step_btn.setVisible(False)
-            self._back_btn.setVisible(False)
-            self._step_label.setVisible(False)
-            self._progress_bg.setVisible(False)
+            self._back_btn.setVisible(True)
+            self._back_btn.setEnabled(True)
+            self._step_label.setVisible(True)
+            self._progress_bg.setVisible(True)
             self._setup_widget.setVisible(True)
         else:
             # Normal step
@@ -925,10 +972,12 @@ class TutorialOverlay(QWidget):
         # Set explicit size so card doesn't get clipped
         self._card.setFixedSize(card_w, card_h)
 
-        # Steps past the sidebar intro (>= 2) are centred and draggable
+        # Steps past the sidebar intro (>= 2) are centred horizontally
+        # with a fixed top position so the card doesn't bounce when
+        # navigating between steps with different content heights
         if self._current_index >= 2:
             x = (self.width() - card_w) // 2
-            y = (self.height() - card_h) // 2
+            y = int(self.height() * 0.18)
         elif not self._highlight_rect:
             # Centre on screen (fallback)
             x = (self.width() - card_w) // 2

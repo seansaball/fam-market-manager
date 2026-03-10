@@ -57,3 +57,7 @@ releases/
 fam_ledger_backup*.txt
 fam_*_ledger_backup*.txt
 .pytest_cache/
+
+# Google Sheets sync credentials (NEVER commit)
+*credentials*.json
+*service_account*.json

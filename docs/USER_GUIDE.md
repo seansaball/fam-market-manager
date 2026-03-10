@@ -1,7 +1,7 @@
 # FAM Market Manager — User Guide
 
 > **For volunteers, coordinators, and market day staff**
-> Version 1.6.1
+> Version 1.7.0
 
 ---
 
@@ -43,7 +43,7 @@ The sidebar sections are:
 | **FMNP Entry** | Record FMNP check entries |
 | **Adjustments** | Fix mistakes in past transactions |
 | **Reports** | View summaries, charts, and export data |
-| **Settings** | Manage markets, vendors, and payment methods |
+| **Settings** | Manage markets, vendors, payment methods, cloud sync, and updates |
 
 ### Built-In Tutorial
 
@@ -308,6 +308,54 @@ Use the Settings screen to manage the reference data used throughout the applica
 - **Device Identity:** Shows the auto-derived market code and device ID (read-only)
 - **Large Receipt Threshold:** Configure the warning threshold for unusually large receipts
 
+### Cloud Sync tab
+
+One-way sync that uploads end-of-day reports to Google Sheets so coordinators and the finance team can view data remotely. Data flows from the app to Google Sheets only — changes made in the spreadsheet are not pulled back into the app.
+
+**Setting up sync:**
+
+1. Obtain a Google service account credentials file (JSON) from your coordinator
+2. Go to **Settings → Cloud Sync**
+3. Click **"Load Credentials"** and select the JSON file
+4. Enter the **Spreadsheet ID** (the long string in the Google Sheet URL)
+5. Click **"Save Sync Settings"**
+
+**Running a sync:**
+
+1. Click **"Sync Now"** on the Cloud Sync tab
+2. The app uploads the current day's data to the configured spreadsheet
+3. A progress indicator shows while the sync is running
+4. On success, the "Last Synced" timestamp updates
+
+> **Note:** Sync requires an internet connection. If it fails, the error is displayed and your local data is unaffected.
+
+### Updates tab
+
+Check for new versions of the application and install them directly from the app.
+
+**Checking for updates:**
+
+1. Go to **Settings → Updates**
+2. The repository URL defaults to the official FAM Market Manager repository
+3. Click **"Check for Updates"**
+4. The app contacts GitHub and compares your current version against the latest release
+5. If an update is available, the version and release notes are displayed
+
+**Installing an update:**
+
+1. Click **"Download & Install"** (only enabled when an update is available)
+2. Confirm the update in the dialog
+3. The app downloads the new version, verifies the file, and restarts automatically
+4. Your data is never affected — it lives separately in `%APPDATA%`
+
+**Auto-check on launch:**
+
+- By default, the app checks for updates automatically 5 seconds after launch (once per 24 hours)
+- If an update is found, a notification appears — you can update now or dismiss it
+- Disable auto-check by unchecking **"Auto-check for updates on launch"** on the Updates tab
+
+> **Note:** The "Download & Install" button is disabled while a market day is open, to prevent interrupting active transactions.
+
 ### Import & Export Settings
 
 - **Export Settings:** Click the **Export** button at the top of the Settings screen to save your current markets, vendors, and payment methods to a `.fam` file. This is useful for backing up your configuration or sharing it with another machine.
@@ -358,6 +406,7 @@ All data is saved in your Windows **AppData** folder:
 ├── fam_data.db             ← your database (all transactions, settings, etc.)
 ├── fam_ledger_backup.txt   ← auto-generated human-readable ledger backup
 ├── fam_manager.log         ← application log file
+├── sync_credentials.json   ← Google Sheets credentials (if cloud sync configured)
 └── backups/                ← automatic database backups (20 most recent)
 ```
 
@@ -390,7 +439,15 @@ To back up, copy the `fam_data.db` file from your data folder to a safe location
 
 ### Upgrading to a new version
 
-1. Download the new `FAM_Manager_vX.X.X.zip`
+**Option A — In-App Auto-Update (recommended):**
+
+1. Go to **Settings → Updates** and click **"Check for Updates"**
+2. If an update is available, click **"Download & Install"**
+3. The app downloads the new version, restarts automatically, and you are done
+
+**Option B — Manual:**
+
+1. Download the new `FAM_Manager_vX.X.X.zip` from the GitHub Releases page
 2. Delete the old application folder (or extract over it)
 3. Launch the new version — it will find your existing data automatically
 

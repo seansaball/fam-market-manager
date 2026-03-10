@@ -8,6 +8,7 @@ logger = logging.getLogger('fam.utils.app_settings')
 
 # ── Default values ────────────────────────────────────────────
 DEFAULT_LARGE_RECEIPT_THRESHOLD = 100.00
+DEFAULT_REPO_URL = "https://github.com/seansaball/fam-market-manager"
 
 
 # ── Generic helpers ───────────────────────────────────────────
@@ -110,6 +111,62 @@ def capture_device_id() -> str:
     guid = _read_machine_guid()
     set_setting('device_id', guid)
     return guid
+
+
+# ── Cloud sync settings ───────────────────────────────────────
+
+def is_sync_configured() -> bool:
+    """Return True if Google Sheets sync has credentials and a spreadsheet ID."""
+    creds = get_setting('sync_credentials_loaded')
+    sheet_id = get_setting('sync_spreadsheet_id')
+    return creds == '1' and bool(sheet_id)
+
+
+def get_sync_spreadsheet_id() -> str | None:
+    """Return the Google Sheets spreadsheet ID."""
+    return get_setting('sync_spreadsheet_id')
+
+
+def set_sync_spreadsheet_id(value: str) -> None:
+    """Store the Google Sheets spreadsheet ID."""
+    set_setting('sync_spreadsheet_id', value.strip())
+
+
+def get_last_sync_at() -> str | None:
+    """Return the ISO timestamp of the last successful sync."""
+    return get_setting('last_sync_at')
+
+
+def get_last_sync_error() -> str | None:
+    """Return the error from the last sync attempt, if any."""
+    return get_setting('last_sync_error')
+
+
+# ── Auto-update settings ─────────────────────────────────────
+
+def get_update_repo_url() -> str | None:
+    """Return the configured GitHub repository URL for updates."""
+    return get_setting('update_repo_url')
+
+
+def set_update_repo_url(url: str) -> None:
+    """Store the GitHub repository URL for updates."""
+    set_setting('update_repo_url', url.strip())
+
+
+def is_auto_update_check_enabled() -> bool:
+    """Return True if automatic update checking is enabled (default: True)."""
+    return get_setting('update_auto_check', '1') == '1'
+
+
+def get_last_update_check() -> str | None:
+    """Return the ISO timestamp of the last update check."""
+    return get_setting('update_last_check')
+
+
+def set_last_update_check(iso_timestamp: str) -> None:
+    """Store the ISO timestamp of the last update check."""
+    set_setting('update_last_check', iso_timestamp)
 
 
 def _read_machine_guid() -> str:

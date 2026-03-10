@@ -9,18 +9,31 @@ logger = logging.getLogger('fam.models.transaction')
 
 
 def generate_transaction_id(market_day_date: str) -> str:
-    """Generate a unique FAM-{CODE}-YYYYMMDD-NNNN transaction ID.
+    """Generate a unique FAM-{CODE}-{DEV}-YYYYMMDD-NNNN transaction ID.
 
-    When a market code is configured the ID includes it (e.g. FAM-DT-20260306-0001).
-    Falls back to the legacy FAM-YYYYMMDD-NNNN format if no code is set.
-    Sequence numbering checks both formats for backward compatibility.
+    When a market code **and** device ID are configured the ID includes
+    both (e.g. ``FAM-DT-0c2a-20260306-0001``).  The 4-char device tag
+    ensures that two workstations at the same market on the same day
+    never produce colliding IDs.
+
+    Falls back gracefully when either is missing:
+    - ``FAM-{CODE}-YYYYMMDD-NNNN`` (no device ID)
+    - ``FAM-YYYYMMDD-NNNN``        (no market code or device ID)
+
+    Sequence numbering checks the current prefix first, then older
+    formats for backward compatibility.
     """
-    from fam.utils.app_settings import get_market_code
+    from fam.utils.app_settings import get_market_code, get_device_id
     conn = get_connection()
     date_part = market_day_date.replace("-", "")
 
     market_code = get_market_code()
-    if market_code:
+    device_id = get_device_id()
+    dev_tag = device_id[:4] if device_id else ''
+
+    if market_code and dev_tag:
+        prefix = f"FAM-{market_code}-{dev_tag}-{date_part}-"
+    elif market_code:
         prefix = f"FAM-{market_code}-{date_part}-"
     else:
         prefix = f"FAM-{date_part}-"
@@ -37,22 +50,26 @@ def generate_transaction_id(market_day_date: str) -> str:
         last_seq = int(row[0].split("-")[-1])
         next_seq = last_seq + 1
     else:
-        # Also check old format (FAM-YYYYMMDD-NNNN) for sequence continuity
-        old_prefix = f"FAM-{date_part}-"
-        if old_prefix != prefix:
+        # Check older formats for sequence continuity
+        fallback_prefixes = []
+        if market_code:
+            fallback_prefixes.append(f"FAM-{market_code}-{date_part}-")
+        fallback_prefixes.append(f"FAM-{date_part}-")
+
+        next_seq = 1
+        for fb_prefix in fallback_prefixes:
+            if fb_prefix == prefix:
+                continue
             row = conn.execute(
                 "SELECT fam_transaction_id FROM transactions "
                 "WHERE fam_transaction_id LIKE ? "
                 "ORDER BY fam_transaction_id DESC LIMIT 1",
-                (old_prefix + "%",)
+                (fb_prefix + "%",)
             ).fetchone()
             if row:
                 last_seq = int(row[0].split("-")[-1])
                 next_seq = last_seq + 1
-            else:
-                next_seq = 1
-        else:
-            next_seq = 1
+                break
 
     return f"{prefix}{next_seq:04d}"
 
