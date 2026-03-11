@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import random
 import time
 from typing import Optional
 
@@ -29,6 +30,52 @@ def _get_credentials_path() -> str:
     """Return the path to the Google credentials JSON file."""
     from fam.app import get_data_dir
     return os.path.join(get_data_dir(), 'google_credentials.json')
+
+
+def _retry_on_quota(fn, max_retries=3):
+    """Retry *fn* with exponential backoff on 429 rate-limit errors."""
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            # gspread wraps HTTP errors in APIError
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            if status == 429 and attempt < max_retries - 1:
+                wait = (2 ** attempt) + random.uniform(0.5, 1.5)
+                logger.warning("Rate limited (429), retrying in %.1fs "
+                               "(attempt %d/%d)…", wait, attempt + 1, max_retries)
+                time.sleep(wait)
+            else:
+                raise
+
+
+def _rows_from_values(all_values: list[list[str]]) -> tuple[list[str], list[dict]]:
+    """Convert raw ``get_all_values()`` output into (headers, rows-as-dicts).
+
+    Returns ``(headers, existing)`` where *existing* is a list of dicts
+    keyed by header name — the same shape as ``get_all_records()``.
+    """
+    if not all_values:
+        return [], []
+    headers = all_values[0]
+    existing = [
+        {headers[i]: (row[i] if i < len(row) else '')
+         for i in range(len(headers))}
+        for row in all_values[1:]
+    ]
+    return headers, existing
+
+
+def _cell_value(val) -> str:
+    """Convert a Python value to a clean string for Google Sheets.
+
+    Floats are rounded to 2 decimal places to avoid IEEE 754 artifacts
+    like ``5.38000000000001`` reaching the sheet.  All monetary values
+    in the app use 2-decimal precision, so this is safe for every tab.
+    """
+    if isinstance(val, float):
+        return f"{val:.2f}"
+    return str(val)
 
 
 class GoogleSheetsBackend(SyncBackend):
@@ -93,7 +140,8 @@ class GoogleSheetsBackend(SyncBackend):
                 except _gspread.exceptions.WorksheetNotFound:
                     return SyncResult(success=True, rows_synced=0)
 
-                existing = ws.get_all_records()
+                all_values = _retry_on_quota(ws.get_all_values)
+                _headers, existing = _rows_from_values(all_values)
                 to_delete = [
                     row_num for row_num, row in enumerate(existing, start=2)
                     if (str(row.get('market_code', '')) == my_mc and
@@ -108,8 +156,10 @@ class GoogleSheetsBackend(SyncBackend):
 
             ws = self._get_or_create_worksheet(sheet_name, rows[0])
 
-            existing = ws.get_all_records()
-            headers = ws.row_values(1)
+            all_values = _retry_on_quota(ws.get_all_values)
+            headers, existing = _rows_from_values(all_values)
+            if not headers:
+                headers = list(rows[0].keys())
 
             # Build index of existing rows by composite key
             existing_index: dict[tuple, int] = {}
@@ -146,13 +196,14 @@ class GoogleSheetsBackend(SyncBackend):
                 for row_num, row in updates:
                     for col_idx, header in enumerate(headers):
                         cells.append(_gspread.Cell(
-                            row_num, col_idx + 1, str(row.get(header, ''))))
+                            row_num, col_idx + 1,
+                            _cell_value(row.get(header, ''))))
                 ws.update_cells(cells)
 
             # Append new rows
             if appends:
                 new_rows = [
-                    [str(row.get(h, '')) for h in headers]
+                    [_cell_value(row.get(h, '')) for h in headers]
                     for row in appends
                 ]
                 ws.append_rows(new_rows, value_input_option='RAW')
@@ -184,7 +235,8 @@ class GoogleSheetsBackend(SyncBackend):
             except _gspread.exceptions.WorksheetNotFound:
                 return SyncResult(success=True, rows_synced=0)
 
-            all_rows = ws.get_all_records()
+            all_values = _retry_on_quota(ws.get_all_values)
+            _hdrs, all_rows = _rows_from_values(all_values)
             rows_to_delete = []
             for row_num, row in enumerate(all_rows, start=2):
                 if (str(row.get('market_code', '')) == market_code and
@@ -219,7 +271,8 @@ class GoogleSheetsBackend(SyncBackend):
             except _gspread.exceptions.WorksheetNotFound:
                 return []
 
-            rows = ws.get_all_records()
+            all_values = _retry_on_quota(ws.get_all_values)
+            _hdrs, rows = _rows_from_values(all_values)
 
             if market_code:
                 rows = [r for r in rows

@@ -334,20 +334,22 @@ TUTORIAL_STEPS = [
                 "settings_screen.tabs",
             ),
             TutorialHint(
-                "Cloud Sync (Google Sheets)",
+                "Cloud Sync",
                 "One-way sync that uploads your end-of-day "
-                "reports to Google Sheets so coordinators and "
-                "the finance team can view data remotely. "
-                "Data flows from the app to Sheets only.\n\n"
+                "reports to Google Sheets and FMNP check photos "
+                "to Google Drive so coordinators and the finance "
+                "team can view data remotely.\n\n"
                 "To set up:\n"
                 "1. Obtain a Google service account credentials "
                 "file (JSON) from your coordinator\n"
                 "2. Click \u201cLoad Credentials\u201d to import it\n"
                 "3. Enter the Spreadsheet ID from your Google "
                 "Sheet URL\n"
-                "4. Click \u201cSave Sync Settings\u201d\n\n"
-                "Then click \u201cSync Now\u201d any time to upload "
-                "the current day\u2019s data. Sync requires an "
+                "4. Paste your Google Drive folder URL for "
+                "check photos\n"
+                "5. Click \u201cSave Sync Settings\u201d\n\n"
+                "Then click \u201cSync to Cloud\u201d any time to "
+                "upload data and photos. Sync requires an "
                 "internet connection \u2014 your local data is "
                 "never affected if it fails.",
                 "settings_screen.cloud_sync_tab",

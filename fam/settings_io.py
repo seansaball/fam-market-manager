@@ -54,6 +54,7 @@ class ImportPaymentMethod:
     name: str
     match_percent: float
     sort_order: int
+    denomination: float | None = None
 
 
 @dataclass
@@ -185,9 +186,11 @@ def export_settings(filepath: str) -> str:
 
     # Payment Methods
     lines.append("=== Payment Methods ===")
-    lines.append("Name | Match % | Sort Order")
+    lines.append("Name | Match % | Sort Order | Denomination")
     for pm in methods:
-        lines.append(f"{pm['name']} | {pm['match_percent']} | {pm['sort_order']}")
+        denom = pm.get('denomination')
+        denom_str = str(denom) if denom else ''
+        lines.append(f"{pm['name']} | {pm['match_percent']} | {pm['sort_order']} | {denom_str}")
     lines.append("")
 
     # Market-Vendor assignments
@@ -330,7 +333,22 @@ def parse_settings_file(filepath: str) -> ImportResult:
                         sort_order = int(parts[2]) if len(parts) > 2 and parts[2] else 0
                     except ValueError:
                         sort_order = 0
-                    result.payment_methods.append(ImportPaymentMethod(name, match_pct, sort_order))
+                    denomination = None
+                    if len(parts) > 3 and parts[3].strip():
+                        try:
+                            denomination = float(parts[3])
+                            if denomination <= 0:
+                                result.errors.append(
+                                    f"Line {line_num}: Denomination must be positive"
+                                )
+                                denomination = None
+                        except ValueError:
+                            result.errors.append(
+                                f"Line {line_num}: Invalid denomination '{parts[3]}'"
+                            )
+                    result.payment_methods.append(
+                        ImportPaymentMethod(name, match_pct, sort_order, denomination)
+                    )
 
                 elif current_section == 'Market Vendors':
                     if len(parts) < 2:
@@ -429,8 +447,9 @@ def apply_import(result: ImportResult) -> dict:
     for pm in result.new_payment_methods:
         try:
             conn.execute(
-                "INSERT INTO payment_methods (name, match_percent, sort_order) VALUES (?, ?, ?)",
-                (pm.name, pm.match_percent, pm.sort_order)
+                "INSERT INTO payment_methods (name, match_percent, sort_order, denomination)"
+                " VALUES (?, ?, ?, ?)",
+                (pm.name, pm.match_percent, pm.sort_order, pm.denomination)
             )
             counts['payment_methods_added'] += 1
         except Exception as e:

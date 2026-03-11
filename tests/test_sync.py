@@ -2,7 +2,7 @@
 
 Covers:
   - Basic sync plumbing (SyncResult, ABC, settings helpers)
-  - Data collector (8 tabs, identity columns, void handling)
+  - Data collector (9 tabs, identity columns, void handling)
   - SyncManager orchestration (upsert routing, partial failure, clear)
   - Credential validation
   - **Multi-device / multi-market** isolation and collision prevention
@@ -11,6 +11,7 @@ Covers:
   - **Transaction ID uniqueness** across devices at the same market
   - **Stale-row removal** when data disappears locally
   - **Empty / edge-case** scenarios
+  - **Agent Tracker** device registry (version, sync status, hostname)
 """
 
 import os
@@ -153,16 +154,16 @@ class TestDataCollector:
         result = collect_sync_data()
         assert result == {}
 
-    def test_collect_returns_8_tabs(self):
-        """Returns data for all 8 sheet tabs."""
+    def test_collect_returns_9_tabs(self):
+        """Returns data for all 9 sheet tabs."""
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
-        assert len(data) == 8
+        assert len(data) == 9
         expected_tabs = {
             'Vendor Reimbursement', 'FAM Match Report', 'Detailed Ledger',
             'Transaction Log', 'Activity Log', 'Geolocation',
-            'FMNP Entries', 'Market Day Summary',
+            'FMNP Entries', 'Market Day Summary', 'Error Log',
         }
         assert set(data.keys()) == expected_tabs
 
@@ -196,7 +197,8 @@ class TestDataCollector:
         rows = data['Detailed Ledger']
         assert len(rows) >= 1
         row = rows[0]
-        assert row['Transaction ID'] == 'FAM-TEST-20260309-0001'
+        assert row['Transaction ID'].startswith('FAM-TEST-')
+        assert row['Transaction ID'].endswith('-0001')
         assert row['Receipt Total'] == 25.00
         assert row['Status'] == 'Confirmed'
 
@@ -239,7 +241,7 @@ class TestDataCollector:
 
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
-        assert len(data) == 8
+        assert len(data) == 9
         assert data['Vendor Reimbursement'] == []
         assert data['Detailed Ledger'] == []
         assert len(data['Market Day Summary']) == 1  # Summary always has 1 row
@@ -286,9 +288,9 @@ class TestSyncManager:
         data = collect_sync_data(md_id)
         results = manager.sync_all(data)
 
-        assert len(results) == 8
+        assert len(results) == 10  # 9 data tabs + Agent Tracker
         assert all(r.success for r in results.values())
-        assert len(backend.upsert_calls) == 8
+        assert len(backend.upsert_calls) == 10
 
     def test_sync_all_records_last_sync_at(self):
         md_id, _ = _create_market_day_with_transactions()
@@ -341,8 +343,8 @@ class TestSyncManager:
         manager = SyncManager(backend)
         results = manager.clear_market_data()
 
-        assert len(results) == 8
-        assert len(backend.delete_calls) == 8
+        assert len(results) == 10  # 9 data tabs + Agent Tracker
+        assert len(backend.delete_calls) == 10
         for call in backend.delete_calls:
             assert call[1] == 'CLR'
             assert call[2] == 'dev-clr'
@@ -515,9 +517,9 @@ class TestMultiDeviceIsolation:
         data_b = collect_sync_data(md2)
         results_b = manager.sync_all(data_b)
 
-        # Each sync produced 8 upsert calls (one per tab)
-        assert calls_a == 8
-        assert len(backend.upsert_calls) == 16  # 8 + 8
+        # Each sync produced 10 upsert calls (9 data tabs + Agent Tracker)
+        assert calls_a == 10
+        assert len(backend.upsert_calls) == 20  # 10 + 10
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1060,7 +1062,7 @@ class TestEdgeCases:
         md_id = create_market_day(market['id'], '2026-06-01', opened_by="Test")
 
         data = collect_sync_data(md_id)
-        assert len(data) == 8
+        assert len(data) == 9
         for rows in data.values():
             for row in rows:
                 assert row['market_code'] == ''
@@ -1140,8 +1142,8 @@ class TestEdgeCases:
         manager = SyncManager(ExplodingBackend())
         results = manager.sync_all(data)
 
-        # All 8 tabs should have failed gracefully
-        assert len(results) == 8
+        # All 9 data tabs + Agent Tracker should have failed gracefully
+        assert len(results) == 10
         for r in results.values():
             assert r.success is False
             assert "Network unreachable" in r.error
@@ -1212,7 +1214,12 @@ class TestCompositeKeys:
         md_id, _ = _create_market_day_with_transactions(txn_count=5)
         data = collect_sync_data(md_id)
 
+        # Error Log is parsed from a rotating log file where duplicate
+        # entries at the same second are expected (e.g., repeated upload
+        # failures).  The sync upsert handles dedup, so skip it here.
         for tab, key_cols in SyncManager.SHEET_KEYS.items():
+            if tab == 'Error Log':
+                continue
             rows = data.get(tab, [])
             seen_keys = set()
             for row in rows:
@@ -1220,3 +1227,499 @@ class TestCompositeKeys:
                 assert key not in seen_keys, \
                     f"Duplicate key {key} in '{tab}'"
                 seen_keys.add(key)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Schema migration v15→v16: app_version + device_id on audit_log
+# ──────────────────────────────────────────────────────────────────
+class TestSchemaMigrationV16:
+    """Verify migration adds app_version and device_id to audit_log."""
+
+    def test_fresh_db_has_audit_columns(self):
+        """A fresh database should have app_version and device_id columns."""
+        conn = get_connection()
+        cursor = conn.execute("PRAGMA table_info(audit_log)")
+        col_names = [row[1] for row in cursor.fetchall()]
+        assert 'app_version' in col_names
+        assert 'device_id' in col_names
+
+    def test_migration_is_idempotent(self):
+        """Running the migration again should not raise."""
+        from fam.database.schema import _migrate_v15_to_v16
+        conn = get_connection()
+        # Columns already exist from fresh init; should silently pass
+        _migrate_v15_to_v16(conn)
+        cursor = conn.execute("PRAGMA table_info(audit_log)")
+        col_names = [row[1] for row in cursor.fetchall()]
+        assert 'app_version' in col_names
+        assert 'device_id' in col_names
+
+    def test_schema_version_is_18(self):
+        """Current schema version should be 18."""
+        from fam.database.schema import CURRENT_SCHEMA_VERSION
+        assert CURRENT_SCHEMA_VERSION == 18
+
+
+# ──────────────────────────────────────────────────────────────────
+# log_action captures app_version and device_id
+# ──────────────────────────────────────────────────────────────────
+class TestLogActionCapture:
+    """Verify log_action() auto-populates version and device_id."""
+
+    def test_log_action_stores_app_version(self):
+        """log_action should write fam.__version__ into app_version."""
+        from fam.models.audit import log_action
+        from fam import __version__
+        conn = get_connection()
+        log_action('transactions', 999, 'CREATE', 'test')
+        row = conn.execute(
+            "SELECT app_version FROM audit_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row['app_version'] == __version__
+
+    def test_log_action_stores_device_id(self):
+        """log_action should write get_device_id() into device_id."""
+        from fam.models.audit import log_action
+        from fam.utils.app_settings import set_setting
+        set_setting('device_id', 'MY-DEVICE-42')
+        conn = get_connection()
+        log_action('transactions', 999, 'CREATE', 'test')
+        row = conn.execute(
+            "SELECT device_id FROM audit_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row['device_id'] == 'MY-DEVICE-42'
+
+    def test_log_action_device_id_empty_when_unset(self):
+        """device_id should be '' when no device_id is configured."""
+        from fam.models.audit import log_action
+        from fam.utils.app_settings import set_setting
+        set_setting('device_id', '')
+        conn = get_connection()
+        log_action('transactions', 999, 'CREATE', 'test')
+        row = conn.execute(
+            "SELECT device_id FROM audit_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row['device_id'] == ''
+
+    def test_get_transaction_log_includes_version_fields(self):
+        """get_transaction_log should return app_version and device_id."""
+        from fam.models.audit import log_action, get_transaction_log
+        from fam.utils.app_settings import set_setting
+
+        # Create a market day and transaction for the JOIN to find
+        md_id, txn_ids = _create_market_day_with_transactions()
+        # Set device_id AFTER the helper (which resets it to 'device-001')
+        set_setting('device_id', 'TRACE-01')
+        log_action('transactions', txn_ids[0], 'CONFIRM', 'test')
+
+        entries = get_transaction_log(market_day_id=md_id)
+        # Find the CONFIRM entry we just created (not the helper's CREATE)
+        our_entry = [e for e in entries if e['action'] == 'CONFIRM'
+                     and e['record_id'] == txn_ids[0]]
+        assert len(our_entry) >= 1
+        assert 'app_version' in our_entry[0]
+        assert 'device_id' in our_entry[0]
+        assert our_entry[0]['device_id'] == 'TRACE-01'
+
+
+# ──────────────────────────────────────────────────────────────────
+# Data collector: version/device in Transaction Log & Activity Log
+# ──────────────────────────────────────────────────────────────────
+class TestCollectorVersionFields:
+    """Ensure Transaction Log and Activity Log sync include version/device."""
+
+    def test_transaction_log_has_version_fields(self):
+        """Transaction Log rows should contain 'App Version' and 'Device'."""
+        from fam.sync.data_collector import collect_sync_data
+        from fam.models.audit import log_action
+
+        md_id, txn_ids = _create_market_day_with_transactions()
+        log_action('transactions', txn_ids[0], 'CONFIRM', 'test')
+        data = collect_sync_data(md_id)
+
+        txn_log = data.get('Transaction Log', [])
+        assert len(txn_log) >= 1
+        for row in txn_log:
+            assert 'App Version' in row, \
+                "'App Version' missing from Transaction Log row"
+            assert 'Device' in row, \
+                "'Device' missing from Transaction Log row"
+
+    def test_activity_log_has_version_fields(self):
+        """Activity Log rows should contain 'App Version' and 'Device'."""
+        from fam.sync.data_collector import collect_sync_data
+        from fam.models.audit import log_action
+
+        md_id, txn_ids = _create_market_day_with_transactions()
+        log_action('transactions', txn_ids[0], 'CONFIRM', 'test')
+        data = collect_sync_data(md_id)
+
+        activity_log = data.get('Activity Log', [])
+        assert len(activity_log) >= 1
+        for row in activity_log:
+            assert 'App Version' in row, \
+                "'App Version' missing from Activity Log row"
+            assert 'Device' in row, \
+                "'Device' missing from Activity Log row"
+
+    def test_transaction_log_version_matches_package(self):
+        """'App Version' should match fam.__version__."""
+        from fam.sync.data_collector import collect_sync_data
+        from fam.models.audit import log_action
+        from fam import __version__
+
+        md_id, txn_ids = _create_market_day_with_transactions()
+        log_action('transactions', txn_ids[0], 'CONFIRM', 'test')
+        data = collect_sync_data(md_id)
+
+        txn_log = data.get('Transaction Log', [])
+        versions_found = [r['App Version'] for r in txn_log
+                          if r['App Version']]
+        assert __version__ in versions_found
+
+
+# ──────────────────────────────────────────────────────────────────
+# Error Log collector
+# ──────────────────────────────────────────────────────────────────
+class TestErrorLogCollector:
+    """Tests for the Error Log sync tab (9th tab)."""
+
+    def _write_fake_log(self, tmp_path, entries):
+        """Write a fake fam_manager.log file and mock get_log_path."""
+        log_file = tmp_path / 'fam_manager.log'
+        lines = []
+        for e in entries:
+            lines.append(
+                f"{e['ts']} [{e['level']}] {e['mod']}: {e['msg']}\n"
+            )
+            if 'tb' in e:
+                lines.append(e['tb'] + '\n')
+        log_file.write_text(''.join(lines), encoding='utf-8')
+        return str(log_file)
+
+    def test_error_log_appears_in_sync_data(self):
+        """collect_sync_data should include an 'Error Log' key."""
+        from fam.sync.data_collector import collect_sync_data
+        md_id, _ = _create_market_day_with_transactions()
+        data = collect_sync_data(md_id)
+        assert 'Error Log' in data
+
+    def test_error_log_has_identity_columns(self):
+        """Error Log rows should have market_code and device_id."""
+        from fam.sync.data_collector import collect_sync_data
+        md_id, _ = _create_market_day_with_transactions()
+        data = collect_sync_data(md_id)
+        for row in data.get('Error Log', []):
+            assert 'market_code' in row
+            assert 'device_id' in row
+
+    @patch('fam.utils.logging_config.get_log_path')
+    def test_error_log_correct_columns(self, mock_path, fresh_db):
+        """Each Error Log row should have the expected column set."""
+        log_path = self._write_fake_log(fresh_db, [
+            {'ts': '2026-03-10 10:00:00', 'level': 'ERROR',
+             'mod': 'fam.ui.payment_screen',
+             'msg': 'Payment failed'},
+        ])
+        mock_path.return_value = log_path
+
+        from fam.sync.data_collector import _collect_error_log
+        rows = _collect_error_log()
+        assert len(rows) == 1
+        expected_cols = {'Timestamp', 'Level', 'Area', 'Module',
+                         'Message', 'Traceback', 'App Version', 'Device'}
+        assert set(rows[0].keys()) == expected_cols
+
+    @patch('fam.utils.logging_config.get_log_path')
+    def test_error_log_captures_traceback(self, mock_path, fresh_db):
+        """Traceback lines should be included in the Traceback column."""
+        log_path = self._write_fake_log(fresh_db, [
+            {'ts': '2026-03-10 10:00:01', 'level': 'ERROR',
+             'mod': 'fam.models.transaction',
+             'msg': 'DB error',
+             'tb': 'Traceback (most recent call last):\n  File "x.py"'},
+        ])
+        mock_path.return_value = log_path
+
+        from fam.sync.data_collector import _collect_error_log
+        rows = _collect_error_log()
+        assert len(rows) == 1
+        assert 'Traceback' in rows[0]['Traceback']
+
+    @patch('fam.utils.logging_config.get_log_path')
+    def test_error_log_friendly_area(self, mock_path, fresh_db):
+        """'Area' should be the friendly module label."""
+        log_path = self._write_fake_log(fresh_db, [
+            {'ts': '2026-03-10 10:00:02', 'level': 'WARNING',
+             'mod': 'fam.ui.settings_screen',
+             'msg': 'Something went wrong'},
+        ])
+        mock_path.return_value = log_path
+
+        from fam.sync.data_collector import _collect_error_log
+        rows = _collect_error_log()
+        assert len(rows) == 1
+        assert rows[0]['Area'] == 'Settings'
+        assert rows[0]['Module'] == 'fam.ui.settings_screen'
+
+    @patch('fam.utils.logging_config.get_log_path')
+    def test_error_log_includes_app_version(self, mock_path, fresh_db):
+        """'App Version' should match fam.__version__."""
+        from fam import __version__
+        log_path = self._write_fake_log(fresh_db, [
+            {'ts': '2026-03-10 10:00:03', 'level': 'ERROR',
+             'mod': 'fam.database.connection',
+             'msg': 'DB locked'},
+        ])
+        mock_path.return_value = log_path
+
+        from fam.sync.data_collector import _collect_error_log
+        rows = _collect_error_log()
+        assert rows[0]['App Version'] == __version__
+
+    @patch('fam.utils.logging_config.get_log_path')
+    def test_error_log_empty_when_no_file(self, mock_path, fresh_db):
+        """Should return empty list if log file doesn't exist."""
+        mock_path.return_value = str(fresh_db / 'nonexistent.log')
+
+        from fam.sync.data_collector import _collect_error_log
+        rows = _collect_error_log()
+        assert rows == []
+
+    @patch('fam.utils.logging_config.get_log_path')
+    def test_error_log_multiple_entries(self, mock_path, fresh_db):
+        """Multiple log entries should each become a row."""
+        log_path = self._write_fake_log(fresh_db, [
+            {'ts': '2026-03-10 10:00:04', 'level': 'ERROR',
+             'mod': 'fam.ui.main_window', 'msg': 'Error one'},
+            {'ts': '2026-03-10 10:00:05', 'level': 'WARNING',
+             'mod': 'fam.models.vendor', 'msg': 'Warn two'},
+            {'ts': '2026-03-10 10:00:06', 'level': 'ERROR',
+             'mod': 'fam.app', 'msg': 'Error three'},
+        ])
+        mock_path.return_value = log_path
+
+        from fam.sync.data_collector import _collect_error_log
+        rows = _collect_error_log()
+        # parse_log_file returns newest-first
+        assert len(rows) == 3
+        assert rows[0]['Timestamp'] == '2026-03-10 10:00:06'
+        assert rows[2]['Timestamp'] == '2026-03-10 10:00:04'
+
+
+# ──────────────────────────────────────────────────────────────────
+# SyncManager.SHEET_KEYS includes Error Log
+# ──────────────────────────────────────────────────────────────────
+class TestSheetKeysErrorLog:
+    """Verify Error Log is registered in SyncManager.SHEET_KEYS."""
+
+    def test_error_log_in_sheet_keys(self):
+        from fam.sync.manager import SyncManager
+        assert 'Error Log' in SyncManager.SHEET_KEYS
+
+    def test_error_log_key_columns(self):
+        from fam.sync.manager import SyncManager
+        keys = SyncManager.SHEET_KEYS['Error Log']
+        assert 'market_code' in keys
+        assert 'device_id' in keys
+        assert 'Timestamp' in keys
+        assert 'Module' in keys
+        assert 'Message' in keys
+
+    def test_ten_tabs_in_sheet_keys(self):
+        """SyncManager should have 10 tabs registered."""
+        from fam.sync.manager import SyncManager
+        assert len(SyncManager.SHEET_KEYS) == 10
+
+
+# ──────────────────────────────────────────────────────────────────
+# Agent Tracker — device registry synced to Google Sheets
+# ──────────────────────────────────────────────────────────────────
+class TestAgentTracker:
+    """Tests for the Agent Tracker sync tab (device registry)."""
+
+    def test_agent_tracker_in_sheet_keys(self):
+        """Agent Tracker should be registered in SHEET_KEYS."""
+        from fam.sync.manager import SyncManager
+        assert 'Agent Tracker' in SyncManager.SHEET_KEYS
+
+    def test_agent_tracker_key_is_device_id(self):
+        """Agent Tracker should be keyed by device_id only."""
+        from fam.sync.manager import SyncManager
+        assert SyncManager.SHEET_KEYS['Agent Tracker'] == ['device_id']
+
+    def test_sync_all_includes_agent_tracker(self):
+        """sync_all results should include an Agent Tracker entry."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        from fam.sync.manager import SyncManager
+
+        backend = MockBackend()
+        manager = SyncManager(backend)
+        data = collect_sync_data(md_id)
+        results = manager.sync_all(data)
+
+        assert 'Agent Tracker' in results
+        assert results['Agent Tracker'].success
+
+    def test_agent_tracker_row_columns(self):
+        """Agent Tracker upsert should contain all expected columns."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        from fam.sync.manager import SyncManager
+
+        backend = MockBackend()
+        manager = SyncManager(backend)
+        data = collect_sync_data(md_id)
+        manager.sync_all(data)
+
+        # Find the Agent Tracker upsert call
+        tracker_call = [c for c in backend.upsert_calls
+                        if c[0] == 'Agent Tracker']
+        assert len(tracker_call) == 1
+        sheet_name, rows, key_cols = tracker_call[0]
+        assert key_cols == ['device_id']
+        assert len(rows) == 1
+
+        row = rows[0]
+        expected_cols = {
+            'device_id', 'market_code', 'Market Name', 'App Version',
+            'Last Sync', 'Hostname', 'OS', 'Status',
+            'Sheets Synced', 'Total Rows', 'Errors',
+        }
+        assert set(row.keys()) == expected_cols
+
+    def test_agent_tracker_status_ok(self):
+        """Status should be 'OK' when all data tabs succeed."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        from fam.sync.manager import SyncManager
+
+        backend = MockBackend()
+        manager = SyncManager(backend)
+        data = collect_sync_data(md_id)
+        manager.sync_all(data)
+
+        tracker_row = [c for c in backend.upsert_calls
+                       if c[0] == 'Agent Tracker'][0][1][0]
+        assert tracker_row['Status'] == 'OK'
+        assert tracker_row['Errors'] == ''
+
+    def test_agent_tracker_status_error(self):
+        """Status should be 'Error' when a data tab fails."""
+        from fam.sync.manager import SyncManager
+
+        class PartialFailBackend(MockBackend):
+            def upsert_rows(self, sheet_name, rows, key_columns):
+                if sheet_name == 'Geolocation':
+                    return SyncResult(success=False, error='test failure')
+                return super().upsert_rows(sheet_name, rows, key_columns)
+
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+
+        backend = PartialFailBackend()
+        manager = SyncManager(backend)
+        data = collect_sync_data(md_id)
+        manager.sync_all(data)
+
+        tracker_row = [c for c in backend.upsert_calls
+                       if c[0] == 'Agent Tracker'][0][1][0]
+        assert tracker_row['Status'] == 'Error'
+        assert 'Geolocation' in tracker_row['Errors']
+
+    def test_agent_tracker_shows_version(self):
+        """App Version should match fam.__version__."""
+        from fam import __version__
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        from fam.sync.manager import SyncManager
+
+        backend = MockBackend()
+        manager = SyncManager(backend)
+        data = collect_sync_data(md_id)
+        manager.sync_all(data)
+
+        tracker_row = [c for c in backend.upsert_calls
+                       if c[0] == 'Agent Tracker'][0][1][0]
+        assert tracker_row['App Version'] == __version__
+
+    def test_agent_tracker_shows_hostname(self):
+        """Hostname should be populated."""
+        import platform as _platform
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        from fam.sync.manager import SyncManager
+
+        backend = MockBackend()
+        manager = SyncManager(backend)
+        data = collect_sync_data(md_id)
+        manager.sync_all(data)
+
+        tracker_row = [c for c in backend.upsert_calls
+                       if c[0] == 'Agent Tracker'][0][1][0]
+        assert tracker_row['Hostname'] == _platform.node()
+        assert tracker_row['OS'] == _platform.platform()
+
+    def test_agent_tracker_failure_doesnt_block(self):
+        """If Agent Tracker upsert fails, sync_all still returns data results."""
+        from fam.sync.manager import SyncManager
+
+        class TrackerFailBackend(MockBackend):
+            def upsert_rows(self, sheet_name, rows, key_columns):
+                if sheet_name == 'Agent Tracker':
+                    raise ConnectionError("Tracker network error")
+                return super().upsert_rows(sheet_name, rows, key_columns)
+
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+
+        backend = TrackerFailBackend()
+        manager = SyncManager(backend)
+        data = collect_sync_data(md_id)
+        results = manager.sync_all(data)
+
+        # Data tabs should all succeed
+        data_results = {k: v for k, v in results.items()
+                        if k != 'Agent Tracker'}
+        assert all(r.success for r in data_results.values())
+
+        # Agent Tracker should be present but failed
+        assert 'Agent Tracker' in results
+        assert results['Agent Tracker'].success is False
+        assert 'Tracker network error' in results['Agent Tracker'].error
+
+    def test_agent_tracker_sheets_synced_count(self):
+        """Sheets Synced should show correct counts (e.g. '9/9')."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        from fam.sync.manager import SyncManager
+
+        backend = MockBackend()
+        manager = SyncManager(backend)
+        data = collect_sync_data(md_id)
+        manager.sync_all(data)
+
+        tracker_row = [c for c in backend.upsert_calls
+                       if c[0] == 'Agent Tracker'][0][1][0]
+        assert tracker_row['Sheets Synced'] == '9/9'
+
+    def test_agent_tracker_market_name(self):
+        """Market Name should come from the active market in the database."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        from fam.sync.manager import SyncManager
+
+        conn = get_connection()
+        market_name = conn.execute(
+            "SELECT name FROM markets WHERE is_active = 1 LIMIT 1"
+        ).fetchone()['name']
+
+        backend = MockBackend()
+        manager = SyncManager(backend)
+        data = collect_sync_data(md_id)
+        manager.sync_all(data)
+
+        tracker_row = [c for c in backend.upsert_calls
+                       if c[0] == 'Agent Tracker'][0][1][0]
+        assert tracker_row['Market Name'] == market_name

@@ -62,6 +62,8 @@ def collect_sync_data(market_day_id: Optional[int] = None) -> dict[str, list[dic
             _collect_fmnp_entries(conn, market_day_id))
         data['Market Day Summary'] = _prepend_identity(
             _collect_market_day_summary(conn, market_day_id))
+        data['Error Log'] = _prepend_identity(
+            _collect_error_log())
     except Exception:
         logger.exception("Error collecting sync data for market_day %s",
                          market_day_id)
@@ -189,6 +191,8 @@ def _collect_fam_match(conn, md_id: int) -> list[dict]:
 
 def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
     """Detailed Ledger — mirrors reports_screen.py L660-743."""
+    from fam.utils.photo_paths import parse_photo_paths
+
     rows = conn.execute("""
         SELECT t.fam_transaction_id, v.name AS vendor,
                t.receipt_total, t.status,
@@ -206,17 +210,43 @@ def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
         ORDER BY t.fam_transaction_id
     """, [md_id]).fetchall()
 
-    result = [
-        {'Transaction ID': r['fam_transaction_id'],
-         'Customer': r['customer_id'],
-         'Vendor': r['vendor'],
-         'Receipt Total': r['receipt_total'],
-         'Customer Paid': r['customer_paid'],
-         'FAM Match': r['fam_match'],
-         'Status': r['status'],
-         'Payment Methods': r['methods'] or ''}
-        for r in rows
-    ]
+    # Gather payment photo URLs per transaction
+    photo_rows = conn.execute("""
+        SELECT pl.transaction_id, pl.photo_drive_url
+        FROM payment_line_items pl
+        JOIN transactions t ON pl.transaction_id = t.id
+        WHERE t.market_day_id = ?
+          AND pl.photo_drive_url IS NOT NULL
+          AND pl.photo_drive_url != ''
+    """, [md_id]).fetchall()
+
+    txn_photos = {}
+    for pr in photo_rows:
+        urls = parse_photo_paths(pr['photo_drive_url'])
+        if urls:
+            txn_photos.setdefault(pr['transaction_id'], []).extend(urls)
+
+    result = []
+    for r in rows:
+        row_dict = {
+            'Transaction ID': r['fam_transaction_id'],
+            'Customer': r['customer_id'],
+            'Vendor': r['vendor'],
+            'Receipt Total': r['receipt_total'],
+            'Customer Paid': r['customer_paid'],
+            'FAM Match': r['fam_match'],
+            'Status': r['status'],
+            'Payment Methods': r['methods'] or '',
+        }
+        # Include payment photo URLs if any
+        # Look up transaction id for photo mapping
+        txn_row = conn.execute(
+            "SELECT id FROM transactions WHERE fam_transaction_id = ?",
+            [r['fam_transaction_id']]
+        ).fetchone()
+        if txn_row and txn_row['id'] in txn_photos:
+            row_dict['Photos'] = ' | '.join(txn_photos[txn_row['id']])
+        result.append(row_dict)
 
     # Append external FMNP entries
     fmnp_rows = conn.execute("""
@@ -274,6 +304,8 @@ def _collect_transaction_log(md_id: int) -> list[dict]:
             'Vendor': vendor,
             'Details': details,
             'By': r.get('changed_by') or '',
+            'App Version': r.get('app_version') or '',
+            'Device': r.get('device_id') or '',
         })
 
     return result
@@ -294,7 +326,8 @@ def _collect_activity_log(conn, md_id: int) -> list[dict]:
     rows = conn.execute("""
         SELECT changed_at, action, table_name, record_id,
                field_name, old_value, new_value,
-               reason_code, notes, changed_by
+               reason_code, notes, changed_by,
+               app_version, device_id
         FROM audit_log
         WHERE changed_at >= ? AND changed_at < date(?, '+1 day')
         ORDER BY changed_at DESC
@@ -310,7 +343,9 @@ def _collect_activity_log(conn, md_id: int) -> list[dict]:
          'New Value': r['new_value'] or '',
          'Reason': r['reason_code'] or '',
          'Notes': r['notes'] or '',
-         'Changed By': r['changed_by'] or ''}
+         'Changed By': r['changed_by'] or '',
+         'App Version': r['app_version'] or '',
+         'Device': r['device_id'] or ''}
         for r in rows
     ]
 
@@ -349,24 +384,33 @@ def _collect_geolocation(conn, md_id: int) -> list[dict]:
 
 def _collect_fmnp_entries(conn, md_id: int) -> list[dict]:
     """FMNP Entries for the market day."""
+    from fam.utils.photo_paths import parse_photo_paths
+
     rows = conn.execute("""
         SELECT fe.id, v.name AS vendor, fe.amount,
-               fe.check_count, fe.notes, fe.entered_by
+               fe.check_count, fe.notes, fe.entered_by,
+               fe.photo_drive_url
         FROM fmnp_entries fe
         JOIN vendors v ON fe.vendor_id = v.id
         WHERE fe.market_day_id = ? AND fe.status = 'Active'
         ORDER BY fe.id
     """, [md_id]).fetchall()
 
-    return [
-        {'Entry ID': r['id'],
-         'Vendor': r['vendor'],
-         'Amount': r['amount'],
-         'Check Count': r['check_count'] or 0,
-         'Notes': r['notes'] or '',
-         'Entered By': r['entered_by'] or ''}
-        for r in rows
-    ]
+    result = []
+    for r in rows:
+        # Parse JSON array of Drive URLs; join with " | " for Sheets display
+        urls = parse_photo_paths(r['photo_drive_url'])
+        photo_display = ' | '.join(urls) if urls else ''
+        result.append({
+            'Entry ID': r['id'],
+            'Vendor': r['vendor'],
+            'Amount': r['amount'],
+            'Check Count': r['check_count'] or 0,
+            'Notes': r['notes'] or '',
+            'Entered By': r['entered_by'] or '',
+            'Photo': photo_display,
+        })
+    return result
 
 
 def _collect_market_day_summary(conn, md_id: int) -> list[dict]:
@@ -410,3 +454,31 @@ def _collect_market_day_summary(conn, md_id: int) -> list[dict]:
         'Total Customer Paid': row['total_customer_paid'],
         'Total FAM Match': row['total_fam_match'],
     }]
+
+
+def _collect_error_log() -> list[dict]:
+    """Error Log — parse fam_manager.log for errors and warnings.
+
+    Syncs application errors to Google Sheets for remote troubleshooting.
+    Includes full tracebacks, app version, and device identity.
+    """
+    from fam import __version__
+    from fam.utils.logging_config import get_log_path
+    from fam.utils.log_reader import parse_log_file
+
+    log_path = get_log_path()
+    entries = parse_log_file(log_path, limit=500)
+
+    did = get_device_id() or ''
+
+    return [
+        {'Timestamp': e['timestamp'],
+         'Level': e['level'],
+         'Area': e['module_label'],
+         'Module': e['module'],
+         'Message': e['message'],
+         'Traceback': (e.get('traceback') or '').strip(),
+         'App Version': __version__,
+         'Device': did}
+        for e in entries
+    ]

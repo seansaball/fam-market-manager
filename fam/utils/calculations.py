@@ -1,6 +1,25 @@
 """Financial calculation logic for FAM transactions."""
 
 
+def charge_to_method_amount(charge: float, match_percent: float) -> float:
+    """Convert a customer charge amount to total allocation (method_amount).
+
+    The charge is what the customer pays for this payment method.
+    method_amount = charge + FAM match = charge × (1 + match_percent / 100).
+    """
+    return round(charge * (1.0 + match_percent / 100.0), 2)
+
+
+def method_amount_to_charge(method_amount: float, match_percent: float) -> float:
+    """Convert total allocation (method_amount) back to the customer charge.
+
+    Inverse of charge_to_method_amount.
+    charge = method_amount / (1 + match_percent / 100).
+    """
+    divisor = 1.0 + match_percent / 100.0
+    return round(method_amount / divisor, 2) if divisor > 0 else method_amount
+
+
 def calculate_payment_breakdown(receipt_total: float, payment_entries: list,
                                 match_limit: float | None = None) -> dict:
     """

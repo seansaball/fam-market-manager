@@ -95,7 +95,7 @@ class TestTableStructure:
         initialize_database()
         conn = get_connection()
         cols = {r[1] for r in conn.execute("PRAGMA table_info(payment_methods)").fetchall()}
-        assert {"id", "name", "match_percent", "is_active", "sort_order"}.issubset(cols)
+        assert {"id", "name", "match_percent", "is_active", "sort_order", "denomination", "photo_required"}.issubset(cols)
 
     def test_transactions_columns(self, fresh_db):
         initialize_database()
@@ -113,7 +113,8 @@ class TestTableStructure:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(payment_line_items)").fetchall()}
         expected = {"id", "transaction_id", "payment_method_id",
                     "method_name_snapshot", "match_percent_snapshot",
-                    "method_amount", "match_amount", "customer_charged", "created_at"}
+                    "method_amount", "match_amount", "customer_charged",
+                    "photo_path", "created_at"}
         assert expected.issubset(cols)
 
     def test_fmnp_entries_has_status(self, fresh_db):
@@ -121,6 +122,20 @@ class TestTableStructure:
         conn = get_connection()
         cols = {r[1] for r in conn.execute("PRAGMA table_info(fmnp_entries)").fetchall()}
         assert "status" in cols
+
+    def test_fmnp_entries_has_photo_columns(self, fresh_db):
+        initialize_database()
+        conn = get_connection()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(fmnp_entries)").fetchall()}
+        assert "photo_path" in cols
+        assert "photo_drive_url" in cols
+
+    def test_payment_line_items_has_photo_drive_url(self, fresh_db):
+        initialize_database()
+        conn = get_connection()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(payment_line_items)").fetchall()}
+        assert "photo_path" in cols
+        assert "photo_drive_url" in cols
 
     def test_customer_orders_has_zip_code(self, fresh_db):
         initialize_database()
@@ -480,6 +495,22 @@ class TestMigrationChain:
         # fmnp_entries should have status column (v11)
         fmnp_cols = {r[1] for r in conn.execute("PRAGMA table_info(fmnp_entries)").fetchall()}
         assert "status" in fmnp_cols
+
+        # payment_methods should have denomination column (v12)
+        pm_cols = {r[1] for r in conn.execute("PRAGMA table_info(payment_methods)").fetchall()}
+        assert "denomination" in pm_cols
+
+        # fmnp_entries should have photo columns (v13)
+        assert "photo_path" in fmnp_cols
+        assert "photo_drive_url" in fmnp_cols
+
+        # payment_methods should have photo_required column (v14)
+        assert "photo_required" in pm_cols
+
+        # payment_line_items should have photo_path (v14) and photo_drive_url (v15)
+        pli_cols = {r[1] for r in conn.execute("PRAGMA table_info(payment_line_items)").fetchall()}
+        assert "photo_path" in pli_cols
+        assert "photo_drive_url" in pli_cols
 
     def test_data_survives_migration(self, fresh_db):
         """Pre-existing data should not be lost during migration."""

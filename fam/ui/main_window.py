@@ -190,7 +190,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self._sync_indicator)
         self._set_sync_indicator("offline")
 
-        self._sync_btn = QPushButton("\U0001F4E4  Sync to Sheets")
+        self._sync_btn = QPushButton("☁️  Sync to Cloud")
         self._sync_btn.setCursor(Qt.PointingHandCursor)
         self._sync_btn.setStyleSheet(f"""
             QPushButton {{
@@ -212,7 +212,7 @@ class MainWindow(QMainWindow):
                 border-color: #ddd;
             }}
         """)
-        self._sync_btn.clicked.connect(self._trigger_sync)
+        self._sync_btn.clicked.connect(lambda: self._trigger_sync(force=True))
         self._sync_btn.setVisible(False)
         header_layout.addWidget(self._sync_btn)
 
@@ -268,6 +268,7 @@ class MainWindow(QMainWindow):
         self.receipt_intake_screen.customer_order_ready.connect(self._on_customer_order_ready)
         self.payment_screen.payment_confirmed.connect(self._on_payment_confirmed)
         self.payment_screen.draft_saved.connect(self._on_draft_saved)
+        self.fmnp_screen.entry_saved.connect(self._trigger_sync)
 
         # Select first screen
         first_btn = self.nav_group.button(0)
@@ -294,6 +295,15 @@ class MainWindow(QMainWindow):
         self._sync_thread = None
         self._sync_worker = None
 
+        # Sync cooldown — prevents rapid-fire auto-syncs that hit API rate limits
+        self._sync_cooldown = QTimer(self)
+        self._sync_cooldown.setSingleShot(True)
+        self._sync_cooldown.setInterval(60_000)  # 60 seconds
+        self._sync_deferred = QTimer(self)
+        self._sync_deferred.setSingleShot(True)
+        self._sync_deferred.setInterval(60_000)  # fire when cooldown would expire
+        self._sync_deferred.timeout.connect(self._trigger_sync)
+
         # Auto-update check thread tracking
         self._update_check_thread = None
         self._update_check_worker = None
@@ -301,6 +311,7 @@ class MainWindow(QMainWindow):
         # If a market day is already open at startup (e.g. after crash), start timers
         QTimer.singleShot(1000, self._update_backup_timer)
         QTimer.singleShot(1500, self._update_sync_visibility)
+        QTimer.singleShot(2000, self._update_sync_timer)
 
         # Auto-check for updates 5 seconds after launch
         QTimer.singleShot(5000, self._auto_check_for_updates)
@@ -349,7 +360,8 @@ class MainWindow(QMainWindow):
     def _set_sync_indicator(self, state: str, detail: str = ""):
         """Update the online/offline indicator.
 
-        *state*: ``"online"``, ``"offline"``, ``"syncing"``, or ``"error"``.
+        *state*: ``"online"``, ``"offline"``, ``"syncing"``, ``"warning"``,
+        or ``"error"``.
         *detail*: optional extra text (e.g. timestamp or error summary).
         """
         if state == "online":
@@ -358,6 +370,9 @@ class MainWindow(QMainWindow):
         elif state == "syncing":
             color = "#F5A623"  # amber
             label = "Syncing…"
+        elif state == "warning":
+            color = "#F5A623"  # amber
+            label = "Attention"
         elif state == "error":
             color = "#d32f2f"
             label = "Sync Error"
@@ -415,10 +430,22 @@ class MainWindow(QMainWindow):
         """Periodic sync while market day is open."""
         self._trigger_sync()
 
-    def _trigger_sync(self):
-        """Execute a background sync. Never blocks the UI."""
+    def _trigger_sync(self, force=False):
+        """Execute a background sync. Never blocks the UI.
+
+        When *force* is False (auto-triggers) a 60-second cooldown
+        prevents rapid-fire calls that exhaust the Sheets API quota.
+        The manual sync button passes *force=True* to bypass this.
+        """
         if self._sync_thread and self._sync_thread.isRunning():
             logger.info("Sync already in progress — skipping")
+            return
+
+        if not force and self._sync_cooldown.isActive():
+            # A sync completed recently — defer until cooldown expires
+            if not self._sync_deferred.isActive():
+                logger.info("Sync cooldown active — deferring auto-sync")
+                self._sync_deferred.start()
             return
 
         try:
@@ -442,6 +469,7 @@ class MainWindow(QMainWindow):
             self._sync_thread.started.connect(self._sync_worker.run)
             self._sync_worker.finished.connect(self._on_sync_finished)
             self._sync_worker.error.connect(self._on_sync_error)
+            self._sync_worker.progress.connect(self._on_sync_progress)
             self._sync_worker.finished.connect(self._sync_thread.quit)
             self._sync_worker.error.connect(self._sync_thread.quit)
 
@@ -455,29 +483,65 @@ class MainWindow(QMainWindow):
         except Exception:
             logger.exception("Failed to trigger sync")
 
+    def _on_sync_progress(self, message):
+        """Show sync progress in the status indicator."""
+        self._set_sync_indicator("syncing", message)
+        logger.info("Sync progress: %s", message)
+
     def _on_sync_finished(self, results):
         """Handle sync completion."""
         self._sync_btn.setEnabled(True)
-        self._sync_btn.setText("\U0001F4E4  Sync to Sheets")
+        self._sync_btn.setText("☁️  Sync to Cloud")
         failed = [name for name, r in results.items() if not r.success]
         total = sum(r.rows_synced for r in results.values() if r.success)
+
+        # Build tooltip with photo upload details
+        tooltip_parts = []
+        photo_stats = getattr(self._sync_worker, 'photo_stats', None) if self._sync_worker else None
+        if photo_stats:
+            if photo_stats.get('error'):
+                tooltip_parts.append(f"Photo upload error: {photo_stats['error']}")
+            elif photo_stats.get('uploaded', 0) > 0:
+                tooltip_parts.append(
+                    f"Photos uploaded: {photo_stats['uploaded']}"
+                    f" (FMNP: {photo_stats.get('fmnp_uploaded', 0)},"
+                    f" Payment: {photo_stats.get('payment_uploaded', 0)})")
+            elif photo_stats.get('failed', 0) > 0:
+                tooltip_parts.append(
+                    f"Photo uploads failed: {photo_stats['failed']}")
+            else:
+                tooltip_parts.append("No pending photos")
+        tooltip_parts.append(f"Sheets: {total} rows synced")
+        if failed:
+            tooltip_parts.append(f"Sheet errors: {', '.join(failed)}")
+
+        has_photo_issues = photo_stats and (
+            photo_stats.get('failed', 0) > 0 or photo_stats.get('error'))
+
         if failed:
             self._set_sync_indicator(
                 "error", f"{len(failed)} tab(s) failed")
+        elif has_photo_issues:
+            detail = (photo_stats.get('error')
+                      or f"{photo_stats['failed']} photo(s) failed")
+            self._set_sync_indicator("warning", detail)
         else:
             from fam.utils.app_settings import get_last_sync_at
             last = get_last_sync_at() or ''
             short = last[11:16] if len(last) > 16 else 'now'
             self._set_sync_indicator("online", f"Last sync: {short}")
-        logger.info("Sync finished: %d tabs, %d failed",
-                    len(results), len(failed))
+        self._sync_indicator.setToolTip('\n'.join(tooltip_parts))
+        self._sync_cooldown.start()  # prevent rapid-fire auto-syncs
+        logger.info("Sync finished: %d tabs, %d failed, photos=%s",
+                    len(results), len(failed), photo_stats)
 
     def _on_sync_error(self, error_msg):
         """Handle sync failure."""
         self._sync_btn.setEnabled(True)
-        self._sync_btn.setText("\U0001F4E4  Sync to Sheets")
+        self._sync_btn.setText("☁️  Sync to Cloud")
         self._set_sync_indicator("error", "Sync failed")
         self._sync_indicator.setToolTip(error_msg)
+        self._sync_cooldown.start()  # prevent rapid-fire retries
         logger.error("Sync failed: %s", error_msg)
 
     # ------------------------------------------------------------------
@@ -715,6 +779,48 @@ class MainWindow(QMainWindow):
             lambda: QDesktopServices.openUrl(QUrl(_repo_url))
         )
         layout.addWidget(repo_btn, alignment=Qt.AlignCenter)
+
+        # Cloud links row
+        from fam.utils.app_settings import get_setting, get_sync_spreadsheet_id
+        _link_btn_style = f"""
+            QPushButton {{
+                padding: 8px 16px; font-size: 12px; min-height: 0px;
+                border: 1px solid {LIGHT_GRAY}; border-radius: 6px;
+                background-color: {WHITE}; color: {ACCENT_GREEN};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #F0EFEB;
+                border-color: {ACCENT_GREEN};
+            }}
+        """
+
+        cloud_row = QHBoxLayout()
+        cloud_row.setSpacing(8)
+
+        drive_btn = QPushButton("Open Google Drive")
+        drive_btn.setCursor(Qt.PointingHandCursor)
+        drive_btn.setStyleSheet(_link_btn_style)
+        _folder_id = get_setting('drive_photos_folder_id')
+        _drive_url = (f"https://drive.google.com/drive/folders/{_folder_id}"
+                      if _folder_id else "https://drive.google.com")
+        drive_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(_drive_url))
+        )
+        cloud_row.addWidget(drive_btn)
+
+        sheets_btn = QPushButton("Open Google Sheets")
+        sheets_btn.setCursor(Qt.PointingHandCursor)
+        sheets_btn.setStyleSheet(_link_btn_style)
+        _sheet_id = get_sync_spreadsheet_id()
+        _sheets_url = (f"https://docs.google.com/spreadsheets/d/{_sheet_id}/edit"
+                       if _sheet_id else "https://sheets.google.com")
+        sheets_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(_sheets_url))
+        )
+        cloud_row.addWidget(sheets_btn)
+
+        layout.addLayout(cloud_row)
 
         # Close button
         close_btn = QDialogButtonBox(QDialogButtonBox.Close)

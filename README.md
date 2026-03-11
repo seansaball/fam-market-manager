@@ -12,7 +12,11 @@ A desktop application for managing Food Assistance Match (FAM) market day transa
 - **Receipt Printing** — Print customer receipts after payment confirmation
 - **Reports & Charts** — Revenue breakdowns, vendor summaries, and payment method analytics
 - **Admin Adjustments** — Edit, adjust, or void transactions with full audit logging
-- **FMNP Check Tracking** — Record and manage Farmers Market Nutrition Program entries
+- **FMNP Check Tracking** — Record and manage Farmers Market Nutrition Program entries with multi-photo support
+- **Photo Receipt Capture** — Attach check/receipt photos to FMNP entries and payment transactions with denominated photo slots
+- **3-Layer Photo Deduplication** — SHA-256 content hashing prevents duplicate photo attachments within entries (hard block), across transactions (warning), and during Drive upload (silent reuse)
+- **Google Drive Photo Sync** — Uploaded check photos sync to organized Google Drive folders alongside spreadsheet data
+- **Agent Tracker** — Per-device sync reporting with app version, market code, and last-sync metadata in Google Sheets
 - **Settings Import/Export** — Share market configurations across devices via `.fam` files
 - **Multi-Market Identity** — Auto-derived market codes and device IDs in transaction IDs, exports, and filenames
 - **Automatic Backups** — Periodic database backups with 20-file retention, plus human-readable ledger backup
@@ -68,7 +72,7 @@ python run.py
 python -m pytest tests/ -v
 ```
 
-618 tests across 13 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, settings import/export, cloud sync, and auto-update.
+1036 tests across 18 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, settings import/export, cloud sync, auto-update, charge conversion, denomination validation, photo storage, multi-photo workflows, and photo deduplication.
 
 ## Building the Executable
 
@@ -92,6 +96,7 @@ Output: `dist\FAM Manager\FAM Manager.exe`
 
 | Version | Summary |
 |---------|---------|
+| v1.8.0 | Photo receipts, multi-photo FMNP, Google Drive photo sync, 3-layer SHA-256 dedup, charge-based payment input, agent tracker, denomination validation, 1036 tests |
 | v1.7.0 | Google Sheets cloud sync, auto-update from GitHub Releases, 618 tests |
 | v1.6.1 | Tutorial auto-configure, market code/device ID tracking, receipt printing, settings import/export, database backups, ledger backup, data directory migration |
 | v1.5.1 | First-run tutorial, single-instance prevention, PyInstaller fixes |

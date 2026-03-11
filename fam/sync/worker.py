@@ -18,11 +18,60 @@ class SyncWorker(QObject):
         super().__init__()
         self._manager = sync_manager
         self._data = report_data
+        self.photo_stats = None  # Set after photo upload step
 
     def run(self):
         """Execute the sync.  Called from the background QThread."""
         try:
-            self.progress.emit("Syncing to Google Sheets...")
+            # Step 1: Upload pending photos to Google Drive
+            # (so Drive URLs are available for the sheet sync)
+            try:
+                from fam.sync.drive import upload_pending_photos
+                self.progress.emit("Uploading photos to Google Drive...")
+                stats = upload_pending_photos()
+                self.photo_stats = stats
+
+                total_uploaded = stats.get('uploaded', 0)
+                total_failed = stats.get('failed', 0)
+
+                # Check for folder access error first
+                if stats.get('error'):
+                    self.progress.emit(
+                        f"Photo error: {stats['error']}")
+                elif total_uploaded > 0:
+                    # Build descriptive message
+                    parts = []
+                    if stats.get('fmnp_uploaded'):
+                        parts.append(f"{stats['fmnp_uploaded']} FMNP")
+                    if stats.get('payment_uploaded'):
+                        parts.append(f"{stats['payment_uploaded']} payment")
+                    detail = " + ".join(parts) if parts else str(total_uploaded)
+                    msg = f"Uploaded {detail} photo(s) to Drive"
+                    if total_failed:
+                        msg += f" ({total_failed} failed)"
+                    self.progress.emit(msg)
+
+                    # Re-collect sync data so fresh Drive URLs appear in the sheet
+                    from fam.sync.data_collector import collect_sync_data
+                    fresh_data = collect_sync_data()
+                    if fresh_data:
+                        self._data = fresh_data
+                    logger.info("Uploaded %d photo(s), re-collected sync data",
+                                total_uploaded)
+                elif total_failed > 0:
+                    self.progress.emit(
+                        f"Photo upload: {total_failed} failed — syncing sheets...")
+                else:
+                    self.progress.emit("No new photos to upload")
+            except Exception as exc:
+                logger.warning("Photo upload step failed — continuing with sheet sync",
+                               exc_info=True)
+                self.progress.emit(f"Photo upload error: {exc} — syncing sheets...")
+                self.photo_stats = {'uploaded': 0, 'failed': 0,
+                                    'error': str(exc)}
+
+            # Step 2: Sync data to Google Sheets
+            self.progress.emit("Syncing data to Google Sheets...")
             results = self._manager.sync_all(self._data)
             self.finished.emit(results)
         except Exception as e:

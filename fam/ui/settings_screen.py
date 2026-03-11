@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
     QCheckBox, QMessageBox, QDialog, QFileDialog, QScrollArea,
-    QFormLayout, QDialogButtonBox, QSizePolicy, QProgressBar
+    QFormLayout, QDialogButtonBox, QSizePolicy, QProgressBar, QComboBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
@@ -135,10 +135,80 @@ class EditPaymentMethodDialog(QDialog):
         self.match_spin.setValue(method['match_percent'])
         layout.addRow("Match %:", self.match_spin)
 
+        # Denomination: checkbox + $ value input
+        denom_row = QHBoxLayout()
+        self.denom_check = QCheckBox("Denomination")
+        self.denom_check.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: 13px; padding: 4px; background-color: transparent;
+            }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                background-color: {WHITE};
+                border: 2px solid #AAAAAA;
+                border-radius: 3px;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {ACCENT_GREEN};
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        self.denom_check.toggled.connect(self._toggle_denom)
+        denom_row.addWidget(self.denom_check)
+        self.denom_spin = NoScrollDoubleSpinBox()
+        self.denom_spin.setRange(1, 999)
+        self.denom_spin.setDecimals(2)
+        self.denom_spin.setPrefix("$ ")
+        self.denom_spin.setValue(25.0)
+        self.denom_spin.setEnabled(False)
+        denom_row.addWidget(self.denom_spin)
+        layout.addRow("", denom_row)
+
+        # Initialize from existing data
+        existing_denom = method.get('denomination')
+        if existing_denom and existing_denom > 0:
+            self.denom_check.setChecked(True)
+            self.denom_spin.setValue(existing_denom)
+        else:
+            self.denom_check.setChecked(False)
+
+        # Photo Receipt requirement — hidden by default, shown via show_photo_required()
+        self._photo_required_label = QLabel("Photo Receipt:")
+        self.photo_required_combo = QComboBox()
+        self.photo_required_combo.addItems(["Off", "Optional", "Mandatory"])
+        self._photo_required_label.setVisible(False)
+        self.photo_required_combo.setVisible(False)
+        layout.addRow(self._photo_required_label, self.photo_required_combo)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _toggle_denom(self, checked):
+        self.denom_spin.setEnabled(checked)
+
+    def get_denomination(self):
+        """Return denomination value if active, else None."""
+        if self.denom_check.isChecked():
+            return self.denom_spin.value()
+        return None
+
+    def show_photo_required(self):
+        """Show the Photo Receipt dropdown and set its value from the method data."""
+        self._photo_required_shown = True
+        self._photo_required_label.setVisible(True)
+        self.photo_required_combo.setVisible(True)
+        current = self.method.get('photo_required') or 'Off'
+        idx = self.photo_required_combo.findText(current)
+        if idx >= 0:
+            self.photo_required_combo.setCurrentIndex(idx)
+
+    def get_photo_required(self):
+        """Return the selected photo requirement, or 'Off' if not shown."""
+        if not getattr(self, '_photo_required_shown', False):
+            return 'Off'
+        return self.photo_required_combo.currentText()
 
 
 class MatchLimitDialog(QDialog):
@@ -798,6 +868,34 @@ class SettingsScreen(QWidget):
         self.pm_match_spin.setDecimals(1)
         self.pm_match_spin.setSuffix("%")
         fl.addWidget(self.pm_match_spin)
+        self.pm_denom_check = QCheckBox("Denom.")
+        self.pm_denom_check.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.pm_denom_check.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: 13px; padding: 4px; background-color: transparent;
+            }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                background-color: {WHITE};
+                border: 2px solid #AAAAAA;
+                border-radius: 3px;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {ACCENT_GREEN};
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        self.pm_denom_check.toggled.connect(self._toggle_add_denom)
+        fl.addWidget(self.pm_denom_check)
+        self.pm_denom_spin = NoScrollDoubleSpinBox()
+        self.pm_denom_spin.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.pm_denom_spin.setStyleSheet(_FORM_INPUT_STYLE)
+        self.pm_denom_spin.setRange(1, 999)
+        self.pm_denom_spin.setDecimals(2)
+        self.pm_denom_spin.setPrefix("$ ")
+        self.pm_denom_spin.setValue(25.0)
+        self.pm_denom_spin.setEnabled(False)
+        fl.addWidget(self.pm_denom_spin)
         add_btn = QPushButton("Add Payment Method")
         add_btn.setObjectName("primary_btn")
         add_btn.setFixedHeight(_FORM_ROW_HEIGHT)
@@ -807,11 +905,11 @@ class SettingsScreen(QWidget):
         layout.addWidget(form)
 
         self.pm_table = QTableWidget()
-        self.pm_table.setColumnCount(5)
+        self.pm_table.setColumnCount(6)
         self.pm_table.setHorizontalHeaderLabels(
-            ["ID", "Name", "Match %", "Active", "Actions"]
+            ["ID", "Name", "Match %", "Denom.", "Active", "Actions"]
         )
-        configure_table(self.pm_table, actions_col=4, actions_width=200)
+        configure_table(self.pm_table, actions_col=5, actions_width=200)
         layout.addWidget(self.pm_table)
 
         return tab
@@ -1005,28 +1103,39 @@ class SettingsScreen(QWidget):
         creds_row.addStretch()
         sync_fl.addLayout(creds_row)
 
-        # ─ Spreadsheet ID row ─
+        # ─ Spreadsheet URL row ─
         sheet_row = QHBoxLayout()
-        sheet_lbl = make_field_label("Spreadsheet ID")
+        sheet_lbl = make_field_label("Spreadsheet URL")
         sheet_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
         sheet_row.addWidget(sheet_lbl)
 
         self._sheet_id_input = QLineEdit()
         self._sheet_id_input.setPlaceholderText(
-            "Paste spreadsheet ID from the Google Sheet URL")
-        self._sheet_id_input.setText(get_sync_spreadsheet_id() or '')
+            "Paste the full Google Sheet URL")
+        current_sheet_id = get_sync_spreadsheet_id() or ''
+        if current_sheet_id:
+            self._sheet_id_input.setText(
+                f"https://docs.google.com/spreadsheets/d/{current_sheet_id}/edit")
         self._sheet_id_input.setFixedHeight(_FORM_ROW_HEIGHT)
         self._sheet_id_input.setMinimumWidth(300)
         self._sheet_id_input.setStyleSheet(_FORM_INPUT_STYLE)
         sheet_row.addWidget(self._sheet_id_input)
 
+        self._view_sheet_btn = QPushButton("Open Sheet")
+        self._view_sheet_btn.setObjectName("secondary_btn")
+        self._view_sheet_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._view_sheet_btn.setStyleSheet(_FORM_BTN_STYLE)
+        self._view_sheet_btn.clicked.connect(self._open_sheet)
+        sheet_row.addWidget(self._view_sheet_btn)
+
         sheet_row.addStretch()
         sync_fl.addLayout(sheet_row)
 
         sheet_hint = QLabel(
-            "Found in the Google Sheet URL: "
-            "docs.google.com/spreadsheets/d/<b>THIS_PART</b>/edit"
+            "Paste the full Google Sheet URL.<br>"
+            "Example: <b>https://docs.google.com/spreadsheets/d/abc123.../edit</b>"
         )
+        sheet_hint.setWordWrap(True)
         sheet_hint.setStyleSheet(
             f"font-size: 11px; color: {SUBTITLE_GRAY}; "
             "background: transparent; padding: 0 0 0 4px;"
@@ -1049,6 +1158,14 @@ class SettingsScreen(QWidget):
         )
         self._sync_conn_status.setVisible(False)
         conn_row.addWidget(self._sync_conn_status)
+
+        self._drive_conn_status = QLabel("")
+        self._drive_conn_status.setStyleSheet(
+            f"font-weight: bold; background: transparent; "
+            f"padding: 0 8px;"
+        )
+        self._drive_conn_status.setVisible(False)
+        conn_row.addWidget(self._drive_conn_status)
 
         conn_row.addStretch()
         sync_fl.addLayout(conn_row)
@@ -1082,6 +1199,54 @@ class SettingsScreen(QWidget):
             get_setting('sync_periodic') == '1')
         self._sync_periodic_cb.setStyleSheet(_sync_cb_style)
         sync_fl.addWidget(self._sync_periodic_cb)
+
+        # ─ Photos folder row ─
+        photos_sep = QLabel("Payment Photos Sync")
+        photos_sep.setStyleSheet(
+            f"font-size: 13px; font-weight: bold; color: {PRIMARY_GREEN}; "
+            "background: transparent; padding: 8px 0 2px 0;"
+        )
+        sync_fl.addWidget(photos_sep)
+
+        folder_row = QHBoxLayout()
+        folder_lbl = make_field_label("Drive Folder")
+        folder_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        folder_row.addWidget(folder_lbl)
+
+        self._photos_folder_input = QLineEdit()
+        self._photos_folder_input.setPlaceholderText(
+            "Paste Google Drive folder URL or folder ID")
+        # Show current folder ID or URL for easy identification
+        current_folder_id = get_setting('drive_photos_folder_id') or ''
+        if current_folder_id:
+            self._photos_folder_input.setText(
+                f"https://drive.google.com/drive/folders/{current_folder_id}")
+        self._photos_folder_input.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._photos_folder_input.setMinimumWidth(300)
+        self._photos_folder_input.setStyleSheet(_FORM_INPUT_STYLE)
+        folder_row.addWidget(self._photos_folder_input)
+
+        self._view_photos_btn = QPushButton("Open Folder")
+        self._view_photos_btn.setObjectName("secondary_btn")
+        self._view_photos_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._view_photos_btn.setStyleSheet(_FORM_BTN_STYLE)
+        self._view_photos_btn.clicked.connect(self._open_photos_folder)
+        folder_row.addWidget(self._view_photos_btn)
+
+        folder_row.addStretch()
+        sync_fl.addLayout(folder_row)
+
+        folder_hint = QLabel(
+            "Use a <b>Shared Drive</b> (not a regular folder). "
+            "Paste the folder URL here.<br>"
+            "Example: <b>https://drive.google.com/drive/folders/abc123...</b>"
+        )
+        folder_hint.setWordWrap(True)
+        folder_hint.setStyleSheet(
+            f"font-size: 11px; color: {SUBTITLE_GRAY}; "
+            "background: transparent; padding: 0 0 0 4px;"
+        )
+        sync_fl.addWidget(folder_hint)
 
         # ─ Save Sync Settings button ─
         save_row = QHBoxLayout()
@@ -1179,56 +1344,95 @@ class SettingsScreen(QWidget):
         logger.info("Google credentials removed")
 
     def _test_sync_connection(self):
-        """Test the Google Sheets connection."""
-        # Save spreadsheet ID first
+        """Test both Google Sheets and Google Drive connections."""
+        # Save spreadsheet ID first (extract from URL if needed)
         from fam.utils.app_settings import set_sync_spreadsheet_id
-        sheet_id = self._sheet_id_input.text().strip()
-        if sheet_id:
-            set_sync_spreadsheet_id(sheet_id)
+        raw_sheet = self._sheet_id_input.text().strip()
+        if raw_sheet:
+            sheet_id = self._extract_spreadsheet_id(raw_sheet)
+            if sheet_id:
+                set_sync_spreadsheet_id(sheet_id)
 
+        ok_style = (f"color: {ACCENT_GREEN}; font-weight: bold; "
+                     "background: transparent; padding: 0 8px;")
+        fail_style = (f"color: {ERROR_COLOR}; font-weight: bold; "
+                       "background: transparent; padding: 0 8px;")
+
+        # ── Test Google Sheets ──
         try:
             from fam.sync.gsheets import GoogleSheetsBackend
             backend = GoogleSheetsBackend()
             result = backend.validate_connection()
             if result.success:
-                self._sync_conn_status.setText("Connected")
-                self._sync_conn_status.setStyleSheet(
-                    f"color: {ACCENT_GREEN}; font-weight: bold; "
-                    "background: transparent; padding: 0 8px;"
-                )
+                self._sync_conn_status.setText("\u2705 Sheets: Connected")
+                self._sync_conn_status.setStyleSheet(ok_style)
             else:
-                self._sync_conn_status.setText(f"Failed: {result.error}")
-                self._sync_conn_status.setStyleSheet(
-                    f"color: {ERROR_COLOR}; font-weight: bold; "
-                    "background: transparent; padding: 0 8px;"
-                )
+                self._sync_conn_status.setText(f"\u274c Sheets: {result.error}")
+                self._sync_conn_status.setStyleSheet(fail_style)
         except ImportError:
-            self._sync_conn_status.setText(
-                "Failed: gspread not installed")
-            self._sync_conn_status.setStyleSheet(
-                f"color: {ERROR_COLOR}; font-weight: bold; "
-                "background: transparent; padding: 0 8px;"
-            )
+            self._sync_conn_status.setText("\u274c Sheets: gspread not installed")
+            self._sync_conn_status.setStyleSheet(fail_style)
         except Exception as e:
-            self._sync_conn_status.setText(f"Failed: {e}")
-            self._sync_conn_status.setStyleSheet(
-                f"color: {ERROR_COLOR}; font-weight: bold; "
-                "background: transparent; padding: 0 8px;"
-            )
+            self._sync_conn_status.setText(f"\u274c Sheets: {e}")
+            self._sync_conn_status.setStyleSheet(fail_style)
         self._sync_conn_status.setVisible(True)
+
+        # ── Test Google Drive ──
+        try:
+            from fam.sync.drive import validate_drive_connection
+            drive_ok, drive_msg = validate_drive_connection()
+            if drive_ok:
+                self._drive_conn_status.setText(f"\u2705 {drive_msg}")
+                self._drive_conn_status.setStyleSheet(ok_style)
+            else:
+                self._drive_conn_status.setText(f"\u274c Drive: {drive_msg}")
+                self._drive_conn_status.setStyleSheet(fail_style)
+        except Exception as e:
+            self._drive_conn_status.setText(f"\u274c Drive: {e}")
+            self._drive_conn_status.setStyleSheet(fail_style)
+        self._drive_conn_status.setVisible(True)
 
     def _save_sync_settings(self):
         """Persist sync configuration to app_settings."""
-        from fam.utils.app_settings import set_setting, set_sync_spreadsheet_id
+        from fam.utils.app_settings import set_setting, set_sync_spreadsheet_id, get_setting
 
-        sheet_id = self._sheet_id_input.text().strip()
-        if sheet_id:
-            set_sync_spreadsheet_id(sheet_id)
+        raw_sheet = self._sheet_id_input.text().strip()
+        if raw_sheet:
+            sheet_id = self._extract_spreadsheet_id(raw_sheet)
+            if sheet_id:
+                set_sync_spreadsheet_id(sheet_id)
+                self._sheet_id_input.setText(
+                    f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit")
+            else:
+                logger.warning("Could not extract spreadsheet ID from: %s",
+                               raw_sheet)
+        else:
+            set_sync_spreadsheet_id('')
 
         set_setting('sync_on_close',
                      '1' if self._sync_on_close_cb.isChecked() else '0')
         set_setting('sync_periodic',
                      '1' if self._sync_periodic_cb.isChecked() else '0')
+
+        # Photos folder — extract folder ID from URL or raw ID
+        raw_folder = self._photos_folder_input.text().strip()
+        if raw_folder:
+            folder_id = self._extract_drive_folder_id(raw_folder)
+            if folder_id:
+                old_id = get_setting('drive_photos_folder_id') or ''
+                if folder_id != old_id:
+                    set_setting('drive_photos_folder_id', folder_id)
+                    logger.info("Photos folder ID updated: %s", folder_id)
+                # Normalize the display to full URL
+                self._photos_folder_input.setText(
+                    f"https://drive.google.com/drive/folders/{folder_id}")
+            else:
+                logger.warning("Could not extract folder ID from: %s",
+                               raw_folder)
+        else:
+            # Cleared — remove folder ID
+            set_setting('drive_photos_folder_id', '')
+            logger.info("Photos folder ID cleared")
 
         self._sync_save_status.setText("Sync settings saved")
         self._sync_save_status.setVisible(True)
@@ -1240,6 +1444,85 @@ class SettingsScreen(QWidget):
         main = self.window()
         if hasattr(main, '_update_sync_visibility'):
             main._update_sync_visibility()
+        # Start/stop the periodic sync timer based on the new setting
+        if hasattr(main, '_update_sync_timer'):
+            main._update_sync_timer()
+
+    @staticmethod
+    def _extract_drive_folder_id(raw: str) -> str:
+        """Extract a Google Drive folder ID from a URL or raw ID string.
+
+        Accepts:
+          - https://drive.google.com/drive/folders/FOLDER_ID
+          - https://drive.google.com/drive/folders/FOLDER_ID?usp=sharing
+          - FOLDER_ID  (raw alphanumeric + hyphens + underscores)
+
+        Returns the folder ID or empty string if not parseable.
+        """
+        import re
+        raw = raw.strip()
+        # Try to extract from URL pattern
+        m = re.search(r'/folders/([A-Za-z0-9_-]+)', raw)
+        if m:
+            return m.group(1)
+        # Accept raw folder ID (alphanumeric, hyphens, underscores, 10+ chars)
+        if re.fullmatch(r'[A-Za-z0-9_-]{10,}', raw):
+            return raw
+        return ''
+
+    @staticmethod
+    def _extract_spreadsheet_id(raw: str) -> str:
+        """Extract a Google Sheets spreadsheet ID from a URL or raw ID string.
+
+        Accepts:
+          - https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit
+          - https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit#gid=0
+          - SPREADSHEET_ID  (raw alphanumeric + hyphens + underscores)
+
+        Returns the spreadsheet ID or empty string if not parseable.
+        """
+        import re
+        raw = raw.strip()
+        m = re.search(r'/spreadsheets/d/([A-Za-z0-9_-]+)', raw)
+        if m:
+            return m.group(1)
+        if re.fullmatch(r'[A-Za-z0-9_-]{10,}', raw):
+            return raw
+        return ''
+
+    def _open_sheet(self):
+        """Open the Google Sheet in the browser."""
+        from fam.utils.app_settings import get_sync_spreadsheet_id
+        sheet_id = get_sync_spreadsheet_id()
+        if sheet_id:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+            QDesktopServices.openUrl(QUrl(url))
+        else:
+            QMessageBox.information(
+                self, "Google Sheet",
+                "No spreadsheet configured. Create a Google Sheet, "
+                "share it with your service account, then paste the "
+                "sheet URL above and save."
+            )
+
+    def _open_photos_folder(self):
+        """Open the Google Drive photos folder in the browser."""
+        from fam.utils.app_settings import get_setting
+        folder_id = get_setting('drive_photos_folder_id')
+        if folder_id:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            url = f"https://drive.google.com/drive/folders/{folder_id}"
+            QDesktopServices.openUrl(QUrl(url))
+        else:
+            QMessageBox.information(
+                self, "Photos Folder",
+                "No folder configured. Create a Shared Drive in Google Drive, "
+                "add your service account as Content Manager, create a folder "
+                "inside it, then paste the folder URL above and save."
+            )
 
     # ── Updates Tab ─────────────────────────────────────────────
 
@@ -2008,9 +2291,13 @@ class SettingsScreen(QWidget):
             self.pm_table.setItem(i, 1, make_item(m['name']))
             self.pm_table.setItem(i, 2, make_item(f"{m['match_percent']}%", m['match_percent']))
 
+            denom = m.get('denomination')
+            denom_text = f"${denom:.2f}" if denom else "Any"
+            self.pm_table.setItem(i, 3, make_item(denom_text, denom or 0))
+
             active_item = make_item("Yes" if m['is_active'] else "No")
             active_item.setForeground(QBrush(QColor(ACCENT_GREEN if m['is_active'] else ERROR_COLOR)))
-            self.pm_table.setItem(i, 3, active_item)
+            self.pm_table.setItem(i, 4, active_item)
 
             action_widget = QWidget()
             al = QHBoxLayout(action_widget)
@@ -2034,13 +2321,18 @@ class SettingsScreen(QWidget):
             down_btn.clicked.connect(lambda checked, mid=mid, so=sort_order: self._move_pm(mid, so, 1))
             al.addWidget(down_btn)
 
+            is_fmnp = (m['name'] == 'FMNP')
             toggle_btn = make_action_btn("Deactivate" if is_active else "Activate", 70)
-            toggle_btn.clicked.connect(
-                lambda checked, mid=mid, active=is_active: self._toggle_pm(mid, active)
-            )
+            if is_fmnp:
+                toggle_btn.setEnabled(False)
+                toggle_btn.setToolTip("FMNP is a system payment method and cannot be deactivated")
+            else:
+                toggle_btn.clicked.connect(
+                    lambda checked, mid=mid, active=is_active: self._toggle_pm(mid, active)
+                )
             al.addWidget(toggle_btn)
 
-            self.pm_table.setCellWidget(i, 4, action_widget)
+            self.pm_table.setCellWidget(i, 5, action_widget)
             self.pm_table.setRowHeight(i, 42)
         self.pm_table.setSortingEnabled(True)
 
@@ -2236,18 +2528,24 @@ class SettingsScreen(QWidget):
 
     # ── Payment Method Actions ───────────────────────────────
 
+    def _toggle_add_denom(self, checked):
+        self.pm_denom_spin.setEnabled(checked)
+
     def _add_payment_method(self):
         name = self.pm_name_input.text().strip()
         match_pct = self.pm_match_spin.value()
+        denom_val = self.pm_denom_spin.value() if self.pm_denom_check.isChecked() else None
         if not name:
             QMessageBox.warning(self, "Error", "Payment method name is required.")
             return
         try:
             methods = get_all_payment_methods()
             max_sort = max((m['sort_order'] for m in methods), default=0)
-            create_payment_method(name, match_pct, max_sort + 1)
+            create_payment_method(name, match_pct, max_sort + 1, denomination=denom_val)
             self.pm_name_input.clear()
             self.pm_match_spin.setValue(0)
+            self.pm_denom_check.setChecked(False)
+            self.pm_denom_spin.setValue(25.0)
             self._load_payment_methods()
         except Exception as e:
             logger.exception("Failed to add payment method '%s'", name)
@@ -2263,13 +2561,24 @@ class SettingsScreen(QWidget):
             return
 
         dialog = EditPaymentMethodDialog(method, self)
+        # FMNP is a system method — protect its name from being changed
+        if method['name'] == 'FMNP':
+            dialog.name_input.setEnabled(False)
+            dialog.name_input.setToolTip("FMNP is a system payment method and cannot be renamed")
+            dialog.show_photo_required()
         if dialog.exec() == QDialog.Accepted:
             new_name = dialog.name_input.text().strip()
             new_match_pct = dialog.match_spin.value()
+            new_denom_val = dialog.get_denomination()
+            if new_denom_val is None:
+                new_denom_val = 0  # 0 tells update_payment_method to clear
             if not new_name:
                 QMessageBox.warning(self, "Error", "Payment method name is required.")
                 return
-            update_payment_method(pm_id, name=new_name, match_percent=new_match_pct)
+            photo_req = dialog.get_photo_required()
+            update_payment_method(pm_id, name=new_name, match_percent=new_match_pct,
+                                  denomination=new_denom_val,
+                                  photo_required=photo_req)
             self._load_payment_methods()
 
     def _move_pm(self, pm_id, current_sort, direction):
@@ -2293,6 +2602,14 @@ class SettingsScreen(QWidget):
         self._load_payment_methods()
 
     def _toggle_pm(self, mid, current_active):
+        from fam.models.payment_method import get_payment_method_by_id
+        method = get_payment_method_by_id(mid)
+        if method and method['name'] == 'FMNP':
+            QMessageBox.warning(
+                self, "Protected Method",
+                "FMNP is a system payment method and cannot be deactivated."
+            )
+            return
         update_payment_method(mid, is_active=not current_active)
         self._load_payment_methods()
 

@@ -1,6 +1,7 @@
 """Sync manager — orchestrates data collection and backend sync."""
 
 import logging
+import platform
 from datetime import datetime
 
 from fam.sync.base import SyncBackend, SyncResult
@@ -15,7 +16,8 @@ class SyncManager:
     """Coordinates data collection and sync to the configured backend."""
 
     # Maps sheet tab names to their composite key columns for upsert.
-    # market_code + device_id are always the first two key columns.
+    # market_code + device_id are always the first two key columns
+    # (except Agent Tracker which is keyed by device_id alone).
     SHEET_KEYS: dict[str, list[str]] = {
         'Vendor Reimbursement': ['market_code', 'device_id', 'Vendor'],
         'FAM Match Report':     ['market_code', 'device_id', 'Payment Method'],
@@ -26,6 +28,8 @@ class SyncManager:
         'Geolocation':          ['market_code', 'device_id', 'Zip Code'],
         'FMNP Entries':         ['market_code', 'device_id', 'Entry ID'],
         'Market Day Summary':   ['market_code', 'device_id', 'Date'],
+        'Error Log':            ['market_code', 'device_id', 'Timestamp', 'Module', 'Message'],
+        'Agent Tracker':        ['device_id'],
     }
 
     def __init__(self, backend: SyncBackend):
@@ -74,7 +78,62 @@ class SyncManager:
         logger.info("Sync complete: %d tabs, %d rows, %d failures",
                     len(results), total_rows, len(failed))
 
+        # Sync agent tracker as the final step — reports this sync's outcome
+        try:
+            tracker_result = self._sync_agent_tracker(results)
+            results['Agent Tracker'] = tracker_result
+        except Exception as e:
+            logger.exception("Agent tracker sync failed")
+            results['Agent Tracker'] = SyncResult(
+                success=False, error=str(e))
+
         return results
+
+    def _sync_agent_tracker(self, data_results: dict[str, SyncResult]
+                             ) -> SyncResult:
+        """Sync a single 'Agent Tracker' row with this device's metadata.
+
+        Called after data tabs finish so the row reflects current sync
+        results.  One row per device_id, updated on every sync.
+        """
+        from fam import __version__
+        from fam.database.connection import get_connection
+
+        mc = get_market_code() or ''
+        did = get_device_id() or ''
+
+        # Resolve human-readable market name
+        conn = get_connection()
+        market_row = conn.execute(
+            "SELECT name FROM markets WHERE is_active = 1 LIMIT 1"
+        ).fetchone()
+        market_name = market_row['name'] if market_row else ''
+
+        # Summarize data sync results
+        success_count = sum(1 for r in data_results.values() if r.success)
+        total_tabs = len(data_results)
+        total_rows = sum(r.rows_synced for r in data_results.values()
+                         if r.success)
+        failed = [n for n, r in data_results.items() if not r.success]
+        status = 'OK' if not failed else 'Error'
+
+        row = {
+            'device_id': did,
+            'market_code': mc,
+            'Market Name': market_name,
+            'App Version': __version__,
+            'Last Sync': datetime.now().isoformat(sep=' ',
+                                                  timespec='seconds'),
+            'Hostname': platform.node(),
+            'OS': platform.platform(),
+            'Status': status,
+            'Sheets Synced': f"{success_count}/{total_tabs}",
+            'Total Rows': total_rows,
+            'Errors': ', '.join(failed) if failed else '',
+        }
+
+        return self._backend.upsert_rows(
+            'Agent Tracker', [row], ['device_id'])
 
     def clear_market_data(self) -> dict[str, SyncResult]:
         """Delete all rows for this market's identity across all tabs."""

@@ -9,7 +9,7 @@ from .connection import get_connection, get_db_path
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 18
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS payment_methods (
     name TEXT NOT NULL UNIQUE,
     match_percent REAL NOT NULL,
     is_active BOOLEAN DEFAULT 1,
-    sort_order INTEGER DEFAULT 0
+    sort_order INTEGER DEFAULT 0,
+    denomination REAL DEFAULT NULL,
+    photo_required TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS market_days (
@@ -86,6 +88,8 @@ CREATE TABLE IF NOT EXISTS payment_line_items (
     method_amount REAL NOT NULL,
     match_amount REAL NOT NULL,
     customer_charged REAL NOT NULL,
+    photo_path TEXT DEFAULT NULL,
+    photo_drive_url TEXT DEFAULT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (transaction_id) REFERENCES transactions(id),
     FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id)
@@ -98,6 +102,8 @@ CREATE TABLE IF NOT EXISTS fmnp_entries (
     amount REAL NOT NULL,
     check_count INTEGER,
     notes TEXT,
+    photo_path TEXT DEFAULT NULL,
+    photo_drive_url TEXT DEFAULT NULL,
     entered_by TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT,
@@ -117,7 +123,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     reason_code TEXT,
     notes TEXT,
     changed_by TEXT NOT NULL,
-    changed_at TEXT DEFAULT CURRENT_TIMESTAMP
+    changed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    app_version TEXT DEFAULT NULL,
+    device_id TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS market_vendors (
@@ -141,6 +149,18 @@ CREATE TABLE IF NOT EXISTS market_payment_methods (
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS photo_hashes (
+    content_hash TEXT PRIMARY KEY,
+    drive_url TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS local_photo_hashes (
+    content_hash TEXT PRIMARY KEY,
+    relative_path TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -413,6 +433,144 @@ def _migrate_v10_to_v11(conn):
     logger.info("Migration v10->v11 complete: fmnp_entries.status column added")
 
 
+def _migrate_v11_to_v12(conn):
+    """Add denomination column to payment_methods for increment constraints."""
+    logger.info("Running migration v11 to v12: payment method denominations")
+    try:
+        conn.execute(
+            "ALTER TABLE payment_methods ADD COLUMN denomination REAL DEFAULT NULL"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    conn.commit()
+    logger.info("Migration v11->v12 complete: denomination column added")
+
+
+def _migrate_v12_to_v13(conn):
+    """Add photo columns to fmnp_entries for check photo attachments."""
+    logger.info("Running migration v12 to v13: FMNP photo columns")
+    try:
+        conn.execute(
+            "ALTER TABLE fmnp_entries ADD COLUMN photo_path TEXT DEFAULT NULL"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        conn.execute(
+            "ALTER TABLE fmnp_entries ADD COLUMN photo_drive_url TEXT DEFAULT NULL"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    conn.commit()
+    logger.info("Migration v12->v13 complete: photo_path + photo_drive_url added")
+
+
+def _migrate_v13_to_v14(conn):
+    """Add photo_required to payment_methods and photo_path to payment_line_items."""
+    logger.info("Running migration v13 to v14: photo receipt requirement")
+    try:
+        conn.execute(
+            "ALTER TABLE payment_methods ADD COLUMN photo_required TEXT DEFAULT NULL"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        conn.execute(
+            "ALTER TABLE payment_line_items ADD COLUMN photo_path TEXT DEFAULT NULL"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    conn.commit()
+    logger.info("Migration v13->v14 complete: photo_required + payment photo_path added")
+
+
+def _migrate_v14_to_v15(conn):
+    """Add photo_drive_url to payment_line_items for Drive upload tracking."""
+    logger.info("Running migration v14 to v15: payment_line_items photo_drive_url")
+    try:
+        conn.execute(
+            "ALTER TABLE payment_line_items ADD COLUMN photo_drive_url TEXT DEFAULT NULL"
+        )
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    conn.commit()
+    logger.info("Migration v14->v15 complete: payment photo_drive_url added")
+
+
+def _migrate_v15_to_v16(conn):
+    """Add app_version and device_id to audit_log for traceability."""
+    logger.info("Running migration v15 to v16: audit_log app_version + device_id")
+    for col in ('app_version', 'device_id'):
+        try:
+            conn.execute(
+                f"ALTER TABLE audit_log ADD COLUMN {col} TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+    conn.commit()
+    logger.info("Migration v15->v16 complete: audit_log traceability columns added")
+
+
+def _migrate_v16_to_v17(conn):
+    """Add photo_hashes table for content-based upload deduplication."""
+    logger.info("Running migration v16 to v17: photo_hashes table")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS photo_hashes (
+            content_hash TEXT PRIMARY KEY,
+            drive_url TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    logger.info("Migration v16->v17 complete: photo_hashes table created")
+
+
+def _migrate_v17_to_v18(conn):
+    """Add local_photo_hashes table for cross-transaction duplicate detection.
+
+    Also backfills hashes for any photos already in the photos directory
+    so that duplicates of older images are caught immediately.
+    """
+    logger.info("Running migration v17 to v18: local_photo_hashes table")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS local_photo_hashes (
+            content_hash TEXT PRIMARY KEY,
+            relative_path TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+
+    # Backfill: hash all existing photos so cross-transaction dedup
+    # covers images stored before this migration.
+    try:
+        from fam.utils.photo_storage import get_photos_dir, compute_file_hash
+        photos_dir = get_photos_dir()
+        if os.path.isdir(photos_dir):
+            count = 0
+            for fname in os.listdir(photos_dir):
+                fpath = os.path.join(photos_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                try:
+                    h = compute_file_hash(fpath)
+                    rel = f"photos/{fname}"
+                    conn.execute(
+                        "INSERT OR IGNORE INTO local_photo_hashes "
+                        "(content_hash, relative_path) VALUES (?, ?)",
+                        (h, rel))
+                    count += 1
+                except Exception:
+                    pass  # skip unreadable files
+            conn.commit()
+            if count:
+                logger.info("Backfilled %d existing photo hashes", count)
+    except Exception:
+        logger.warning("Photo hash backfill skipped", exc_info=True)
+
+    logger.info("Migration v17->v18 complete: local_photo_hashes table created")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -497,6 +655,34 @@ def initialize_database():
     if current_version < 11:
         _migrate_v10_to_v11(conn)
         current_version = 11
+
+    if current_version < 12:
+        _migrate_v11_to_v12(conn)
+        current_version = 12
+
+    if current_version < 13:
+        _migrate_v12_to_v13(conn)
+        current_version = 13
+
+    if current_version < 14:
+        _migrate_v13_to_v14(conn)
+        current_version = 14
+
+    if current_version < 15:
+        _migrate_v14_to_v15(conn)
+        current_version = 15
+
+    if current_version < 16:
+        _migrate_v15_to_v16(conn)
+        current_version = 16
+
+    if current_version < 17:
+        _migrate_v16_to_v17(conn)
+        current_version = 17
+
+    if current_version < 18:
+        _migrate_v17_to_v18(conn)
+        current_version = 18
 
     # Record the final version (avoid duplicate if already at this version)
     existing = conn.execute(

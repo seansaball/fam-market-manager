@@ -22,11 +22,19 @@ def get_payment_method_by_id(pm_id):
     return dict(row) if row else None
 
 
-def create_payment_method(name, match_percent, sort_order=0):
+def get_payment_method_by_name(name):
+    """Look up a payment method by its exact name (case-sensitive)."""
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM payment_methods WHERE name=?", (name,)).fetchone()
+    return dict(row) if row else None
+
+
+def create_payment_method(name, match_percent, sort_order=0, denomination=None):
     conn = get_connection()
     cursor = conn.execute(
-        "INSERT INTO payment_methods (name, match_percent, sort_order) VALUES (?, ?, ?)",
-        (name, match_percent, sort_order)
+        "INSERT INTO payment_methods (name, match_percent, sort_order, denomination)"
+        " VALUES (?, ?, ?, ?)",
+        (name, match_percent, sort_order, denomination)
     )
     conn.commit()
     return cursor.lastrowid
@@ -77,7 +85,8 @@ def unassign_payment_method_from_market(market_id, payment_method_id):
     conn.commit()
 
 
-def update_payment_method(pm_id, name=None, match_percent=None, is_active=None, sort_order=None):
+def update_payment_method(pm_id, name=None, match_percent=None, is_active=None,
+                          sort_order=None, denomination=None, photo_required=None):
     conn = get_connection()
     fields = []
     values = []
@@ -93,6 +102,14 @@ def update_payment_method(pm_id, name=None, match_percent=None, is_active=None, 
     if sort_order is not None:
         fields.append("sort_order=?")
         values.append(sort_order)
+    if denomination is not None:
+        # 0 means "clear denomination" (set to NULL); positive = set value
+        fields.append("denomination=?")
+        values.append(None if denomination == 0 else denomination)
+    if photo_required is not None:
+        # 'Off' means "clear" (set to NULL); 'Optional'/'Mandatory' stored as-is
+        fields.append("photo_required=?")
+        values.append(None if photo_required == 'Off' else photo_required)
     if not fields:
         return
     values.append(pm_id)

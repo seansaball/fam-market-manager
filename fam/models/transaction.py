@@ -226,8 +226,8 @@ def save_payment_line_items(transaction_id, line_items, commit=True):
         conn.execute(
             """INSERT INTO payment_line_items
                (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
-                method_amount, match_amount, customer_charged)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                method_amount, match_amount, customer_charged, photo_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 transaction_id,
                 item['payment_method_id'],
@@ -236,6 +236,7 @@ def save_payment_line_items(transaction_id, line_items, commit=True):
                 item['method_amount'],
                 item['match_amount'],
                 item['customer_charged'],
+                item.get('photo_path'),
             )
         )
     if commit:
@@ -256,3 +257,80 @@ def get_payment_line_items(transaction_id):
         (transaction_id,)
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_pending_payment_photo_uploads():
+    """Return payment line items that have local photo(s) with incomplete Drive uploads.
+
+    An item is "pending" when:
+      - photo_path is set (one or more local photos)
+      - photo_drive_url is NULL/empty, OR has fewer URLs than photo_path
+    """
+    from fam.utils.photo_paths import parse_photo_paths
+
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT pl.id, pl.photo_path, pl.photo_drive_url,
+               pl.method_name_snapshot,
+               t.fam_transaction_id,
+               v.name as vendor_name,
+               md.date as market_day_date,
+               m.name as market_name
+        FROM payment_line_items pl
+        JOIN transactions t ON pl.transaction_id = t.id
+        JOIN vendors v ON t.vendor_id = v.id
+        JOIN market_days md ON t.market_day_id = md.id
+        JOIN markets m ON md.market_id = m.id
+        WHERE pl.photo_path IS NOT NULL
+          AND pl.photo_path != ''
+    """).fetchall()
+
+    pending = []
+    for r in rows:
+        local_paths = parse_photo_paths(r['photo_path'])
+        drive_urls = parse_photo_paths(r['photo_drive_url'])
+        if len(drive_urls) < len(local_paths):
+            pending.append(dict(r))
+    return pending
+
+
+def get_payment_items_with_drive_urls():
+    """Return payment line items that have Drive URLs set (for verification)."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT pl.id, pl.photo_path, pl.photo_drive_url
+        FROM payment_line_items pl
+        JOIN transactions t ON pl.transaction_id = t.id
+        WHERE pl.photo_drive_url IS NOT NULL
+          AND pl.photo_drive_url != ''
+          AND t.status != 'Voided'
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_voided_payment_photos():
+    """Return payment line items for voided transactions that have Drive URLs (for VOID rename)."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT pl.id, pl.photo_drive_url
+        FROM payment_line_items pl
+        JOIN transactions t ON pl.transaction_id = t.id
+        WHERE t.status = 'Voided'
+          AND pl.photo_drive_url IS NOT NULL
+          AND pl.photo_drive_url != ''
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_payment_photo_drive_url(line_item_id, drive_url):
+    """Store the Google Drive URL(s) after successful photo upload.
+
+    *drive_url* can be a single URL string or a JSON-encoded array of URLs
+    (for multi-photo line items).
+    """
+    conn = get_connection()
+    conn.execute(
+        "UPDATE payment_line_items SET photo_drive_url=? WHERE id=?",
+        (drive_url, line_item_id)
+    )
+    conn.commit()

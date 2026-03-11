@@ -5,7 +5,7 @@
 > needs to understand, maintain, or extend the project **without** access to
 > previous conversation history. Keep this file up to date with every commit.
 >
-> **Last updated:** 2026-03-09 — v1.7.0
+> **Last updated:** 2026-03-11 — v1.8.0
 
 ---
 
@@ -28,7 +28,7 @@ dedicated Windows PC.
 | Packaging     | PyInstaller (Windows .exe)          |
 | Cloud Sync    | gspread + google-auth               |
 | Auto-Update   | urllib.request (stdlib)              |
-| Tests         | pytest (618 tests)                  |
+| Tests         | pytest (1036 tests)                 |
 
 ---
 
@@ -37,12 +37,12 @@ dedicated Windows PC.
 ```
 fam-market-manager/
 ├── fam/                          # Application package
-│   ├── __init__.py               # __version__ = "1.7.0"
+│   ├── __init__.py               # __version__ = "1.8.0"
 │   ├── app.py                    # Qt app entry, data dir, exception handler
 │   ├── settings_io.py            # .fam file import/export
 │   ├── database/
 │   │   ├── connection.py         # Thread-local SQLite connection
-│   │   ├── schema.py             # Table DDL + migrations (v1–v11)
+│   │   ├── schema.py             # Table DDL + migrations (v1–v18)
 │   │   ├── seed.py               # Opt-in sample data (via tutorial)
 │   │   └── backup.py             # SQLite backup API + retention
 │   ├── models/
@@ -52,7 +52,8 @@ fam-market-manager/
 │   │   ├── transaction.py        # Receipts + payment line items
 │   │   ├── customer_order.py     # Multi-receipt customer orders
 │   │   ├── fmnp.py               # FMNP check entries
-│   │   └── audit.py              # Append-only audit log
+│   │   ├── audit.py              # Append-only audit log
+│   │   └── photo_hash.py         # SHA-256 hash lookups (Drive + local dedup)
 │   ├── ui/
 │   │   ├── main_window.py        # Sidebar nav + screen stack + backup timer + auto-update check
 │   │   ├── market_day_screen.py  # Screen 0 — Open/close market day
@@ -70,18 +71,21 @@ fam-market-manager/
 │   │       └── summary_card.py   # Summary display cards
 │   ├── sync/
 │   │   ├── base.py               # SyncResult dataclass
-│   │   ├── manager.py            # SyncManager orchestration
+│   │   ├── manager.py            # SyncManager orchestration + agent tracker
 │   │   ├── gsheets.py            # Google Sheets backend via gspread
-│   │   ├── data_collector.py     # Collects report data for sync
+│   │   ├── data_collector.py     # Collects report data + photo URLs for sync
+│   │   ├── drive.py              # Google Drive photo upload (REST API)
 │   │   └── worker.py             # QThread worker for background sync
 │   ├── update/
 │   │   ├── checker.py            # GitHub API, version comparison, download, batch script
 │   │   └── worker.py             # QThread workers for check + download
 │   └── utils/
 │       ├── app_settings.py       # Market code, device ID, sync/update settings, key-value store
-│       ├── calculations.py       # Core financial math
+│       ├── calculations.py       # Core financial math + charge/method_amount conversion
 │       ├── export.py             # CSV export + ledger backup
-│       └── logging_config.py     # Rotating file logger
+│       ├── logging_config.py     # Rotating file logger
+│       ├── photo_storage.py      # Photo copy/resize, SHA-256 hashing, local registry
+│       └── photo_paths.py        # Multi-photo JSON encode/decode
 ├── tests/
 │   ├── test_match_formula.py     # 68 tests — formula validation
 │   ├── test_match_limit.py       # 18 tests — daily cap logic
@@ -91,12 +95,17 @@ fam-market-manager/
 │   ├── test_models.py            # 37 tests — model CRUD operations
 │   ├── test_market_code.py       # 44 tests — market code, device ID
 │   ├── test_backup.py            # 12 tests — backup creation + retention
-│   ├── test_schema.py            # 30 tests — migrations, triggers, indexes
+│   ├── test_schema.py            # 35 tests — migrations, triggers, indexes
 │   ├── test_settings_io.py       # 102 tests — import/export round-trip
-│   ├── test_sync.py              # 90 tests — cloud sync, data collection, Google Sheets
-│   └── test_update.py            # 77 tests — URL parsing, version comparison, update flow
+│   ├── test_sync.py              # 96 tests — cloud sync, data collection, agent tracker
+│   ├── test_update.py            # 77 tests — URL parsing, version comparison, update flow
+│   ├── test_charge_conversion.py # NEW — charge ↔ method_amount conversion
+│   ├── test_auto_distribute.py   # NEW — auto-distribute payment allocation
+│   ├── test_denomination.py      # NEW — denomination constraint validation
+│   ├── test_multi_photo.py       # NEW — multi-photo storage, encoding, drive upload
+│   └── test_cloud_sync_ux.py     # NEW — sync UX, photo dedup (within + cross-txn), hash model
 ├── releases/
-│   └── FAM_Manager_v1.7.0.zip   # Distribution package
+│   └── (zip files on GitHub Releases)
 ├── requirements.txt
 ├── fam_manager.spec              # PyInstaller config
 ├── build.bat                     # Windows build script
@@ -143,6 +152,16 @@ customer_charged = method_amount − match_amount
 | `fam/ui/widgets/payment_row.py`| `get_data()`                     | Data collection for save   |
 | `fam/ui/payment_screen.py`     | `_distribute_and_save_payments()`| Multi-receipt distribution |
 
+### Charge ↔ Method Amount Conversion (v1.8.0)
+
+Payment rows now accept **customer charge** (what the customer pays) instead of total allocation.
+Two conversion functions in `calculations.py` bridge the input to the existing formula:
+
+```
+charge_to_method_amount(charge, match_percent) → charge × (1 + match_percent / 100)
+method_amount_to_charge(method_amount, match_percent) → method_amount / (1 + match_percent / 100)
+```
+
 ### Daily match limit (cap)
 
 Markets can set a per-customer daily FAM match cap (e.g. $100/day).
@@ -151,7 +170,7 @@ When a customer's total match exceeds the cap, all match amounts are
 
 ---
 
-## 4. Database Schema (v11)
+## 4. Database Schema (v18)
 
 ### Tables
 
@@ -161,7 +180,7 @@ When a customer's total match exceeds the cap, all match amounts are
 
 **market_vendors** — junction table (market_id, vendor_id)
 
-**payment_methods** — name, match_percent (0–999), sort_order, is_active
+**payment_methods** — name, match_percent (0–999), sort_order, denomination, photo_required, is_active
 
 **market_payment_methods** — junction table (market_id, payment_method_id)
 
@@ -171,15 +190,19 @@ When a customer's total match exceeds the cap, all match amounts are
 
 **transactions** — fam_transaction_id (FAM-{CODE}-YYYYMMDD-NNNN), market_day_id, vendor_id, receipt_total, status, customer_order_id
 
-**payment_line_items** — transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot, method_amount, match_amount, customer_charged
+**payment_line_items** — transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot, method_amount, match_amount, customer_charged, photo_path, photo_drive_url
 
-**fmnp_entries** — market_day_id, vendor_id, amount, check_count, status (Active/Inactive)
+**fmnp_entries** — market_day_id, vendor_id, amount, check_count, photo_path, photo_drive_url, status (Active/Deleted), entered_by
 
-**audit_log** — table_name, record_id, action, field_name, old_value, new_value, reason_code, notes, changed_by
+**audit_log** — table_name, record_id, action, field_name, old_value, new_value, reason_code, notes, changed_by, app_version, device_id
 
-**app_settings** — key-value store (market_code, device_id, tutorial_shown, large_receipt_threshold, sync_credentials_loaded, sync_spreadsheet_id, last_sync_at, last_sync_error, update_repo_url, update_auto_check, update_last_check, update_last_version, update_dismissed_version)
+**app_settings** — key-value store (market_code, device_id, tutorial_shown, large_receipt_threshold, sync_credentials_loaded, sync_spreadsheet_id, sync_drive_folder_id, last_sync_at, last_sync_error, update_repo_url, update_auto_check, update_last_check, update_last_version, update_dismissed_version)
 
-**schema_version** — version (current: 11), applied_at
+**photo_hashes** — content_hash (PK) → drive_url (Drive upload dedup, persists across sync cycles)
+
+**local_photo_hashes** — content_hash (PK) → relative_path (cross-transaction UI attachment dedup)
+
+**schema_version** — version (current: 18), applied_at
 
 ### Migration History
 
@@ -195,6 +218,13 @@ When a customer's total match exceeds the cap, all match amounts are
 | v8→v9 | Added market_payment_methods junction table |
 | v9→v10 | Added app_settings key-value table |
 | v10→v11 | Added status column to fmnp_entries for soft-delete |
+| v11→v12 | Added denomination column to payment_methods |
+| v12→v13 | Added photo_path + photo_drive_url to fmnp_entries |
+| v13→v14 | Added photo_required to payment_methods, photo_path to payment_line_items |
+| v14→v15 | Added photo_drive_url to payment_line_items |
+| v15→v16 | Added app_version + device_id to audit_log |
+| v16→v17 | Added photo_hashes table (Drive upload content-hash dedup) |
+| v17→v18 | Added local_photo_hashes table (cross-transaction UI dedup) + backfill |
 
 ---
 
@@ -261,6 +291,9 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 
 ### Screen 2 — Payment Processing
 - Summary cards, dynamic payment rows, daily match limit display
+- Charge-based input — operator enters customer charge, system computes match + total
+- Denomination validation for denominated methods (e.g. FMNP $20 increments)
+- Photo receipt attachment per payment method (single or multi-photo for denominated)
 - Confirm payment → generates transaction IDs (FAM-{CODE}-YYYYMMDD-NNNN)
 - Print receipt after confirmation
 - Double-click protection on confirm button
@@ -268,7 +301,9 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 
 ### Screen 3 — FMNP Entry
 - Market day + vendor + amount + check count
-- Edit/delete with soft-delete (status: Active/Inactive)
+- Multi-photo attachment — dynamic check photo slots based on amount ÷ denomination
+- Photo dedup: within-entry (hard block) + cross-entry (warning with override)
+- Edit/delete with soft-delete (status: Active/Deleted)
 
 ### Screen 4 — Admin Adjustments
 - Search/filter transactions, adjust amounts/vendors, void
@@ -291,7 +326,7 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 
 **Run:** `python -m pytest tests/ -v` from project root
 
-**618 total tests across 13 files** — all must pass before committing.
+**1036 total tests across 18 files** — all must pass before committing.
 
 ---
 
@@ -314,7 +349,8 @@ All data stored in `%APPDATA%\FAM Market Manager\` (separate from exe):
 - `fam_data.db` — SQLite database (all app data)
 - `fam_ledger_backup.txt` — human-readable ledger backup
 - `fam_manager.log` — rotating log file
-- `sync_credentials.json` — Google Sheets credentials (if configured)
+- `sync_credentials.json` — Google Sheets/Drive credentials (if configured)
+- `photos/` — locally stored check/receipt photos (resized to ≤1920px)
 - `backups/` — automatic database backups (20 most recent)
 - `_update_backup/` — previous app version (created during auto-update)
 
@@ -327,6 +363,7 @@ Legacy data (v1.5.1 and earlier) auto-migrated from exe directory on first launc
 
 | Version | Date       | Summary |
 |---------|------------|---------|
+| v1.8.0  | 2026-03-11 | Photo receipts, multi-photo FMNP, Google Drive photo sync, 3-layer SHA-256 dedup, charge-based payment input, agent tracker, denomination validation, schema v18, 1036 tests |
 | v1.7.0  | 2026-03-09 | Google Sheets cloud sync, auto-update from GitHub Releases, sync/update packages, 618 tests |
 | v1.6.1  | 2026-03-06 | Tutorial auto-configure, market code/device ID, receipt printing, settings import/export, database backups, ledger backup, data dir migration, global exception handler, 479 tests |
 | v1.5.1  | 2026-03-04 | First-run tutorial, single-instance prevention, PyInstaller fix |
@@ -339,23 +376,36 @@ Legacy data (v1.5.1 and earlier) auto-migrated from exe directory on first launc
 
 ---
 
-## 12. Cloud Sync (Google Sheets)
+## 12. Cloud Sync (Google Sheets + Drive)
 
 ### Architecture
-Optional one-way sync from local SQLite to a shared Google Spreadsheet.
+Optional one-way sync from local SQLite to a shared Google Spreadsheet + Google Drive.
 
 | Module | Purpose |
 |--------|---------|
 | `sync/base.py` | `SyncResult` dataclass |
-| `sync/data_collector.py` | Queries DB for summary, vendor, payment, transaction data |
+| `sync/data_collector.py` | Queries DB for summary, vendor, payment, transaction, FMNP data + photo URLs |
 | `sync/gsheets.py` | Google Sheets backend via `gspread` (service account auth) |
-| `sync/manager.py` | `SyncManager` — orchestrates data collection + backend calls |
+| `sync/drive.py` | Google Drive photo upload via REST API (uses `google-auth` AuthorizedSession) |
+| `sync/manager.py` | `SyncManager` — orchestrates data collection + backend calls + agent tracker |
 | `sync/worker.py` | `SyncWorker(QObject)` — runs sync in background QThread |
 
 ### Credentials
 - Service account JSON stored at `{data_dir}/sync_credentials.json`
 - Spreadsheet ID in `app_settings` (key: `sync_spreadsheet_id`)
+- Drive folder ID in `app_settings` (key: `sync_drive_folder_id`)
 - Credentials loaded flag in `app_settings` (key: `sync_credentials_loaded`)
+
+### Photo Upload (Google Drive)
+- Photos uploaded to a shared Drive folder ("FAM Market Manager Photos")
+- Two-layer upload dedup: rel_path cache (in-memory) + SHA-256 content hash (DB-persisted)
+- Drive URLs written back to `photo_drive_url` columns in FMNP entries and payment line items
+- Photo URLs included in synced spreadsheet data for remote visibility
+
+### Agent Tracker
+- Each sync appends a row to the "Agent Tracker" sheet with device metadata
+- Includes: device_id, market_code, app_version, sync timestamp, sheet counts, sync status
+- Keyed by device_id (upsert behavior) — one row per device
 
 ---
 

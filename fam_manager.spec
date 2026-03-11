@@ -47,7 +47,7 @@ a = Analysis(
         'charset_normalizer',
         'idna',
         'urllib3',
-        # Google Sheets sync
+        # Google Sheets sync + Drive photo upload
         'gspread',
         'gspread.utils',
         'gspread.exceptions',
@@ -55,6 +55,7 @@ a = Analysis(
         'google.auth',
         'google.auth.transport',
         'google.auth.transport.requests',
+        'google.auth.transport._http_client',
         'google.oauth2',
         'google.oauth2.service_account',
         'google.auth.credentials',

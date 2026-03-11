@@ -2,6 +2,7 @@
 
 import logging
 
+from fam import __version__ as _app_version
 from fam.database.connection import get_connection
 
 logger = logging.getLogger('fam.models.audit')
@@ -30,16 +31,18 @@ def log_action(table_name, record_id, action, changed_by,
 
     When *commit* is False the caller is responsible for committing.
     """
+    from fam.utils.app_settings import get_device_id
     conn = get_connection()
     conn.execute(
         """INSERT INTO audit_log
            (table_name, record_id, action, field_name, old_value, new_value,
-            reason_code, notes, changed_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            reason_code, notes, changed_by, app_version, device_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (table_name, record_id, action, field_name,
          str(old_value) if old_value is not None else None,
          str(new_value) if new_value is not None else None,
-         reason_code, notes, changed_by)
+         reason_code, notes, changed_by, _app_version,
+         get_device_id() or '')
     )
     if commit:
         conn.commit()
@@ -87,7 +90,7 @@ def get_transaction_log(market_day_id=None, date_from=None, date_to=None,
     query = """
         SELECT al.id, al.changed_at, al.action, al.table_name, al.record_id,
                al.field_name, al.old_value, al.new_value, al.reason_code,
-               al.notes, al.changed_by,
+               al.notes, al.changed_by, al.app_version, al.device_id,
                t.fam_transaction_id, v.name AS vendor_name,
                m.name AS market_name, md.date AS market_day_date
         FROM audit_log al

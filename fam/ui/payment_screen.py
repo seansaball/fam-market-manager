@@ -115,6 +115,19 @@ class PaymentScreen(QWidget):
         self.match_cap_warning.setVisible(False)
         layout.addWidget(self.match_cap_warning)
 
+        # Denomination overage warning (shown when denominated payments overshoot)
+        self.denom_overage_warning = QLabel("")
+        self.denom_overage_warning.setStyleSheet(f"""
+            font-size: 12px; font-weight: bold; color: {HARVEST_GOLD};
+            background-color: {WARNING_BG};
+            border: 1px solid {WARNING_COLOR};
+            border-radius: 6px;
+            padding: 6px 10px;
+        """)
+        self.denom_overage_warning.setWordWrap(True)
+        self.denom_overage_warning.setVisible(False)
+        layout.addWidget(self.denom_overage_warning)
+
         # ── Vendor summary table ────────────────────────────────────
         self.vendor_lbl = make_section_label("Vendor Breakdown")
         self.vendor_lbl.setVisible(False)
@@ -142,6 +155,14 @@ class PaymentScreen(QWidget):
         self.add_method_btn.setObjectName("secondary_btn")
         self.add_method_btn.clicked.connect(self._add_payment_row)
         payment_header.addStretch()
+
+        self.auto_distribute_btn = QPushButton("⚡ Auto-Distribute")
+        self.auto_distribute_btn.setObjectName("secondary_btn")
+        self.auto_distribute_btn.setToolTip(
+            "Automatically fill the remaining balance into the last payment method"
+        )
+        self.auto_distribute_btn.clicked.connect(self._auto_distribute)
+        payment_header.addWidget(self.auto_distribute_btn)
         payment_header.addWidget(self.add_method_btn)
         layout.addLayout(payment_header)
 
@@ -285,6 +306,7 @@ class PaymentScreen(QWidget):
         self.error_label.setVisible(False)
         self.error_label.setText("")
         self.match_cap_warning.setVisible(False)
+        self.denom_overage_warning.setVisible(False)
 
         order = get_customer_order(order_id)
         if not order:
@@ -453,6 +475,61 @@ class PaymentScreen(QWidget):
         self._refresh_method_choices()
         self._update_summary()
 
+    def _auto_distribute(self):
+        """Auto-fill remaining balance into the last payment row with a selected method."""
+        if not self._order_total or self._order_total <= 0:
+            return
+
+        from fam.utils.calculations import charge_to_method_amount
+
+        # Find the target: the last row with a method selected
+        target_row = None
+        for row in reversed(self._payment_rows):
+            if row.has_method_selected():
+                target_row = row
+                break
+
+        if target_row is None:
+            return
+
+        # Sum total allocation from all rows EXCEPT the target
+        other_total = 0.0
+        for row in self._payment_rows:
+            if row is target_row:
+                continue
+            data = row.get_data()
+            if data and data['method_amount'] > 0:
+                other_total += data['method_amount']
+
+        remaining = round(self._order_total - other_total, 2)
+        if remaining <= 0:
+            target_row.amount_spin.blockSignals(True)
+            target_row.amount_spin.setValue(0)
+            target_row.amount_spin.blockSignals(False)
+            target_row._recompute()
+            self._update_summary()
+            return
+
+        method = target_row.get_selected_method()
+        if not method:
+            return
+
+        match_pct = method['match_percent']
+        # remaining = charge × (1 + match_pct/100)  →  charge = remaining / (1 + match_pct/100)
+        charge = round(remaining / (1.0 + match_pct / 100.0), 2)
+
+        # Respect denomination (round DOWN to nearest multiple)
+        denom = method.get('denomination')
+        if denom and denom > 0 and charge > 0:
+            charge = round(int(charge / denom) * denom, 2)
+
+        if charge >= 0:
+            target_row.amount_spin.blockSignals(True)
+            target_row.amount_spin.setValue(charge)
+            target_row.amount_spin.blockSignals(False)
+            target_row._recompute()
+            self._update_summary()
+
     def _refresh_method_choices(self):
         """Disable already-selected methods in other rows, and hide the
         '+ Add' button when all methods are in use."""
@@ -515,6 +592,18 @@ class PaymentScreen(QWidget):
             self.summary_row.update_card("customer_pays", f"${result['customer_total_paid']:.2f}")
             self.summary_row.update_card("fam_match", f"${fam_match:.2f}")
 
+            # Update row display values when cap changes match/total
+            if result.get('match_was_capped') and result.get('line_items'):
+                valid_rows = [r for r in self._payment_rows if r.get_data()]
+                for i, row in enumerate(valid_rows):
+                    if i < len(result['line_items']):
+                        li = result['line_items'][i]
+                        row.set_display_values(li['match_amount'], li['method_amount'])
+            else:
+                # Reset to uncapped values
+                for row in self._payment_rows:
+                    row._recompute()
+
             # Show/hide match cap warning
             if result.get('match_was_capped'):
                 uncapped = result['uncapped_fam_subsidy_total']
@@ -536,15 +625,40 @@ class PaymentScreen(QWidget):
 
             # Dynamic color-coding
             # Remaining: green when $0, red when over-allocated, gold when under
+            # Check if over-allocation is due to denomination constraints
+            is_denom_overage = False
+            if remaining < 0:
+                max_denom = 0.0
+                for row in self._payment_rows:
+                    method = row.get_selected_method()
+                    if method and method.get('denomination'):
+                        max_denom = max(max_denom, method['denomination'])
+                if max_denom > 0 and abs(remaining) <= max_denom:
+                    is_denom_overage = True
+
             if remaining == 0:
                 self.summary_row.update_card_color("remaining", PRIMARY_GREEN)
                 self.summary_row.update_card_color("allocated", PRIMARY_GREEN)
+                self.denom_overage_warning.setVisible(False)
+            elif remaining < 0 and is_denom_overage:
+                # Denomination overage — warn but don't show as hard error
+                self.summary_row.update_card_color("remaining", HARVEST_GOLD)
+                self.summary_row.update_card_color("allocated", HARVEST_GOLD)
+                overage = abs(remaining)
+                self.denom_overage_warning.setText(
+                    f"\u26a0  Denomination overage: ${overage:.2f} — "
+                    f"Customer forfeits ${overage:.2f} of FAM match because "
+                    f"denominated payment cannot be broken into smaller increments."
+                )
+                self.denom_overage_warning.setVisible(True)
             elif remaining < 0:
                 self.summary_row.update_card_color("remaining", ERROR_COLOR)
                 self.summary_row.update_card_color("allocated", ERROR_COLOR)
+                self.denom_overage_warning.setVisible(False)
             else:
                 self.summary_row.update_card_color("remaining", HARVEST_GOLD)
                 self.summary_row.update_card_color("allocated", HARVEST_GOLD)
+                self.denom_overage_warning.setVisible(False)
 
             # FAM match: green when there's a match, grey when zero
             if fam_match > 0:
@@ -567,6 +681,7 @@ class PaymentScreen(QWidget):
 
             self._clear_collection_list()
             self.match_cap_warning.setVisible(False)
+            self.denom_overage_warning.setVisible(False)
 
     def _update_collection_list(self, entries, result):
         """Rebuild the compact collection checklist next to the Confirm button."""
@@ -640,6 +755,42 @@ class PaymentScreen(QWidget):
             logger.exception("Failed to save draft")
             self._show_error(f"Error saving draft: {e}")
 
+    def _check_denomination_overage(self, result, receipt_total):
+        """Check if an over-allocation is caused by denomination constraints.
+
+        Returns the overage amount (> 0) if denominated payment methods are
+        causing the total to exceed the receipt, or 0 if this is not a
+        denomination-related issue.
+
+        A denomination overage happens when a denominated payment like FMNP
+        ($25 checks) can't be broken into smaller increments, so the
+        allocation overshoots the receipt total.  For example, a $49 order
+        with a $25 FMNP charge produces $50 total allocation — the $1
+        difference is a match forfeit the customer must accept.
+        """
+        allocated = result.get('allocated_total', 0)
+        overage = round(allocated - receipt_total, 2)
+
+        # Only applies when over-allocated (not under or exact)
+        if overage <= 0:
+            return 0.0
+
+        # Find the largest denomination among active payment rows
+        max_denom = 0.0
+        for row in self._payment_rows:
+            method = row.get_selected_method()
+            if method and method.get('denomination'):
+                max_denom = max(max_denom, method['denomination'])
+
+        if max_denom <= 0:
+            return 0.0
+
+        # Only allow overage up to the max denomination — beyond that is a hard block
+        if overage > max_denom:
+            return 0.0
+
+        return overage
+
     def _confirm_payment(self):
         # Prevent double-click from triggering duplicate processing
         self.confirm_btn.setEnabled(False)
@@ -647,6 +798,22 @@ class PaymentScreen(QWidget):
         self.error_label.setVisible(False)
         self.error_label.setText("")
         self.success_frame.setVisible(False)
+
+        # Check denomination constraints before proceeding
+        for row in self._payment_rows:
+            denom_error = row.validate_denomination()
+            if denom_error:
+                self._show_error(denom_error)
+                self.confirm_btn.setEnabled(True)
+                return
+
+        # Check photo receipt requirements
+        for row in self._payment_rows:
+            photo_error = row.validate_photo()
+            if photo_error:
+                self._show_error(photo_error)
+                self.confirm_btn.setEnabled(True)
+                return
 
         if not self._order_transactions:
             self._show_error("No transactions loaded.")
@@ -669,10 +836,15 @@ class PaymentScreen(QWidget):
             receipt_total, entries, match_limit=self._match_limit
         )
 
+        # Check if over-allocation is caused by denomination constraints
+        denom_overage = 0.0
         if not result['is_valid']:
-            self._show_error("\n".join(result['errors']))
-            self.confirm_btn.setEnabled(True)
-            return
+            denom_overage = self._check_denomination_overage(result, receipt_total)
+            if denom_overage <= 0:
+                # Not a denomination issue — hard block
+                self._show_error("\n".join(result['errors']))
+                self.confirm_btn.setEnabled(True)
+                return
 
         # ── Pre-confirmation dialog: list what to collect ─────────
         confirm_lines = ["Please confirm you have collected the following "
@@ -695,6 +867,14 @@ class PaymentScreen(QWidget):
         confirm_lines.append(f"\nTotal to collect: ${customer_total:.2f}")
         confirm_lines.append(f"Order total (vendor reimbursement): ${receipt_total:.2f}")
         confirm_lines.append(f"\nReceipts: {len(self._order_transactions)}")
+
+        if denom_overage > 0:
+            confirm_lines.append(
+                f"\n⚠  DENOMINATION OVERAGE: ${denom_overage:.2f}\n"
+                f"The customer is forfeiting ${denom_overage:.2f} of FAM match "
+                f"because the denominated payment cannot be broken into "
+                f"smaller increments."
+            )
 
         answer = QMessageBox.question(
             self, "Confirm Payment Collection",
@@ -840,6 +1020,36 @@ class PaymentScreen(QWidget):
                         target['customer_charged'] = round(
                             target['method_amount'] - target['match_amount'], 2
                         )
+
+        # Store photos from payment rows (if any) and attach paths to line items.
+        # Photos are stored once and reused across multi-receipt transactions.
+        # Supports multiple photos per payment method (e.g. 3 FMNP checks = 3 photos).
+        stored_photos = {}  # payment_method_id -> encoded_path (JSON array or single)
+        for j, item in enumerate(items):
+            source_paths = item.get('photo_source_paths', [])
+            if source_paths:
+                try:
+                    from fam.utils.photo_storage import store_photo
+                    from fam.utils.photo_paths import encode_photo_paths
+                    pm_id = item['payment_method_id']
+                    rel_paths = []
+                    for src in source_paths:
+                        if src:
+                            rel = store_photo(src, pm_id, prefix='pay')
+                            rel_paths.append(rel)
+                    if rel_paths:
+                        stored_photos[pm_id] = encode_photo_paths(rel_paths)
+                except Exception:
+                    logger.warning("Failed to store payment photo for method %s",
+                                   item.get('method_name_snapshot'), exc_info=True)
+
+        # Inject photo_path into all transaction line items
+        if stored_photos:
+            for txn_items in all_txn_items:
+                for li in txn_items:
+                    photo = stored_photos.get(li['payment_method_id'])
+                    if photo:
+                        li['photo_path'] = photo
 
         # Save to DB
         for t, txn_items in zip(self._order_transactions, all_txn_items):
