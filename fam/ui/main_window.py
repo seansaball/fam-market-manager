@@ -451,20 +451,16 @@ class MainWindow(QMainWindow):
         try:
             from fam.sync.gsheets import GoogleSheetsBackend
             from fam.sync.manager import SyncManager
-            from fam.sync.data_collector import collect_sync_data
             from fam.sync.worker import SyncWorker
 
             backend = GoogleSheetsBackend()
             if not backend.is_configured():
                 return
 
-            data = collect_sync_data()
-            if not data:
-                return
-
             manager = SyncManager(backend)
             self._sync_thread = QThread()
-            self._sync_worker = SyncWorker(manager, data)
+            # Data collection now happens on the worker thread (not here)
+            self._sync_worker = SyncWorker(manager)
             self._sync_worker.moveToThread(self._sync_thread)
             self._sync_thread.started.connect(self._sync_worker.run)
             self._sync_worker.finished.connect(self._on_sync_finished)
@@ -472,6 +468,7 @@ class MainWindow(QMainWindow):
             self._sync_worker.progress.connect(self._on_sync_progress)
             self._sync_worker.finished.connect(self._sync_thread.quit)
             self._sync_worker.error.connect(self._sync_thread.quit)
+            self._sync_thread.finished.connect(self._cleanup_sync_thread)
 
             self._sync_btn.setEnabled(False)
             self._sync_btn.setText("Syncing...")
@@ -543,6 +540,20 @@ class MainWindow(QMainWindow):
         self._sync_indicator.setToolTip(error_msg)
         self._sync_cooldown.start()  # prevent rapid-fire retries
         logger.error("Sync failed: %s", error_msg)
+
+    def _cleanup_sync_thread(self):
+        """Release sync worker and thread after sync completes.
+
+        Called by the thread's ``finished`` signal.  Nulls the Python
+        references *after* scheduling C++ deletion so that closeEvent
+        never touches a deleted QThread.
+        """
+        if self._sync_worker:
+            self._sync_worker.deleteLater()
+            self._sync_worker = None
+        if self._sync_thread:
+            self._sync_thread.deleteLater()
+            self._sync_thread = None
 
     # ------------------------------------------------------------------
     # Auto-update check on launch
@@ -881,6 +892,42 @@ class MainWindow(QMainWindow):
             self._tutorial_overlay.deleteLater()
             self._tutorial_overlay = None
             self._mark_tutorial_shown()
+
+    def closeEvent(self, event):  # noqa: N802
+        """Clean up timers and background threads before closing.
+
+        Ensures an in-progress sync completes (up to 10 s) so that
+        Google Sheets is never left in a partially-written state.
+        """
+        # Stop all periodic timers
+        self._backup_timer.stop()
+        self._sync_timer.stop()
+        self._sync_cooldown.stop()
+        self._sync_deferred.stop()
+
+        # Wait for sync thread to finish (may already be None via _cleanup)
+        try:
+            if self._sync_thread and self._sync_thread.isRunning():
+                logger.info("Waiting for sync to complete before exit…")
+                self._sync_thread.quit()
+                if not self._sync_thread.wait(10_000):
+                    logger.warning("Sync thread did not finish in 10 s — terminating")
+                    self._sync_thread.terminate()
+                    self._sync_thread.wait(2_000)
+        except RuntimeError:
+            pass  # C++ object already deleted — thread is done
+
+        # Wait for update check thread
+        if self._update_check_thread and self._update_check_thread.isRunning():
+            self._update_check_thread.quit()
+            self._update_check_thread.wait(3_000)
+
+        # Close the main-thread database connection
+        from fam.database.connection import close_connection
+        close_connection()
+
+        logger.info("Application shutdown complete")
+        event.accept()
 
     def eventFilter(self, obj, event):
         """Resize the tutorial overlay when the central widget resizes."""

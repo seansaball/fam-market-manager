@@ -83,12 +83,12 @@ class EditMarketDialog(QDialog):
 
 
 class EditVendorDialog(QDialog):
-    """Dialog for editing a vendor's name and contact info."""
+    """Dialog for editing a vendor's name, contact, and reimbursement details."""
 
     def __init__(self, vendor, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Edit Vendor: {vendor['name']}")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(450)
         self.vendor = vendor
         self.setStyleSheet(f"""
             QDialog {{ background-color: {BACKGROUND}; }}
@@ -103,6 +103,50 @@ class EditVendorDialog(QDialog):
         self.contact_input = QLineEdit()
         self.contact_input.setText(vendor.get('contact_info') or '')
         layout.addRow("Contact Info:", self.contact_input)
+
+        self.check_payable_input = QLineEdit()
+        self.check_payable_input.setText(vendor.get('check_payable_to') or '')
+        self.check_payable_input.setPlaceholderText("Leave blank to use vendor name")
+        layout.addRow("Check Payable To:", self.check_payable_input)
+
+        self.street_input = QLineEdit()
+        self.street_input.setText(vendor.get('street') or '')
+        layout.addRow("Street:", self.street_input)
+
+        self.city_input = QLineEdit()
+        self.city_input.setText(vendor.get('city') or '')
+        layout.addRow("City:", self.city_input)
+
+        self.state_input = QLineEdit()
+        self.state_input.setText(vendor.get('state') or '')
+        self.state_input.setMaxLength(2)
+        self.state_input.setFixedWidth(60)
+        layout.addRow("State:", self.state_input)
+
+        self.zip_input = QLineEdit()
+        self.zip_input.setText(vendor.get('zip_code') or '')
+        self.zip_input.setMaxLength(10)
+        self.zip_input.setFixedWidth(120)
+        layout.addRow("Zip Code:", self.zip_input)
+
+        self.ach_check = QCheckBox("ACH Enabled")
+        self.ach_check.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: 13px; padding: 4px; background-color: transparent;
+            }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                background-color: {WHITE};
+                border: 2px solid #AAAAAA;
+                border-radius: 3px;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {ACCENT_GREEN};
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        self.ach_check.setChecked(bool(vendor.get('ach_enabled')))
+        layout.addRow("", self.ach_check)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -834,9 +878,10 @@ class SettingsScreen(QWidget):
         layout.addWidget(form)
 
         self.vendors_table = QTableWidget()
-        self.vendors_table.setColumnCount(5)
-        self.vendors_table.setHorizontalHeaderLabels(["ID", "Name", "Contact", "Active", "Actions"])
-        configure_table(self.vendors_table, actions_col=4, actions_width=220)
+        self.vendors_table.setColumnCount(7)
+        self.vendors_table.setHorizontalHeaderLabels(
+            ["ID", "Name", "Contact", "Check Payable To", "ACH", "Active", "Actions"])
+        configure_table(self.vendors_table, actions_col=6, actions_width=220)
         layout.addWidget(self.vendors_table)
 
         return tab
@@ -1200,6 +1245,68 @@ class SettingsScreen(QWidget):
         self._sync_periodic_cb.setStyleSheet(_sync_cb_style)
         sync_fl.addWidget(self._sync_periodic_cb)
 
+        # ─ Report Tabs section ─
+        tabs_sep = QLabel("Report Tabs")
+        tabs_sep.setStyleSheet(
+            f"font-size: 13px; font-weight: bold; color: {PRIMARY_GREEN}; "
+            "background: transparent; padding: 8px 0 2px 0;"
+        )
+        sync_fl.addWidget(tabs_sep)
+
+        tabs_hint = QLabel(
+            "Choose which report tabs sync to Google Sheets. "
+            "Required tabs are always synced."
+        )
+        tabs_hint.setWordWrap(True)
+        tabs_hint.setStyleSheet(
+            f"font-size: 11px; color: {SUBTITLE_GRAY}; "
+            "background: transparent; padding: 0 0 4px 4px;"
+        )
+        sync_fl.addWidget(tabs_hint)
+
+        from fam.utils.app_settings import (
+            REQUIRED_SYNC_TABS, OPTIONAL_SYNC_TABS, is_sync_tab_enabled,
+        )
+
+        _locked_cb_style = f"""
+            QCheckBox {{
+                font-size: 13px; padding: 2px 4px;
+                background-color: {WHITE}; color: {SUBTITLE_GRAY};
+            }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                background-color: #D0D0D0;
+                border: 2px solid #AAAAAA;
+                border-radius: 3px;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: #B0B0B0;
+                border-color: #999999;
+            }}
+        """
+
+        _tab_display_order = [
+            'Vendor Reimbursement', 'Detailed Ledger', 'Error Log',
+            'Agent Tracker', 'Geolocation', 'FMNP Entries',
+            'FAM Match Report', 'Transaction Log',
+            'Activity Log', 'Market Day Summary',
+        ]
+
+        self._sync_tab_checkboxes: dict[str, QCheckBox] = {}
+
+        for tab_name in _tab_display_order:
+            cb = QCheckBox(tab_name)
+            if tab_name in REQUIRED_SYNC_TABS:
+                cb.setChecked(True)
+                cb.setEnabled(False)
+                cb.setStyleSheet(_locked_cb_style)
+                cb.setToolTip("Required — always synced")
+            else:
+                cb.setChecked(is_sync_tab_enabled(tab_name))
+                cb.setStyleSheet(_sync_cb_style)
+                self._sync_tab_checkboxes[tab_name] = cb
+            sync_fl.addWidget(cb)
+
         # ─ Photos folder row ─
         photos_sep = QLabel("Payment Photos Sync")
         photos_sep.setStyleSheet(
@@ -1341,6 +1448,7 @@ class SettingsScreen(QWidget):
         set_setting('sync_credentials_loaded', '0')
         self._refresh_sync_creds_status()
         self._sync_conn_status.setVisible(False)
+        self._drive_conn_status.setVisible(False)
         logger.info("Google credentials removed")
 
     def _test_sync_connection(self):
@@ -1413,6 +1521,11 @@ class SettingsScreen(QWidget):
                      '1' if self._sync_on_close_cb.isChecked() else '0')
         set_setting('sync_periodic',
                      '1' if self._sync_periodic_cb.isChecked() else '0')
+
+        # Per-tab sync toggles
+        from fam.utils.app_settings import set_sync_tab_enabled
+        for tab_name, cb in self._sync_tab_checkboxes.items():
+            set_sync_tab_enabled(tab_name, cb.isChecked())
 
         # Photos folder — extract folder ID from URL or raw ID
         raw_folder = self._photos_folder_input.text().strip()
@@ -2251,10 +2364,14 @@ class SettingsScreen(QWidget):
             self.vendors_table.setItem(i, 0, make_item(str(v['id']), v['id']))
             self.vendors_table.setItem(i, 1, make_item(v['name']))
             self.vendors_table.setItem(i, 2, make_item(v.get('contact_info') or ''))
+            self.vendors_table.setItem(i, 3, make_item(v.get('check_payable_to') or ''))
+
+            ach_text = "Yes" if v.get('ach_enabled') else ""
+            self.vendors_table.setItem(i, 4, make_item(ach_text))
 
             active_item = make_item("Yes" if v['is_active'] else "No")
             active_item.setForeground(QBrush(QColor(ACCENT_GREEN if v['is_active'] else ERROR_COLOR)))
-            self.vendors_table.setItem(i, 3, active_item)
+            self.vendors_table.setItem(i, 5, active_item)
 
             action_widget = QWidget()
             al = QHBoxLayout(action_widget)
@@ -2277,7 +2394,7 @@ class SettingsScreen(QWidget):
             )
             al.addWidget(toggle_btn)
 
-            self.vendors_table.setCellWidget(i, 4, action_widget)
+            self.vendors_table.setCellWidget(i, 6, action_widget)
             self.vendors_table.setRowHeight(i, 42)
         self.vendors_table.setSortingEnabled(True)
 
@@ -2516,7 +2633,17 @@ class SettingsScreen(QWidget):
                 QMessageBox.warning(self, "Error", "Vendor name is required.")
                 return
             try:
-                update_vendor(vendor_id, name=new_name, contact_info=new_contact)
+                update_vendor(
+                    vendor_id,
+                    name=new_name,
+                    contact_info=new_contact,
+                    check_payable_to=dialog.check_payable_input.text().strip() or None,
+                    street=dialog.street_input.text().strip() or None,
+                    city=dialog.city_input.text().strip() or None,
+                    state=dialog.state_input.text().strip().upper() or None,
+                    zip_code=dialog.zip_input.text().strip() or None,
+                    ach_enabled=dialog.ach_check.isChecked(),
+                )
                 self._load_vendors()
             except Exception as e:
                 logger.exception("Failed to edit vendor %s", vendor_id)

@@ -89,7 +89,9 @@ class TestTableStructure:
         initialize_database()
         conn = get_connection()
         cols = {r[1] for r in conn.execute("PRAGMA table_info(vendors)").fetchall()}
-        assert {"id", "name", "contact_info", "is_active"}.issubset(cols)
+        assert {"id", "name", "contact_info", "is_active",
+                "check_payable_to", "street", "city", "state",
+                "zip_code", "ach_enabled"}.issubset(cols)
 
     def test_payment_methods_columns(self, fresh_db):
         initialize_database()
@@ -512,6 +514,15 @@ class TestMigrationChain:
         assert "photo_path" in pli_cols
         assert "photo_drive_url" in pli_cols
 
+        # vendors should have registration fields (v19)
+        vendor_cols = {r[1] for r in conn.execute("PRAGMA table_info(vendors)").fetchall()}
+        assert "check_payable_to" in vendor_cols
+        assert "street" in vendor_cols
+        assert "city" in vendor_cols
+        assert "state" in vendor_cols
+        assert "zip_code" in vendor_cols
+        assert "ach_enabled" in vendor_cols
+
     def test_data_survives_migration(self, fresh_db):
         """Pre-existing data should not be lost during migration."""
         tmp_path, _ = fresh_db
@@ -581,6 +592,12 @@ class TestDefaults:
         conn.commit()
         row = conn.execute("SELECT * FROM vendors WHERE name='Test'").fetchone()
         assert row["is_active"] == 1
+        assert row["check_payable_to"] is None
+        assert row["street"] is None
+        assert row["city"] is None
+        assert row["state"] is None
+        assert row["zip_code"] is None
+        assert row["ach_enabled"] == 0
 
     def test_market_day_defaults(self, fresh_db):
         initialize_database()

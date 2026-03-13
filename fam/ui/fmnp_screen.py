@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit,
-    QFileDialog
+    QFileDialog, QScrollArea
 )
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
@@ -125,9 +125,21 @@ class FMNPScreen(QWidget):
         photo_header.addStretch()
         form_layout.addLayout(photo_header)
 
-        self.photo_container = QVBoxLayout()
+        # Scrollable container for photo slots — fixed height fits ~3 rows
+        self._photo_scroll_area = QScrollArea()
+        self._photo_scroll_area.setWidgetResizable(True)
+        self._photo_scroll_area.setFrameShape(QFrame.NoFrame)
+        self._photo_scroll_area.setFixedHeight(160)
+        self._photo_scroll_area.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+        photo_scroll_widget = QWidget()
+        photo_scroll_widget.setStyleSheet("background: transparent;")
+        self.photo_container = QVBoxLayout(photo_scroll_widget)
         self.photo_container.setSpacing(4)
-        form_layout.addLayout(self.photo_container)
+        self.photo_container.setContentsMargins(0, 0, 0, 0)
+        self._photo_scroll_area.setWidget(photo_scroll_widget)
+        form_layout.addWidget(self._photo_scroll_area)
 
         # Connect amount changes to rebuild photo slots
         self.amount_spin.valueChanged.connect(self._on_amount_changed)
@@ -395,6 +407,9 @@ class FMNPScreen(QWidget):
                 'file_label': file_label,
                 'clear_btn': clear_btn,
             })
+
+        # Push rows to the top so they don't stretch to fill the scroll area
+        self.photo_container.addStretch()
 
     def _update_slot_display(self, index, file_label, clear_btn, slot):
         """Update a photo slot's label and clear button visibility."""

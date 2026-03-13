@@ -47,6 +47,12 @@ class ImportMarket:
 class ImportVendor:
     name: str
     contact_info: str
+    check_payable_to: str = ''
+    street: str = ''
+    city: str = ''
+    state: str = ''
+    zip_code: str = ''
+    ach_enabled: bool = False
 
 
 @dataclass
@@ -178,10 +184,16 @@ def export_settings(filepath: str) -> str:
 
     # Vendors
     lines.append("=== Vendors ===")
-    lines.append("Name | Contact Info")
+    lines.append("Name | Contact Info | Check Payable To | Street | City | State | Zip | ACH")
     for v in vendors:
         contact = v.get('contact_info') or ''
-        lines.append(f"{v['name']} | {contact}")
+        payable = v.get('check_payable_to') or ''
+        street = v.get('street') or ''
+        city = v.get('city') or ''
+        state = v.get('state') or ''
+        zipcode = v.get('zip_code') or ''
+        ach = 'Yes' if v.get('ach_enabled') else ''
+        lines.append(f"{v['name']} | {contact} | {payable} | {street} | {city} | {state} | {zipcode} | {ach}")
     lines.append("")
 
     # Payment Methods
@@ -308,7 +320,16 @@ def parse_settings_file(filepath: str) -> ImportResult:
                     if len(contact) > MAX_CONTACT_LEN:
                         result.errors.append(f"Line {line_num}: Contact info truncated to {MAX_CONTACT_LEN} chars")
                         contact = contact[:MAX_CONTACT_LEN].rstrip()
-                    result.vendors.append(ImportVendor(name, contact))
+                    # New vendor fields (backward compatible — default to empty)
+                    payable = _sanitize_text(parts[2]) if len(parts) > 2 else ''
+                    street = _sanitize_text(parts[3]) if len(parts) > 3 else ''
+                    city = _sanitize_text(parts[4]) if len(parts) > 4 else ''
+                    state = _sanitize_text(parts[5])[:2] if len(parts) > 5 else ''
+                    zipcode = _sanitize_text(parts[6])[:10] if len(parts) > 6 else ''
+                    ach_str = _sanitize_text(parts[7]) if len(parts) > 7 else ''
+                    ach = ach_str.lower() in ('yes', 'true', '1', 'on')
+                    result.vendors.append(ImportVendor(
+                        name, contact, payable, street, city, state, zipcode, ach))
 
                 elif current_section == 'Payment Methods':
                     if len(parts) < 1:
@@ -436,8 +457,14 @@ def apply_import(result: ImportResult) -> dict:
     for v in result.new_vendors:
         try:
             conn.execute(
-                "INSERT INTO vendors (name, contact_info) VALUES (?, ?)",
-                (v.name, v.contact_info or None)
+                "INSERT INTO vendors (name, contact_info, check_payable_to,"
+                " street, city, state, zip_code, ach_enabled)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (v.name, v.contact_info or None,
+                 v.check_payable_to or None,
+                 v.street or None, v.city or None,
+                 v.state or None, v.zip_code or None,
+                 int(v.ach_enabled))
             )
             counts['vendors_added'] += 1
         except Exception as e:

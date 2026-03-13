@@ -405,7 +405,7 @@ TUTORIAL_STEPS = [
         description=(
             "Would you like to load FAM's default configuration?\n\n"
             "This adds 3 markets (Bethel Park, Bellevue, "
-            "Cranberry), 8 vendors, and 6 payment methods "
+            "Cranberry), 23 vendors, and 6 payment methods "
             "so you can start right away.\n\n"
             "You can always add, edit, or remove items later "
             "in Settings."

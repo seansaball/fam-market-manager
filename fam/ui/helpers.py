@@ -618,10 +618,16 @@ def make_action_btn(text, width=50, danger=False):
     return btn
 
 
-def configure_table(table, actions_col=None, actions_width=140):
-    """Configure a QTableWidget with sorting and equal-width data columns.
+def configure_table(table, actions_col=None, actions_width=140,
+                    resizable=False):
+    """Configure a QTableWidget with sorting and column sizing.
 
-    - All data columns use Stretch mode → equal widths that fill the table.
+    - Default (resizable=False): all data columns use Stretch mode (equal
+      widths that fill the table).  Columns cannot be dragged.
+    - resizable=True: columns use Interactive mode so the user can drag
+      column borders to resize.  The last column stretches to fill
+      remaining space.  Call ``table.resizeColumnsToContents()`` after
+      populating data so initial widths match content.
     - If actions_col is set, that column is Fixed-width.
     - Sorting is enabled; clicking any column header toggles asc/desc.
 
@@ -629,6 +635,8 @@ def configure_table(table, actions_col=None, actions_width=140):
         table: QTableWidget to configure.
         actions_col: Column index of the fixed Actions column (or None).
         actions_width: Pixel width for the Actions column.
+        resizable: If True, columns are manually resizable and auto-fit
+            to content instead of using equal Stretch widths.
     """
     table.verticalHeader().setVisible(False)
     table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -637,9 +645,13 @@ def configure_table(table, actions_col=None, actions_width=140):
     table.setItemDelegate(ColorPreservingDelegate(table))
 
     header = table.horizontalHeader()
-    header.setStretchLastSection(False)
     header.setSortIndicatorShown(True)
     header.setFixedHeight(36)
+
+    if resizable:
+        header.setStretchLastSection(True)
+    else:
+        header.setStretchLastSection(False)
 
     # Explicit header style — overrides any inherited QFrame padding/border
     # that cascades from parent frame stylesheets (QHeaderView is a QFrame
@@ -671,6 +683,8 @@ def configure_table(table, actions_col=None, actions_width=140):
         if actions_col is not None and i == actions_col:
             header.setSectionResizeMode(i, QHeaderView.Fixed)
             table.setColumnWidth(i, actions_width)
+        elif resizable:
+            header.setSectionResizeMode(i, QHeaderView.Interactive)
         else:
             header.setSectionResizeMode(i, QHeaderView.Stretch)
 

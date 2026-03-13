@@ -7,7 +7,9 @@ to the Drive API v3.
 
 import logging
 import os
+import random
 import re
+import time as _time
 from typing import Optional
 
 logger = logging.getLogger('fam.sync.drive')
@@ -18,6 +20,37 @@ _AuthorizedSession = None
 
 DEFAULT_DRIVE_FOLDER_NAME = "FAM Market Manager Photos"
 DRIVE_API_BASE = "https://www.googleapis.com"
+
+# Maximum retries for transient Drive API errors
+_MAX_RETRIES = 3
+
+
+def _drive_retry(fn, max_retries=_MAX_RETRIES, label="Drive API"):
+    """Retry *fn* with exponential back-off on transient Drive errors.
+
+    Handles HTTP 429 (rate limit), 500/502/503 (server errors),
+    and network-level failures (ConnectionError, TimeoutError).
+    """
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            is_retryable = (
+                status in (429, 500, 502, 503)
+                or isinstance(exc, (ConnectionError, TimeoutError, OSError))
+            )
+            if is_retryable and attempt < max_retries - 1:
+                wait = (2 ** attempt) + random.uniform(0.5, 2.0)
+                logger.warning(
+                    "%s transient error (status=%s, %s), retrying in %.1fs "
+                    "(attempt %d/%d)…",
+                    label, status, type(exc).__name__,
+                    wait, attempt + 1, max_retries,
+                )
+                _time.sleep(wait)
+            else:
+                raise
 
 
 def get_drive_folder_name() -> str:
@@ -76,13 +109,17 @@ def _get_or_create_folder(session, folder_name: str) -> str:
     query = (f"name = '{folder_name}' and "
              f"mimeType = 'application/vnd.google-apps.folder' and "
              f"trashed = false")
-    resp = session.get(
-        f"{DRIVE_API_BASE}/drive/v3/files",
-        params={'q': query, 'fields': 'files(id,name)', 'spaces': 'drive',
-                'corpora': 'allDrives',
-                'supportsAllDrives': 'true', 'includeItemsFromAllDrives': 'true'}
-    )
-    resp.raise_for_status()
+
+    def _search():
+        r = session.get(
+            f"{DRIVE_API_BASE}/drive/v3/files",
+            params={'q': query, 'fields': 'files(id,name)', 'spaces': 'drive',
+                    'corpora': 'allDrives',
+                    'supportsAllDrives': 'true', 'includeItemsFromAllDrives': 'true'})
+        r.raise_for_status()
+        return r
+
+    resp = _drive_retry(_search, label="Drive folder search")
     files = resp.json().get('files', [])
     if files:
         return files[0]['id']
@@ -92,12 +129,16 @@ def _get_or_create_folder(session, folder_name: str) -> str:
         'name': folder_name,
         'mimeType': 'application/vnd.google-apps.folder'
     }
-    resp = session.post(
-        f"{DRIVE_API_BASE}/drive/v3/files",
-        json=metadata,
-        params={'fields': 'id', 'supportsAllDrives': 'true'}
-    )
-    resp.raise_for_status()
+
+    def _create():
+        r = session.post(
+            f"{DRIVE_API_BASE}/drive/v3/files",
+            json=metadata,
+            params={'fields': 'id', 'supportsAllDrives': 'true'})
+        r.raise_for_status()
+        return r
+
+    resp = _drive_retry(_create, label="Drive folder create")
     folder_id = resp.json()['id']
     logger.info("Created Drive folder '%s' (ID: %s)", folder_name, folder_id)
     return folder_id
@@ -120,13 +161,17 @@ def _get_or_create_subfolder(session, parent_id: str, folder_name: str) -> str:
              f"'{parent_id}' in parents and "
              f"mimeType = 'application/vnd.google-apps.folder' and "
              f"trashed = false")
-    resp = session.get(
-        f"{DRIVE_API_BASE}/drive/v3/files",
-        params={'q': query, 'fields': 'files(id,name)', 'spaces': 'drive',
-                'corpora': 'allDrives',
-                'supportsAllDrives': 'true', 'includeItemsFromAllDrives': 'true'}
-    )
-    resp.raise_for_status()
+
+    def _search():
+        r = session.get(
+            f"{DRIVE_API_BASE}/drive/v3/files",
+            params={'q': query, 'fields': 'files(id,name)', 'spaces': 'drive',
+                    'corpora': 'allDrives',
+                    'supportsAllDrives': 'true', 'includeItemsFromAllDrives': 'true'})
+        r.raise_for_status()
+        return r
+
+    resp = _drive_retry(_search, label="Drive subfolder search")
     files = resp.json().get('files', [])
     if files:
         logger.debug("Found existing subfolder '%s' under %s (ID: %s)",
@@ -138,12 +183,16 @@ def _get_or_create_subfolder(session, parent_id: str, folder_name: str) -> str:
         'mimeType': 'application/vnd.google-apps.folder',
         'parents': [parent_id],
     }
-    resp = session.post(
-        f"{DRIVE_API_BASE}/drive/v3/files",
-        json=metadata,
-        params={'fields': 'id', 'supportsAllDrives': 'true'}
-    )
-    resp.raise_for_status()
+
+    def _create():
+        r = session.post(
+            f"{DRIVE_API_BASE}/drive/v3/files",
+            json=metadata,
+            params={'fields': 'id', 'supportsAllDrives': 'true'})
+        r.raise_for_status()
+        return r
+
+    resp = _drive_retry(_create, label="Drive subfolder create")
     folder_id = resp.json()['id']
     logger.info("Created subfolder '%s' under %s (ID: %s)",
                 safe_name, parent_id, folder_id)
@@ -203,29 +252,24 @@ def _make_payment_filename(entry: dict, photo_index: int, total_photos: int,
     return f"{base}{ext}"
 
 
-def _set_anyone_reader(session, file_id: str):
-    """Set file permissions to 'anyone with link can view'."""
-    permission = {'type': 'anyone', 'role': 'reader'}
-    resp = session.post(
-        f"{DRIVE_API_BASE}/drive/v3/files/{file_id}/permissions",
-        json=permission,
-        params={'supportsAllDrives': 'true'}
-    )
-    resp.raise_for_status()
-
 
 def _verify_file_in_drive(session, file_id: str) -> bool:
-    """Verify that a file exists in Drive after upload.
+    """Verify that a file exists in Drive and is not trashed.
 
-    Returns True if the file is accessible, False otherwise.
+    Returns True if the file is accessible and not in Trash, False otherwise.
     """
     try:
         resp = session.get(
             f"{DRIVE_API_BASE}/drive/v3/files/{file_id}",
-            params={'fields': 'id,name,size', 'supportsAllDrives': 'true'}
+            params={'fields': 'id,name,size,trashed',
+                    'supportsAllDrives': 'true'}
         )
         if resp.status_code == 200:
             info = resp.json()
+            if info.get('trashed'):
+                logger.warning("Drive file %s (%s) is in Trash — treating as deleted",
+                               file_id, info.get('name'))
+                return False
             logger.info("Drive verification OK: %s (size=%s)",
                         info.get('name'), info.get('size'))
             return True
@@ -327,34 +371,32 @@ def upload_photo(local_path: str, filename: str,
         # Initiate resumable upload (supportsAllDrives for shared folders)
         logger.info("Uploading %s (%d bytes) to Drive folder %s",
                      filename, file_size, folder_id)
-        resp = session.post(
-            f"{DRIVE_API_BASE}/upload/drive/v3/files",
-            params={'uploadType': 'resumable', 'fields': 'id',
-                    'supportsAllDrives': 'true'},
-            json=metadata,
-            headers={'X-Upload-Content-Type': mime_type}
-        )
-        if not resp.ok:
-            logger.error("Drive upload initiation failed: HTTP %d — %s",
-                         resp.status_code, resp.text)
-            resp.raise_for_status()
+
+        def _initiate():
+            r = session.post(
+                f"{DRIVE_API_BASE}/upload/drive/v3/files",
+                params={'uploadType': 'resumable', 'fields': 'id',
+                        'supportsAllDrives': 'true'},
+                json=metadata,
+                headers={'X-Upload-Content-Type': mime_type})
+            r.raise_for_status()
+            return r
+
+        resp = _drive_retry(_initiate, label="Drive upload initiate")
         upload_url = resp.headers['Location']
 
         # Upload file content
-        with open(local_path, 'rb') as f:
-            resp = session.put(
-                upload_url,
-                data=f,
-                headers={
-                    'Content-Type': mime_type,
-                    'Content-Length': str(file_size),
-                }
-            )
-        if not resp.ok:
-            logger.error("Drive file upload failed: HTTP %d — %s",
-                         resp.status_code, resp.text)
-            # Check for service-account storage quota error
-            if resp.status_code == 403 and 'storageQuotaExceeded' in resp.text:
+        def _upload_content():
+            with open(local_path, 'rb') as f:
+                r = session.put(
+                    upload_url,
+                    data=f,
+                    headers={
+                        'Content-Type': mime_type,
+                        'Content-Length': str(file_size),
+                    })
+            # Check for storage quota before generic raise_for_status
+            if r.status_code == 403 and 'storageQuotaExceeded' in r.text:
                 raise PermissionError(
                     "Service account has no storage quota. "
                     "Please use a Shared Drive instead of a regular folder. "
@@ -362,11 +404,13 @@ def upload_photo(local_path: str, filename: str,
                     "service account as Content Manager, then update the "
                     "folder ID in Settings."
                 )
-            resp.raise_for_status()
+            r.raise_for_status()
+            return r
+
+        resp = _drive_retry(_upload_content, label="Drive upload content")
         file_id = resp.json()['id']
 
-        # Set sharing permissions so the URL works for anyone
-        _set_anyone_reader(session, file_id)
+        # Files inherit the parent folder's sharing permissions.
 
         # Post-upload verification — confirm file exists in Drive
         if not _verify_file_in_drive(session, file_id):
@@ -448,6 +492,7 @@ def _verify_and_clear_dead_urls(session) -> int:
                                   update_fmnp_photo_drive_url)
     from fam.models.transaction import (get_payment_items_with_drive_urls,
                                          update_payment_photo_drive_url)
+    from fam.models.photo_hash import delete_photo_hash_by_url
     from fam.utils.photo_paths import parse_photo_paths, encode_photo_paths
 
     cleared = 0
@@ -465,6 +510,7 @@ def _verify_and_clear_dead_urls(session) -> int:
             else:
                 logger.warning("FMNP entry %d: Drive file missing for %s — "
                                "will re-upload", entry['id'], url)
+                delete_photo_hash_by_url(url)
                 changed = True
                 cleared += 1
         if changed:
@@ -484,6 +530,7 @@ def _verify_and_clear_dead_urls(session) -> int:
             else:
                 logger.warning("Payment item %d: Drive file missing for %s — "
                                "will re-upload", item['id'], url)
+                delete_photo_hash_by_url(url)
                 changed = True
                 cleared += 1
         if changed:
@@ -680,6 +727,9 @@ def upload_pending_photos() -> dict:
     Called during the sync cycle.  Returns a dict with upload statistics:
         {'uploaded': int, 'failed': int, 'fmnp_uploaded': int, 'payment_uploaded': int}
 
+    Existing Drive URLs are verified each cycle; dead ones are cleared so
+    the corresponding local photos get re-uploaded automatically.
+
     Failures are logged and retried on the next cycle.
     """
     from fam.models.fmnp import get_pending_photo_uploads, update_fmnp_photo_drive_url
@@ -697,6 +747,7 @@ def upload_pending_photos() -> dict:
     session = _get_session()
 
     # ── Step 1: Verify existing Drive URLs and clear dead ones ──
+    # If a photo was deleted from Drive, clear its URL so it re-uploads.
     try:
         cleared = _verify_and_clear_dead_urls(session)
         if cleared:

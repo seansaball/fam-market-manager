@@ -9,7 +9,7 @@ from .connection import get_connection, get_db_path
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 21
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
@@ -25,7 +25,13 @@ CREATE TABLE IF NOT EXISTS vendors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     contact_info TEXT,
-    is_active BOOLEAN DEFAULT 1
+    is_active BOOLEAN DEFAULT 1,
+    check_payable_to TEXT,
+    street TEXT,
+    city TEXT,
+    state TEXT,
+    zip_code TEXT,
+    ach_enabled BOOLEAN DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS payment_methods (
@@ -571,6 +577,70 @@ def _migrate_v17_to_v18(conn):
     logger.info("Migration v17->v18 complete: local_photo_hashes table created")
 
 
+def _migrate_v18_to_v19(conn):
+    """Add vendor registration fields for reimbursement and check writing."""
+    logger.info("Running migration v18 to v19: vendor registration fields")
+    new_cols = [
+        ("check_payable_to", "TEXT"),
+        ("street", "TEXT"),
+        ("city", "TEXT"),
+        ("state", "TEXT"),
+        ("zip_code", "TEXT"),
+        ("ach_enabled", "BOOLEAN DEFAULT 0"),
+    ]
+    for col_name, col_type in new_cols:
+        try:
+            conn.execute(
+                f"ALTER TABLE vendors ADD COLUMN {col_name} {col_type}"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+    conn.commit()
+    logger.info("Migration v18->v19 complete: vendor registration fields added")
+
+
+def _migrate_v19_to_v20(conn):
+    """Add missing foreign-key indexes for query performance.
+
+    Reports that JOIN on vendor_id, market_day_id, and payment_method_id
+    currently require full table scans on the FK side.  These indexes
+    make those joins O(log n) as data grows over a market season.
+    """
+    logger.info("Running migration v19 to v20: FK indexes")
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_transactions_vendor
+            ON transactions(vendor_id);
+        CREATE INDEX IF NOT EXISTS idx_customer_orders_market_day
+            ON customer_orders(market_day_id);
+        CREATE INDEX IF NOT EXISTS idx_fmnp_entries_vendor
+            ON fmnp_entries(vendor_id);
+        CREATE INDEX IF NOT EXISTS idx_payment_items_method
+            ON payment_line_items(payment_method_id);
+    """)
+    conn.commit()
+    logger.info("Migration v19->v20 complete: 4 FK indexes added")
+
+
+def _migrate_v20_to_v21(conn):
+    """Add indexes for remaining high-traffic query columns.
+
+    - transactions(customer_order_id): JOIN in customer-order receipt lookups
+    - market_days(market_id, date): market dropdown + date filtering
+    - audit_log(table_name, record_id): transaction log / audit queries
+    """
+    logger.info("Running migration v20 to v21: additional indexes")
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_transactions_customer_order
+            ON transactions(customer_order_id);
+        CREATE INDEX IF NOT EXISTS idx_market_days_market_date
+            ON market_days(market_id, date);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_table_record
+            ON audit_log(table_name, record_id);
+    """)
+    conn.commit()
+    logger.info("Migration v20->v21 complete: 3 additional indexes added")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -588,6 +658,13 @@ def initialize_database():
         current_version = row[0] if row and row[0] else 0
     else:
         current_version = 0
+
+    if current_version > CURRENT_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Database schema version {current_version} is newer than "
+            f"this app supports (version {CURRENT_SCHEMA_VERSION}). "
+            f"Please update the application."
+        )
 
     if current_version < 1:
         # Fresh install — create all tables + triggers/indexes
@@ -683,6 +760,18 @@ def initialize_database():
     if current_version < 18:
         _migrate_v17_to_v18(conn)
         current_version = 18
+
+    if current_version < 19:
+        _migrate_v18_to_v19(conn)
+        current_version = 19
+
+    if current_version < 20:
+        _migrate_v19_to_v20(conn)
+        current_version = 20
+
+    if current_version < 21:
+        _migrate_v20_to_v21(conn)
+        current_version = 21
 
     # Record the final version (avoid duplicate if already at this version)
     existing = conn.execute(

@@ -14,7 +14,7 @@ class SyncWorker(QObject):
     error = Signal(str)       # error message
     progress = Signal(str)    # status text for UI updates
 
-    def __init__(self, sync_manager, report_data: dict):
+    def __init__(self, sync_manager, report_data: dict = None):
         super().__init__()
         self._manager = sync_manager
         self._data = report_data
@@ -23,6 +23,20 @@ class SyncWorker(QObject):
     def run(self):
         """Execute the sync.  Called from the background QThread."""
         try:
+            # Step 0: Collect sync data on the worker thread (off the UI thread)
+            if self._data is None:
+                self.progress.emit("Collecting sync data...")
+                try:
+                    from fam.sync.data_collector import collect_sync_data
+                    self._data = collect_sync_data()
+                except Exception:
+                    logger.exception("Failed to collect sync data")
+                    self.error.emit("Failed to collect sync data")
+                    return
+                if not self._data:
+                    self.error.emit("No data to sync")
+                    return
+
             # Step 1: Upload pending photos to Google Drive
             # (so Drive URLs are available for the sheet sync)
             try:
@@ -77,3 +91,12 @@ class SyncWorker(QObject):
         except Exception as e:
             logger.exception("Sync worker failed")
             self.error.emit(str(e))
+        finally:
+            # Close this thread's database connection to prevent leaks.
+            # Each sync cycle creates a thread-local SQLite connection
+            # via get_connection(); without this it stays open until GC.
+            try:
+                from fam.database.connection import close_connection
+                close_connection()
+            except Exception:
+                pass

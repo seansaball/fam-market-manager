@@ -44,28 +44,44 @@ def seed_sample_data():
 
     # Vendors
     vendors = [
-        ("Evelyn's Farm", None),
-        ("Forever Green Family Farm", None),
-        ("Goose Run Farms", None),
+        ("1.11 Juice Bar", None),
+        ("412 BBQ", None),
+        ("Elfinwild Farms", None),
+        ("Fudgie Wudgie", None),
+        ("Fungetarian", None),
+        ("Healthy Heartbeets", None),
+        ("Haffey Family Farm", None),
         ("Hello Hummus", None),
-        ("Loafers Bread Co", None),
-        ("Logan Family Farm", None),
-        ("Rockin' Cat Organic Coffee and Tea", None),
-        ("Two Acre Farm", None),
+        ("Hughes Farm & Apiary", None),
+        ("Jill's gourmet dips", None),
+        ("KizzleFoods", None),
+        ("Loafers Bread Co.", None),
+        ("Machacha Foods", None),
+        ("Old School Meats", None),
+        ("Olive & Marlowe", None),
+        ("Pgh Dumplingz", None),
+        ("Pitaland Inc.", None),
+        ("Pleasant Lane Farms", None),
+        ("Pond Hill Farm LLC", None),
+        ("Rockin' Cat Organic Coffee & Tea", None),
+        ("Saucy African", None),
+        ("Sturges Orchards", None),
+        ("The Cakery", None),
     ]
     cursor.executemany("INSERT INTO vendors (name, contact_info) VALUES (?, ?)", vendors)
 
     # Payment Methods
     payment_methods = [
-        ("SNAP", 100.0, 1, 1),
-        ("FMNP", 100.0, 1, 2),
-        ("Food RX", 100.0, 1, 3),
-        ("JH Food Bucks", 100.0, 1, 4),
-        ("JH Tokens", 100.0, 1, 5),
-        ("Cash", 0.0, 1, 6),
+        ("SNAP", 100.0, 1, 1, None, None),
+        ("FMNP", 100.0, 1, 2, 5.00, 'Optional'),
+        ("Food RX", 100.0, 1, 3, None, None),
+        ("JH Food Bucks", 100.0, 1, 4, None, None),
+        ("JH Tokens", 100.0, 1, 5, None, None),
+        ("Cash", 0.0, 1, 6, None, None),
     ]
     cursor.executemany(
-        "INSERT INTO payment_methods (name, match_percent, is_active, sort_order) VALUES (?, ?, ?, ?)",
+        "INSERT INTO payment_methods (name, match_percent, is_active, sort_order,"
+        " denomination, photo_required) VALUES (?, ?, ?, ?, ?, ?)",
         payment_methods
     )
 

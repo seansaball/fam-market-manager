@@ -134,22 +134,28 @@ _TXN_WHERE = "WHERE t.status IN ('Confirmed', 'Adjusted')"
 
 
 def _query_vendor_reimbursement(conn):
-    """Replicate vendor reimbursement SQL + merge from reports_screen.py."""
+    """Replicate vendor reimbursement SQL + merge from reports_screen.py.
+
+    Groups by (market, vendor) — one row per unique market+vendor pair.
+    """
     vendor_rows = conn.execute(f"""
         SELECT v.name as vendor,
+               m.name as market_name,
                COALESCE(SUM(t.receipt_total), 0) as gross_sales,
                GROUP_CONCAT(DISTINCT md.date) as transaction_dates,
                GROUP_CONCAT(DISTINCT co.customer_label) as customer_ids
         FROM transactions t
         JOIN vendors v ON t.vendor_id = v.id
         JOIN market_days md ON t.market_day_id = md.id
+        JOIN markets m ON md.market_id = m.id
         LEFT JOIN customer_orders co ON t.customer_order_id = co.id
         {_TXN_WHERE}
-        GROUP BY v.id, v.name ORDER BY v.name
+        GROUP BY m.id, v.id, v.name ORDER BY m.name, v.name
     """).fetchall()
 
     match_rows = conn.execute(f"""
         SELECT v.name as vendor,
+               m.name as market_name,
                COALESCE(SUM(pl.match_amount), 0) as fam_match,
                COALESCE(SUM(CASE WHEN pl.method_name_snapshot = 'FMNP'
                                  THEN pl.match_amount ELSE 0 END), 0) as fmnp_match
@@ -157,21 +163,26 @@ def _query_vendor_reimbursement(conn):
         JOIN transactions t ON pl.transaction_id = t.id
         JOIN vendors v ON t.vendor_id = v.id
         JOIN market_days md ON t.market_day_id = md.id
+        JOIN markets m ON md.market_id = m.id
         LEFT JOIN customer_orders co ON t.customer_order_id = co.id
         {_TXN_WHERE}
-        GROUP BY v.id, v.name
+        GROUP BY m.id, v.id, v.name
     """).fetchall()
 
     match_by_vendor = {
-        r['vendor']: {'fam_match': r['fam_match'], 'fmnp_match': r['fmnp_match']}
+        (r['market_name'], r['vendor']): {
+            'fam_match': r['fam_match'], 'fmnp_match': r['fmnp_match']
+        }
         for r in match_rows
     }
 
     vendor_dict = {}
     for r in vendor_rows:
-        vm = match_by_vendor.get(r['vendor'], {})
-        vendor_dict[r['vendor']] = {
+        key = (r['market_name'], r['vendor'])
+        vm = match_by_vendor.get(key, {})
+        vendor_dict[key] = {
             'vendor': r['vendor'],
+            'market_name': r['market_name'],
             'customers': r['customer_ids'] or '',
             'dates': r['transaction_dates'] or '',
             'gross': r['gross_sales'],
@@ -182,32 +193,36 @@ def _query_vendor_reimbursement(conn):
     # Merge external FMNP entries (exclude soft-deleted)
     fmnp_rows = conn.execute("""
         SELECT v.name as vendor,
+               m.name as market_name,
                COALESCE(SUM(fe.amount), 0) as fmnp_entry_total,
                GROUP_CONCAT(DISTINCT md.date) as fmnp_dates
         FROM fmnp_entries fe
         JOIN vendors v ON fe.vendor_id = v.id
         JOIN market_days md ON fe.market_day_id = md.id
+        JOIN markets m ON md.market_id = m.id
         WHERE fe.status = 'Active'
-        GROUP BY v.id, v.name
+        GROUP BY m.id, v.id, v.name
     """).fetchall()
 
     for r in fmnp_rows:
-        if r['vendor'] in vendor_dict:
-            vendor_dict[r['vendor']]['fmnp_match'] += r['fmnp_entry_total']
-            existing = set(vendor_dict[r['vendor']]['dates'].split(',')) \
-                if vendor_dict[r['vendor']]['dates'] else set()
+        key = (r['market_name'], r['vendor'])
+        if key in vendor_dict:
+            vendor_dict[key]['fmnp_match'] += r['fmnp_entry_total']
+            existing = set(vendor_dict[key]['dates'].split(',')) \
+                if vendor_dict[key]['dates'] else set()
             new_dates = set((r['fmnp_dates'] or '').split(','))
             all_dates = (existing | new_dates) - {''}
-            vendor_dict[r['vendor']]['dates'] = ','.join(sorted(all_dates))
+            vendor_dict[key]['dates'] = ','.join(sorted(all_dates))
         else:
-            vendor_dict[r['vendor']] = {
-                'vendor': r['vendor'], 'customers': '',
+            vendor_dict[key] = {
+                'vendor': r['vendor'], 'market_name': r['market_name'],
+                'customers': '',
                 'dates': r['fmnp_dates'] or '',
                 'gross': 0, 'fam_match': 0,
                 'fmnp_match': r['fmnp_entry_total'],
             }
 
-    return sorted(vendor_dict.values(), key=lambda x: x['vendor'])
+    return sorted(vendor_dict.values(), key=lambda x: (x['market_name'], x['vendor']))
 
 
 def _query_fam_match(conn):
@@ -330,7 +345,9 @@ class TestVendorReimbursement:
         """Green Valley: only in-app transactions, no FMNP."""
         _seed(fresh_db)
         vendors = _query_vendor_reimbursement(fresh_db)
-        gv = next(v for v in vendors if v['vendor'] == 'Green Valley Farm')
+        gv = next(v for v in vendors
+                  if v['vendor'] == 'Green Valley Farm'
+                  and v['market_name'] == 'Downtown Market')
         assert gv['gross'] == 30.00
         assert gv['fam_match'] == 6.67
         assert gv['fmnp_match'] == 0
@@ -339,7 +356,9 @@ class TestVendorReimbursement:
         """Sunny Acres: in-app FMNP only, no external entries."""
         _seed(fresh_db)
         vendors = _query_vendor_reimbursement(fresh_db)
-        sa = next(v for v in vendors if v['vendor'] == 'Sunny Acres Produce')
+        sa = next(v for v in vendors
+                  if v['vendor'] == 'Sunny Acres Produce'
+                  and v['market_name'] == 'Downtown Market')
         assert sa['gross'] == 40.00
         assert sa['fam_match'] == 20.00
         assert sa['fmnp_match'] == 20.00  # in-app FMNP match
@@ -348,62 +367,86 @@ class TestVendorReimbursement:
         """Mountain Herb: external FMNP only, no in-app transactions."""
         _seed(fresh_db)
         vendors = _query_vendor_reimbursement(fresh_db)
-        mh = next(v for v in vendors if v['vendor'] == 'Mountain Herb Co.')
+        mh = next(v for v in vendors
+                  if v['vendor'] == 'Mountain Herb Co.'
+                  and v['market_name'] == 'Downtown Market')
         assert mh['gross'] == 0       # no in-app receipts
         assert mh['fam_match'] == 0   # no in-app match
         assert mh['fmnp_match'] == 50.00
         assert mh['customers'] == ''  # external = no customer
 
-    def test_mixed_vendor(self, fresh_db):
-        """Bakers Delight: in-app transactions + external FMNP entries."""
+    def test_mixed_vendor_riverside(self, fresh_db):
+        """Bakers Delight at Riverside: txn $60 + FMNP $25."""
         _seed(fresh_db)
         vendors = _query_vendor_reimbursement(fresh_db)
-        bd = next(v for v in vendors if v['vendor'] == 'Bakers Delight')
-        assert bd['gross'] == 60.00
-        assert bd['fam_match'] == 20.00  # Food Bucks match only
-        # FMNP Match = 0 (no in-app FMNP) + $25 + $15 external = $40
-        assert bd['fmnp_match'] == 40.00
+        bd_rv = next(v for v in vendors
+                     if v['vendor'] == 'Bakers Delight'
+                     and v['market_name'] == 'Riverside Market')
+        assert bd_rv['gross'] == 60.00
+        assert bd_rv['fam_match'] == 20.00  # Food Bucks match only
+        assert bd_rv['fmnp_match'] == 25.00  # external FMNP at Riverside
 
-    def test_all_four_vendors_present(self, fresh_db):
-        """All vendors appear, including external-only Mountain Herb."""
+    def test_mixed_vendor_downtown(self, fresh_db):
+        """Bakers Delight at Downtown: FMNP $15 only (no transactions)."""
         _seed(fresh_db)
         vendors = _query_vendor_reimbursement(fresh_db)
-        names = [v['vendor'] for v in vendors]
-        assert len(names) == 4
-        assert 'Mountain Herb Co.' in names
+        bd_dt = next(v for v in vendors
+                     if v['vendor'] == 'Bakers Delight'
+                     and v['market_name'] == 'Downtown Market')
+        assert bd_dt['gross'] == 0
+        assert bd_dt['fam_match'] == 0
+        assert bd_dt['fmnp_match'] == 15.00
+
+    def test_all_market_vendor_pairs_present(self, fresh_db):
+        """All (market, vendor) pairs appear — 5 rows total."""
+        _seed(fresh_db)
+        vendors = _query_vendor_reimbursement(fresh_db)
+        pairs = [(v['market_name'], v['vendor']) for v in vendors]
+        assert len(pairs) == 5
+        assert ('Downtown Market', 'Green Valley Farm') in pairs
+        assert ('Downtown Market', 'Sunny Acres Produce') in pairs
+        assert ('Downtown Market', 'Mountain Herb Co.') in pairs
+        assert ('Downtown Market', 'Bakers Delight') in pairs
+        assert ('Riverside Market', 'Bakers Delight') in pairs
 
     def test_aggregate_totals(self, fresh_db):
-        """Cross-vendor totals are correct."""
+        """Cross-vendor totals are correct (unchanged by grouping)."""
         _seed(fresh_db)
         vendors = _query_vendor_reimbursement(fresh_db)
         total_gross = sum(v['gross'] for v in vendors)
         total_fmnp = sum(v['fmnp_match'] for v in vendors)
         total_fam = sum(v['fam_match'] for v in vendors)
-        # Gross = $30 + $40 + $0 + $60
+        # Gross = $30 + $40 + $0 + $0 + $60
         assert total_gross == 130.00
-        # FMNP Match = $0 + $20 + $50 + $40
+        # FMNP Match = $0 + $20 + $50 + $15 + $25
         assert total_fmnp == 110.00
-        # FAM Match = $6.67 + $20 + $0 + $20
+        # FAM Match = $6.67 + $20 + $0 + $0 + $20
         assert total_fam == 46.67
 
     def test_external_does_not_inflate_gross(self, fresh_db):
         """External FMNP entries never add to Gross Sales."""
         _seed(fresh_db)
         vendors = _query_vendor_reimbursement(fresh_db)
-        mh = next(v for v in vendors if v['vendor'] == 'Mountain Herb Co.')
+        mh = next(v for v in vendors
+                  if v['vendor'] == 'Mountain Herb Co.')
         assert mh['gross'] == 0  # $50 external FMNP ≠ gross sales
-        bd = next(v for v in vendors if v['vendor'] == 'Bakers Delight')
-        assert bd['gross'] == 60.00  # only from transaction, not $60 + $40
+        bd_rv = next(v for v in vendors
+                     if v['vendor'] == 'Bakers Delight'
+                     and v['market_name'] == 'Riverside Market')
+        assert bd_rv['gross'] == 60.00  # only from transaction
 
-    def test_dates_merged(self, fresh_db):
-        """Bakers Delight dates include both txn and FMNP entry market days."""
+    def test_dates_per_market(self, fresh_db):
+        """Bakers Delight dates are split by market."""
         _seed(fresh_db)
         vendors = _query_vendor_reimbursement(fresh_db)
-        bd = next(v for v in vendors if v['vendor'] == 'Bakers Delight')
-        dates = set(bd['dates'].split(','))
-        # Transaction on 2026-02-20, FMNP entries on 2026-02-20 and 2026-02-15
-        assert '2026-02-15' in dates
-        assert '2026-02-20' in dates
+        bd_rv = next(v for v in vendors
+                     if v['vendor'] == 'Bakers Delight'
+                     and v['market_name'] == 'Riverside Market')
+        assert '2026-02-20' in bd_rv['dates']
+        bd_dt = next(v for v in vendors
+                     if v['vendor'] == 'Bakers Delight'
+                     and v['market_name'] == 'Downtown Market')
+        assert '2026-02-15' in bd_dt['dates']
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -29,6 +29,7 @@ def get_connection() -> sqlite3.Connection:
         _local.connection.row_factory = sqlite3.Row
         _local.connection.execute("PRAGMA journal_mode=WAL")
         _local.connection.execute("PRAGMA foreign_keys=ON")
+        _local.connection.execute("PRAGMA busy_timeout=5000")
     return _local.connection
 
 

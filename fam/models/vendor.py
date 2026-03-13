@@ -18,11 +18,16 @@ def get_vendor_by_id(vendor_id):
     return dict(row) if row else None
 
 
-def create_vendor(name, contact_info=None):
+def create_vendor(name, contact_info=None, check_payable_to=None,
+                  street=None, city=None, state=None, zip_code=None,
+                  ach_enabled=False):
     conn = get_connection()
     cursor = conn.execute(
-        "INSERT INTO vendors (name, contact_info) VALUES (?, ?)",
-        (name, contact_info)
+        "INSERT INTO vendors (name, contact_info, check_payable_to,"
+        " street, city, state, zip_code, ach_enabled)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (name, contact_info, check_payable_to,
+         street, city, state, zip_code, int(ach_enabled))
     )
     conn.commit()
     return cursor.lastrowid
@@ -81,7 +86,9 @@ def unassign_vendor_from_market(market_id, vendor_id):
     conn.commit()
 
 
-def update_vendor(vendor_id, name=None, contact_info=None, is_active=None):
+def update_vendor(vendor_id, name=None, contact_info=None, is_active=None,
+                  check_payable_to=None, street=None, city=None,
+                  state=None, zip_code=None, ach_enabled=None):
     conn = get_connection()
     fields = []
     values = []
@@ -94,6 +101,24 @@ def update_vendor(vendor_id, name=None, contact_info=None, is_active=None):
     if is_active is not None:
         fields.append("is_active=?")
         values.append(int(is_active))
+    if check_payable_to is not None:
+        fields.append("check_payable_to=?")
+        values.append(check_payable_to)
+    if street is not None:
+        fields.append("street=?")
+        values.append(street)
+    if city is not None:
+        fields.append("city=?")
+        values.append(city)
+    if state is not None:
+        fields.append("state=?")
+        values.append(state)
+    if zip_code is not None:
+        fields.append("zip_code=?")
+        values.append(zip_code)
+    if ach_enabled is not None:
+        fields.append("ach_enabled=?")
+        values.append(int(ach_enabled))
     if not fields:
         return
     values.append(vendor_id)

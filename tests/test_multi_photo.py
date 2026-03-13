@@ -612,10 +612,10 @@ class TestDriveUploadMultiPhoto:
 # data_collector.py — FMNP entries multi-photo URL display
 # ══════════════════════════════════════════════════════════════════
 class TestDataCollectorMultiPhoto:
-    """Tests for _collect_fmnp_entries multi-photo URL display."""
+    """Tests for _collect_fmnp_entries per-check row expansion."""
 
     def test_no_photo_url(self, fresh_db):
-        """Entries with no photo should show empty Photo field."""
+        """Entry with no photo → 1 row with empty Photo field."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry
         create_fmnp_entry(1, 1, 25.0, 'Alice')
@@ -624,9 +624,12 @@ class TestDataCollectorMultiPhoto:
         result = _collect_fmnp_entries(fresh_db, 1)
         assert len(result) == 1
         assert result[0]['Photo'] == ''
+        assert result[0]['Source'] == 'FMNP Entry'
+        assert result[0]['Check'] == '1 of 1'
+        assert 'Entry ID' in result[0]
 
     def test_single_photo_url(self, fresh_db):
-        """Single photo URL should display directly."""
+        """Single photo → 1 row with that URL."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url
         entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
@@ -634,10 +637,12 @@ class TestDataCollectorMultiPhoto:
 
         from fam.sync.data_collector import _collect_fmnp_entries
         result = _collect_fmnp_entries(fresh_db, 1)
+        assert len(result) == 1
         assert result[0]['Photo'] == 'https://drive.google.com/file/d/1/view'
+        assert result[0]['Check'] == '1 of 1'
 
-    def test_multi_photo_urls_pipe_separated(self, fresh_db):
-        """Multiple photo URLs should be joined with ' | '."""
+    def test_multi_photo_urls_expand_to_rows(self, fresh_db):
+        """Multiple photos → one row per photo with individual URLs."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg'])
@@ -650,18 +655,24 @@ class TestDataCollectorMultiPhoto:
 
         from fam.sync.data_collector import _collect_fmnp_entries
         result = _collect_fmnp_entries(fresh_db, 1)
-        assert result[0]['Photo'] == 'https://drive/1 | https://drive/2'
+        assert len(result) == 2
+        assert result[0]['Photo'] == 'https://drive/1'
+        assert result[0]['Check'] == '1 of 2'
+        assert result[0]['Check Amount'] == 25.0
+        assert result[0]['Total Amount'] == 50.0
+        assert result[1]['Photo'] == 'https://drive/2'
+        assert result[1]['Check'] == '2 of 2'
 
     def test_legacy_url_string(self, fresh_db):
-        """Legacy single URL string (non-JSON) should still display."""
+        """Legacy single URL string (non-JSON) → 1 row."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url
         entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
-        # Old-style single URL (not JSON)
         update_fmnp_photo_drive_url(entry_id, 'https://drive.google.com/file/d/old/view')
 
         from fam.sync.data_collector import _collect_fmnp_entries
         result = _collect_fmnp_entries(fresh_db, 1)
+        assert len(result) == 1
         assert result[0]['Photo'] == 'https://drive.google.com/file/d/old/view'
 
 

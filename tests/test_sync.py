@@ -47,6 +47,7 @@ def _create_market_day_with_transactions(
     market_code='TEST', device_id='device-001',
     txn_status='Confirmed', txn_count=1,
     fam_id_prefix=None, market_date=None,
+    market_id=None,
 ):
     """Helper: open a market day and create transactions.
 
@@ -54,8 +55,12 @@ def _create_market_day_with_transactions(
     """
     conn = get_connection()
 
-    # Get first market and vendor
-    market = conn.execute("SELECT id FROM markets LIMIT 1").fetchone()
+    # Get market and vendor
+    if market_id is not None:
+        market = conn.execute(
+            "SELECT id FROM markets WHERE id = ?", [market_id]).fetchone()
+    else:
+        market = conn.execute("SELECT id FROM markets LIMIT 1").fetchone()
     vendor = conn.execute("SELECT id FROM vendors LIMIT 1").fetchone()
     pm = conn.execute(
         "SELECT id, name, match_percent FROM payment_methods LIMIT 1"
@@ -111,6 +116,14 @@ def _create_market_day_with_transactions(
     return md_id, txn_ids
 
 
+def _enable_all_optional_tabs():
+    """Enable all optional sync tabs so tests can access their data."""
+    from fam.utils.app_settings import set_setting
+    for key in ('sync_tab_fam_match_report', 'sync_tab_transaction_log',
+                'sync_tab_activity_log', 'sync_tab_market_day_summary'):
+        set_setting(key, '1')
+
+
 # ──────────────────────────────────────────────────────────────────
 # SyncResult
 # ──────────────────────────────────────────────────────────────────
@@ -155,7 +168,8 @@ class TestDataCollector:
         assert result == {}
 
     def test_collect_returns_9_tabs(self):
-        """Returns data for all 9 sheet tabs."""
+        """With all optional tabs enabled, returns data for all 9 sheet tabs."""
+        _enable_all_optional_tabs()
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
@@ -167,28 +181,45 @@ class TestDataCollector:
         }
         assert set(data.keys()) == expected_tabs
 
-    def test_identity_columns_prepended(self):
-        """Every row has market_code and device_id as first two keys."""
+    def test_identity_columns_present(self):
+        """Every row has market_code derived from market name, and device_id."""
+        _enable_all_optional_tabs()
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
+        from fam.utils.app_settings import derive_market_code
+
+        # Resolve expected market_code from the actual market name
+        conn = get_connection()
+        mkt_name = conn.execute("""
+            SELECT m.name FROM market_days md
+            JOIN markets m ON md.market_id = m.id
+            WHERE md.id = ?
+        """, [md_id]).fetchone()['name']
+        expected_mc = derive_market_code(mkt_name)
+
         data = collect_sync_data(md_id)
         for tab_name, rows in data.items():
             for row in rows:
                 assert 'market_code' in row, f"{tab_name} missing market_code"
                 assert 'device_id' in row, f"{tab_name} missing device_id"
-                assert row['market_code'] == 'TEST'
+                # Error Log is global (not per-market-day) so it uses
+                # app_settings market_code; all other tabs derive from
+                # the market day's parent market name.
+                if tab_name != 'Error Log':
+                    assert row['market_code'] == expected_mc
                 assert row['device_id'] == 'device-001'
 
     def test_vendor_reimbursement_data(self):
+        _enable_all_optional_tabs()
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
         rows = data['Vendor Reimbursement']
         assert len(rows) >= 1
         row = rows[0]
+        assert 'Market Name' in row
         assert 'Vendor' in row
-        assert 'Gross Sales' in row
-        assert 'FAM Match' in row
+        assert 'Total Due to Vendor' in row
 
     def test_detailed_ledger_data(self):
         md_id, _ = _create_market_day_with_transactions()
@@ -203,6 +234,7 @@ class TestDataCollector:
         assert row['Status'] == 'Confirmed'
 
     def test_market_day_summary(self):
+        _enable_all_optional_tabs()
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
@@ -221,6 +253,7 @@ class TestDataCollector:
         assert rows[0]['Zip Code'] == '15102'
 
     def test_fam_match_report(self):
+        _enable_all_optional_tabs()
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
@@ -231,6 +264,7 @@ class TestDataCollector:
 
     def test_empty_market_day(self):
         """Market day with no transactions returns empty lists for most tabs."""
+        _enable_all_optional_tabs()
         conn = get_connection()
         market = conn.execute("SELECT id FROM markets LIMIT 1").fetchone()
         from fam.models.market_day import create_market_day
@@ -245,6 +279,90 @@ class TestDataCollector:
         assert data['Vendor Reimbursement'] == []
         assert data['Detailed Ledger'] == []
         assert len(data['Market Day Summary']) == 1  # Summary always has 1 row
+
+
+# ──────────────────────────────────────────────────────────────────
+# Per-tab sync toggles
+# ──────────────────────────────────────────────────────────────────
+class TestSyncTabToggles:
+    """Per-tab sync toggle filtering in collect_sync_data."""
+
+    def test_default_optional_tabs_excluded(self):
+        """With default settings, optional tabs are not collected."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+
+        # Required tabs present
+        assert 'Vendor Reimbursement' in data
+        assert 'Detailed Ledger' in data
+        assert 'Error Log' in data
+        assert 'Geolocation' in data
+        assert 'FMNP Entries' in data
+        # Optional tabs absent by default
+        assert 'FAM Match Report' not in data
+        assert 'Transaction Log' not in data
+        assert 'Activity Log' not in data
+        assert 'Market Day Summary' not in data
+
+    def test_enabled_optional_tab_included(self):
+        """Enabling an optional tab causes it to appear in collected data."""
+        from fam.utils.app_settings import set_setting
+        set_setting('sync_tab_fam_match_report', '1')
+
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+
+        assert 'FAM Match Report' in data
+        assert len(data['FAM Match Report']) >= 1
+        # Others still excluded
+        assert 'Transaction Log' not in data
+
+    def test_all_optional_tabs_enabled(self):
+        """Enabling all optional tabs returns the full 9-tab set."""
+        _enable_all_optional_tabs()
+
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        assert len(data) == 9
+
+    def test_required_tabs_always_enabled(self):
+        """Required tabs cannot be disabled via is_sync_tab_enabled."""
+        from fam.utils.app_settings import is_sync_tab_enabled
+        assert is_sync_tab_enabled('Vendor Reimbursement') is True
+        assert is_sync_tab_enabled('Detailed Ledger') is True
+        assert is_sync_tab_enabled('Error Log') is True
+        assert is_sync_tab_enabled('Agent Tracker') is True
+        assert is_sync_tab_enabled('Geolocation') is True
+        assert is_sync_tab_enabled('FMNP Entries') is True
+
+    def test_optional_tab_default_off(self):
+        """Optional tabs default to disabled."""
+        from fam.utils.app_settings import is_sync_tab_enabled
+        assert is_sync_tab_enabled('FAM Match Report') is False
+        assert is_sync_tab_enabled('Transaction Log') is False
+        assert is_sync_tab_enabled('Activity Log') is False
+        assert is_sync_tab_enabled('Market Day Summary') is False
+
+    def test_set_sync_tab_round_trip(self):
+        """set_sync_tab_enabled persists and is_sync_tab_enabled reads it."""
+        from fam.utils.app_settings import (
+            set_sync_tab_enabled, is_sync_tab_enabled,
+        )
+        set_sync_tab_enabled('Activity Log', True)
+        assert is_sync_tab_enabled('Activity Log') is True
+        set_sync_tab_enabled('Activity Log', False)
+        assert is_sync_tab_enabled('Activity Log') is False
+
+    def test_set_sync_tab_ignores_required(self):
+        """Trying to disable a required tab has no effect."""
+        from fam.utils.app_settings import (
+            set_sync_tab_enabled, is_sync_tab_enabled,
+        )
+        set_sync_tab_enabled('Vendor Reimbursement', False)
+        assert is_sync_tab_enabled('Vendor Reimbursement') is True
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -279,12 +397,13 @@ class MockBackend(SyncBackend):
 
 class TestSyncManager:
     def test_sync_all_calls_upsert_for_each_tab(self):
+        _enable_all_optional_tabs()
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         from fam.sync.manager import SyncManager
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         results = manager.sync_all(data)
 
@@ -299,7 +418,7 @@ class TestSyncManager:
         from fam.utils.app_settings import get_last_sync_at
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         manager.sync_all(data)
 
@@ -308,6 +427,7 @@ class TestSyncManager:
 
     def test_sync_all_handles_partial_failure(self):
         """If one tab fails, others still succeed."""
+        _enable_all_optional_tabs()
         from fam.sync.manager import SyncManager
 
         class FailOnLedger(MockBackend):
@@ -319,7 +439,7 @@ class TestSyncManager:
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
-        manager = SyncManager(FailOnLedger())
+        manager = SyncManager(FailOnLedger(), throttle_writes=False)
         results = manager.sync_all(data)
 
         assert results['Detailed Ledger'].success is False
@@ -328,7 +448,7 @@ class TestSyncManager:
     def test_is_available(self):
         backend = MockBackend()
         from fam.sync.manager import SyncManager
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         assert manager.is_available() is True
         backend.configured = False
         assert manager.is_available() is False
@@ -340,7 +460,7 @@ class TestSyncManager:
         set_setting('device_id', 'dev-clr')
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         results = manager.clear_market_data()
 
         assert len(results) == 10  # 9 data tabs + Agent Tracker
@@ -488,7 +608,7 @@ class TestMultiDeviceIsolation:
         set_setting('device_id', 'aaaa-1111')
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         manager.clear_market_data()
 
         for call in backend.delete_calls:
@@ -497,6 +617,7 @@ class TestMultiDeviceIsolation:
 
     def test_upsert_tracks_per_device(self):
         """Two devices syncing the same tab produce separate upsert calls."""
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
         from fam.sync.manager import SyncManager
 
@@ -506,7 +627,7 @@ class TestMultiDeviceIsolation:
         data_a = collect_sync_data(md1)
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         results_a = manager.sync_all(data_a)
         calls_a = len(backend.upsert_calls)
 
@@ -529,28 +650,44 @@ class TestMultiMarketIsolation:
     """Simulate markets BFM and DT syncing to the same spreadsheet."""
 
     def test_different_markets_have_different_codes(self):
+        """Market days from different markets get distinct derived codes."""
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
+        from fam.utils.app_settings import derive_market_code
+
+        conn = get_connection()
+        markets = conn.execute(
+            "SELECT id, name FROM markets ORDER BY id LIMIT 2"
+        ).fetchall()
+        m1_id, m1_name = markets[0]['id'], markets[0]['name']
+        m2_id, m2_name = markets[1]['id'], markets[1]['name']
 
         md1, _ = _create_market_day_with_transactions(
-            market_code='BFM', device_id='dev-bfm',
-            fam_id_prefix='FAM-BFM-devb')
-        data_bfm = collect_sync_data(md1)
+            device_id='dev-a', fam_id_prefix='FAM-A',
+            market_id=m1_id)
+        data_a = collect_sync_data(md1)
 
         md2, _ = _create_market_day_with_transactions(
-            market_code='DT', device_id='dev-dt',
-            fam_id_prefix='FAM-DT-devd',
-            market_date=(date.today() + timedelta(days=1)).isoformat())
-        data_dt = collect_sync_data(md2)
+            device_id='dev-b', fam_id_prefix='FAM-B',
+            market_date=(date.today() + timedelta(days=1)).isoformat(),
+            market_id=m2_id)
+        data_b = collect_sync_data(md2)
 
-        # BFM data has BFM code
-        for rows in data_bfm.values():
-            for row in rows:
-                assert row['market_code'] == 'BFM'
+        expected_a = derive_market_code(m1_name)
+        expected_b = derive_market_code(m2_name)
+        assert expected_a != expected_b  # sanity: different markets
 
-        # DT data has DT code
-        for rows in data_dt.values():
+        for tab, rows in data_a.items():
+            if tab == 'Error Log':
+                continue  # global tab, not per-market-day
             for row in rows:
-                assert row['market_code'] == 'DT'
+                assert row['market_code'] == expected_a
+
+        for tab, rows in data_b.items():
+            if tab == 'Error Log':
+                continue
+            for row in rows:
+                assert row['market_code'] == expected_b
 
     def test_clear_only_affects_own_market(self):
         from fam.sync.manager import SyncManager
@@ -560,7 +697,7 @@ class TestMultiMarketIsolation:
         set_setting('device_id', 'dev-dt')
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         manager.clear_market_data()
 
         for call in backend.delete_calls:
@@ -582,6 +719,7 @@ class TestVoidedTransactions:
         conn.commit()
 
     def test_voided_excluded_from_vendor_reimbursement(self):
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
         md_id, txn_ids = _create_market_day_with_transactions()
         self._void(txn_ids[0])
@@ -591,6 +729,7 @@ class TestVoidedTransactions:
             "Voided-only vendor should produce no rows"
 
     def test_voided_excluded_from_fam_match(self):
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
         md_id, txn_ids = _create_market_day_with_transactions()
         self._void(txn_ids[0])
@@ -608,6 +747,7 @@ class TestVoidedTransactions:
         assert data['Geolocation'] == []
 
     def test_voided_excluded_from_summary_totals(self):
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
         md_id, txn_ids = _create_market_day_with_transactions()
         self._void(txn_ids[0])
@@ -631,6 +771,7 @@ class TestVoidedTransactions:
 
     def test_partial_void_adjusts_totals(self):
         """Two transactions, one voided: totals should only include the live one."""
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
         md_id, txn_ids = _create_market_day_with_transactions(txn_count=2)
         self._void(txn_ids[0])  # void only the first
@@ -647,12 +788,13 @@ class TestVoidedTransactions:
 
     def test_void_then_re_sync_removes_vendor_row(self):
         """After voiding, upsert should signal stale-row removal."""
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
         from fam.sync.manager import SyncManager
 
         md_id, txn_ids = _create_market_day_with_transactions()
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
 
         # Initial sync — vendor has data
         data = collect_sync_data(md_id)
@@ -888,6 +1030,7 @@ class TestStaleRowRemoval:
 
     def test_void_removes_vendor_row_from_sheet(self):
         """Void all txns → sync → vendor row disappears from sheet."""
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
         from fam.sync.manager import SyncManager
 
@@ -895,7 +1038,7 @@ class TestStaleRowRemoval:
             market_code='BFM', device_id='dev-A')
 
         backend = InMemorySheetBackend('BFM', 'dev-A')
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
 
         # Sync with live transaction
         data = collect_sync_data(md_id)
@@ -924,13 +1067,14 @@ class TestStaleRowRemoval:
         # Pre-seed sheet with a row from device-B
         backend.sheets['Vendor Reimbursement'] = [
             {'market_code': 'BFM', 'device_id': 'dev-B',
-             'Vendor': 'Organic Farm', 'Gross Sales': 50.0},
+             'Market Name': 'Test Market', 'Vendor': 'Organic Farm',
+             'Total Due to Vendor': 50.0},
         ]
 
         set_setting('market_code', 'BFM')
         set_setting('device_id', 'dev-A')
 
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         # Sync empty data from device-A
         manager.sync_all({'Vendor Reimbursement': []})
 
@@ -948,13 +1092,14 @@ class TestStaleRowRemoval:
         # Pre-seed sheet with a row from market DT
         backend.sheets['Vendor Reimbursement'] = [
             {'market_code': 'DT', 'device_id': 'dev-DT',
-             'Vendor': 'City Bakery', 'Gross Sales': 100.0},
+             'Market Name': 'Downtown Market', 'Vendor': 'City Bakery',
+             'Total Due to Vendor': 100.0},
         ]
 
         set_setting('market_code', 'BFM')
         set_setting('device_id', 'dev-A')
 
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         manager.sync_all({'Vendor Reimbursement': []})
 
         assert len(backend.sheets['Vendor Reimbursement']) == 1
@@ -968,15 +1113,17 @@ class TestStaleRowRemoval:
         set_setting('market_code', 'BFM')
         set_setting('device_id', 'dev-A')
         backend = InMemorySheetBackend('BFM', 'dev-A')
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
 
         # First sync: two vendors
         manager.sync_all({
             'Vendor Reimbursement': [
                 {'market_code': 'BFM', 'device_id': 'dev-A',
-                 'Vendor': 'Farm A', 'Gross Sales': 50.0},
+                 'Market Name': 'Big Farm Market', 'Vendor': 'Farm A',
+                 'Total Due to Vendor': 50.0},
                 {'market_code': 'BFM', 'device_id': 'dev-A',
-                 'Vendor': 'Farm B', 'Gross Sales': 30.0},
+                 'Market Name': 'Big Farm Market', 'Vendor': 'Farm B',
+                 'Total Due to Vendor': 30.0},
             ]
         })
         assert len(backend.sheets['Vendor Reimbursement']) == 2
@@ -985,13 +1132,14 @@ class TestStaleRowRemoval:
         manager.sync_all({
             'Vendor Reimbursement': [
                 {'market_code': 'BFM', 'device_id': 'dev-A',
-                 'Vendor': 'Farm A', 'Gross Sales': 45.0},
+                 'Market Name': 'Big Farm Market', 'Vendor': 'Farm A',
+                 'Total Due to Vendor': 45.0},
             ]
         })
         sheet = backend.sheets['Vendor Reimbursement']
         assert len(sheet) == 1
         assert sheet[0]['Vendor'] == 'Farm A'
-        assert sheet[0]['Gross Sales'] == 45.0  # updated value
+        assert sheet[0]['Total Due to Vendor'] == 45.0  # updated value
 
     def test_full_multi_device_lifecycle(self):
         """Two devices sync, one voids, rows merge correctly."""
@@ -1007,10 +1155,11 @@ class TestStaleRowRemoval:
         shared_sheets = {}
         backend_a.sheets = shared_sheets
 
-        SyncManager(backend_a).sync_all({
+        SyncManager(backend_a, throttle_writes=False).sync_all({
             'Vendor Reimbursement': [
                 {'market_code': 'BFM', 'device_id': 'dev-A',
-                 'Vendor': 'Farm A', 'Gross Sales': 50.0},
+                 'Market Name': 'Big Farm Market', 'Vendor': 'Farm A',
+                 'Total Due to Vendor': 50.0},
             ]
         })
 
@@ -1019,10 +1168,11 @@ class TestStaleRowRemoval:
         backend_b = InMemorySheetBackend('BFM', 'dev-B')
         backend_b.sheets = shared_sheets
 
-        SyncManager(backend_b).sync_all({
+        SyncManager(backend_b, throttle_writes=False).sync_all({
             'Vendor Reimbursement': [
                 {'market_code': 'BFM', 'device_id': 'dev-B',
-                 'Vendor': 'Farm A', 'Gross Sales': 30.0},
+                 'Market Name': 'Big Farm Market', 'Vendor': 'Farm A',
+                 'Total Due to Vendor': 30.0},
             ]
         })
 
@@ -1034,7 +1184,7 @@ class TestStaleRowRemoval:
         backend_a2 = InMemorySheetBackend('BFM', 'dev-A')
         backend_a2.sheets = shared_sheets
 
-        SyncManager(backend_a2).sync_all({
+        SyncManager(backend_a2, throttle_writes=False).sync_all({
             'Vendor Reimbursement': []
         })
 
@@ -1048,24 +1198,28 @@ class TestStaleRowRemoval:
 # ──────────────────────────────────────────────────────────────────
 class TestEdgeCases:
 
-    def test_sync_with_no_market_code(self):
-        """Sync still works if market_code is not set (empty string)."""
+    def test_sync_with_no_market_code_setting(self):
+        """Market code is derived from market name even when app_settings is empty."""
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
-        from fam.utils.app_settings import set_setting
+        from fam.utils.app_settings import set_setting, derive_market_code
         from fam.models.market_day import create_market_day
 
         set_setting('market_code', '')
         set_setting('device_id', 'dev-001')
 
         conn = get_connection()
-        market = conn.execute("SELECT id FROM markets LIMIT 1").fetchone()
+        market = conn.execute("SELECT id, name FROM markets LIMIT 1").fetchone()
         md_id = create_market_day(market['id'], '2026-06-01', opened_by="Test")
+
+        expected_mc = derive_market_code(market['name'])
 
         data = collect_sync_data(md_id)
         assert len(data) == 9
-        for rows in data.values():
+        for tab, rows in data.items():
             for row in rows:
-                assert row['market_code'] == ''
+                if tab != 'Error Log':
+                    assert row['market_code'] == expected_mc
                 assert row['device_id'] == 'dev-001'
 
     def test_sync_with_no_device_id(self):
@@ -1088,6 +1242,7 @@ class TestEdgeCases:
 
     def test_many_transactions_sync(self):
         """Bulk test: 20 transactions all sync correctly."""
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
 
         md_id, txn_ids = _create_market_day_with_transactions(
@@ -1103,6 +1258,7 @@ class TestEdgeCases:
 
     def test_adjusted_status_included(self):
         """Adjusted transactions are included alongside Confirmed."""
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
 
         md_id, txn_ids = _create_market_day_with_transactions(
@@ -1115,6 +1271,7 @@ class TestEdgeCases:
 
     def test_draft_status_excluded(self):
         """Draft transactions appear nowhere — not even in Detailed Ledger."""
+        _enable_all_optional_tabs()
         from fam.sync.data_collector import collect_sync_data
 
         md_id, _ = _create_market_day_with_transactions(
@@ -1129,6 +1286,7 @@ class TestEdgeCases:
 
     def test_manager_backend_exception_caught(self):
         """If backend raises an exception, sync_all catches it gracefully."""
+        _enable_all_optional_tabs()
         from fam.sync.manager import SyncManager
 
         class ExplodingBackend(MockBackend):
@@ -1139,7 +1297,7 @@ class TestEdgeCases:
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
 
-        manager = SyncManager(ExplodingBackend())
+        manager = SyncManager(ExplodingBackend(), throttle_writes=False)
         results = manager.sync_all(data)
 
         # All 9 data tabs + Agent Tracker should have failed gracefully
@@ -1163,7 +1321,7 @@ class TestEdgeCases:
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
 
-        SyncManager(FailOnGeo()).sync_all(data)
+        SyncManager(FailOnGeo(), throttle_writes=False).sync_all(data)
         err = get_last_sync_error()
         assert 'Geolocation' in err
 
@@ -1181,7 +1339,7 @@ class TestEdgeCases:
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
 
-        SyncManager(MockBackend()).sync_all(data)
+        SyncManager(MockBackend(), throttle_writes=False).sync_all(data)
         assert get_last_sync_error() == ''
 
 
@@ -1254,10 +1412,10 @@ class TestSchemaMigrationV16:
         assert 'app_version' in col_names
         assert 'device_id' in col_names
 
-    def test_schema_version_is_18(self):
-        """Current schema version should be 18."""
+    def test_schema_version_is_21(self):
+        """Current schema version should be 21."""
         from fam.database.schema import CURRENT_SCHEMA_VERSION
-        assert CURRENT_SCHEMA_VERSION == 18
+        assert CURRENT_SCHEMA_VERSION == 21
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1328,8 +1486,11 @@ class TestLogActionCapture:
 class TestCollectorVersionFields:
     """Ensure Transaction Log and Activity Log sync include version/device."""
 
+    def setup_method(self):
+        _enable_all_optional_tabs()
+
     def test_transaction_log_has_version_fields(self):
-        """Transaction Log rows should contain 'App Version' and 'Device'."""
+        """Transaction Log rows should contain 'App Version' and 'device_id'."""
         from fam.sync.data_collector import collect_sync_data
         from fam.models.audit import log_action
 
@@ -1342,11 +1503,11 @@ class TestCollectorVersionFields:
         for row in txn_log:
             assert 'App Version' in row, \
                 "'App Version' missing from Transaction Log row"
-            assert 'Device' in row, \
-                "'Device' missing from Transaction Log row"
+            assert 'device_id' in row, \
+                "'device_id' missing from Transaction Log row"
 
     def test_activity_log_has_version_fields(self):
-        """Activity Log rows should contain 'App Version' and 'Device'."""
+        """Activity Log rows should contain 'App Version' and 'device_id'."""
         from fam.sync.data_collector import collect_sync_data
         from fam.models.audit import log_action
 
@@ -1359,8 +1520,8 @@ class TestCollectorVersionFields:
         for row in activity_log:
             assert 'App Version' in row, \
                 "'App Version' missing from Activity Log row"
-            assert 'Device' in row, \
-                "'Device' missing from Activity Log row"
+            assert 'device_id' in row, \
+                "'device_id' missing from Activity Log row"
 
     def test_transaction_log_version_matches_package(self):
         """'App Version' should match fam.__version__."""
@@ -1427,7 +1588,7 @@ class TestErrorLogCollector:
         rows = _collect_error_log()
         assert len(rows) == 1
         expected_cols = {'Timestamp', 'Level', 'Area', 'Module',
-                         'Message', 'Traceback', 'App Version', 'Device'}
+                         'Message', 'Traceback', 'App Version'}
         assert set(rows[0].keys()) == expected_cols
 
     @patch('fam.utils.logging_config.get_log_path')
@@ -1555,7 +1716,7 @@ class TestAgentTracker:
         from fam.sync.manager import SyncManager
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         results = manager.sync_all(data)
 
@@ -1569,7 +1730,7 @@ class TestAgentTracker:
         from fam.sync.manager import SyncManager
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         manager.sync_all(data)
 
@@ -1583,7 +1744,7 @@ class TestAgentTracker:
 
         row = rows[0]
         expected_cols = {
-            'device_id', 'market_code', 'Market Name', 'App Version',
+            'device_id', 'App Version',
             'Last Sync', 'Hostname', 'OS', 'Status',
             'Sheets Synced', 'Total Rows', 'Errors',
         }
@@ -1596,7 +1757,7 @@ class TestAgentTracker:
         from fam.sync.manager import SyncManager
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         manager.sync_all(data)
 
@@ -1619,7 +1780,7 @@ class TestAgentTracker:
         from fam.sync.data_collector import collect_sync_data
 
         backend = PartialFailBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         manager.sync_all(data)
 
@@ -1636,7 +1797,7 @@ class TestAgentTracker:
         from fam.sync.manager import SyncManager
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         manager.sync_all(data)
 
@@ -1652,7 +1813,7 @@ class TestAgentTracker:
         from fam.sync.manager import SyncManager
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         manager.sync_all(data)
 
@@ -1675,7 +1836,7 @@ class TestAgentTracker:
         from fam.sync.data_collector import collect_sync_data
 
         backend = TrackerFailBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         results = manager.sync_all(data)
 
@@ -1691,12 +1852,13 @@ class TestAgentTracker:
 
     def test_agent_tracker_sheets_synced_count(self):
         """Sheets Synced should show correct counts (e.g. '9/9')."""
+        _enable_all_optional_tabs()
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         from fam.sync.manager import SyncManager
 
         backend = MockBackend()
-        manager = SyncManager(backend)
+        manager = SyncManager(backend, throttle_writes=False)
         data = collect_sync_data(md_id)
         manager.sync_all(data)
 
@@ -1704,22 +1866,467 @@ class TestAgentTracker:
                        if c[0] == 'Agent Tracker'][0][1][0]
         assert tracker_row['Sheets Synced'] == '9/9'
 
-    def test_agent_tracker_market_name(self):
-        """Market Name should come from the active market in the database."""
+
+
+# ──────────────────────────────────────────────────────────────────
+# Schema migration v18→v19: vendor registration fields
+# ──────────────────────────────────────────────────────────────────
+class TestSchemaMigrationV19:
+    """Verify migration adds vendor registration fields."""
+
+    def test_fresh_db_has_vendor_registration_columns(self):
+        """A fresh database should have all 6 new vendor columns."""
+        conn = get_connection()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(vendors)").fetchall()}
+        assert 'check_payable_to' in cols
+        assert 'street' in cols
+        assert 'city' in cols
+        assert 'state' in cols
+        assert 'zip_code' in cols
+        assert 'ach_enabled' in cols
+
+    def test_migration_is_idempotent(self):
+        """Running the migration again should not raise."""
+        from fam.database.schema import _migrate_v18_to_v19
+        conn = get_connection()
+        _migrate_v18_to_v19(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(vendors)").fetchall()}
+        assert 'check_payable_to' in cols
+        assert 'ach_enabled' in cols
+
+
+# ──────────────────────────────────────────────────────────────────
+# Vendor model — create/update with new registration fields
+# ──────────────────────────────────────────────────────────────────
+class TestVendorModel:
+    """Tests for vendor create/update with new registration fields."""
+
+    def test_create_vendor_minimal(self):
+        """create_vendor with just name should set defaults."""
+        from fam.models.vendor import create_vendor, get_vendor_by_id
+        vid = create_vendor('Minimal Vendor')
+        v = get_vendor_by_id(vid)
+        assert v['name'] == 'Minimal Vendor'
+        assert v['contact_info'] is None
+        assert v['check_payable_to'] is None
+        assert v['street'] is None
+        assert v['ach_enabled'] == 0
+
+    def test_create_vendor_all_fields(self):
+        """create_vendor with all new fields populates them correctly."""
+        from fam.models.vendor import create_vendor, get_vendor_by_id
+        vid = create_vendor(
+            'Full Vendor', contact_info='info@full.com',
+            check_payable_to='Full Vendor LLC',
+            street='123 Main St', city='Pittsburgh',
+            state='PA', zip_code='15213',
+            ach_enabled=True
+        )
+        v = get_vendor_by_id(vid)
+        assert v['name'] == 'Full Vendor'
+        assert v['contact_info'] == 'info@full.com'
+        assert v['check_payable_to'] == 'Full Vendor LLC'
+        assert v['street'] == '123 Main St'
+        assert v['city'] == 'Pittsburgh'
+        assert v['state'] == 'PA'
+        assert v['zip_code'] == '15213'
+        assert v['ach_enabled'] == 1
+
+    def test_update_vendor_registration_fields(self):
+        """update_vendor should update the new fields."""
+        from fam.models.vendor import create_vendor, update_vendor, get_vendor_by_id
+        vid = create_vendor('Update Test')
+        update_vendor(vid,
+                      check_payable_to='Updated LLC',
+                      street='456 Oak Ave',
+                      city='Bellevue',
+                      state='PA',
+                      zip_code='15202',
+                      ach_enabled=True)
+        v = get_vendor_by_id(vid)
+        assert v['check_payable_to'] == 'Updated LLC'
+        assert v['street'] == '456 Oak Ave'
+        assert v['city'] == 'Bellevue'
+        assert v['state'] == 'PA'
+        assert v['zip_code'] == '15202'
+        assert v['ach_enabled'] == 1
+
+    def test_update_vendor_partial(self):
+        """update_vendor with only some fields should leave others unchanged."""
+        from fam.models.vendor import create_vendor, update_vendor, get_vendor_by_id
+        vid = create_vendor('Partial Test', street='100 First St', city='Moon')
+        update_vendor(vid, city='Bridgeville')
+        v = get_vendor_by_id(vid)
+        assert v['street'] == '100 First St'  # unchanged
+        assert v['city'] == 'Bridgeville'     # updated
+
+    def test_update_vendor_no_fields(self):
+        """update_vendor with no fields is a no-op."""
+        from fam.models.vendor import create_vendor, update_vendor, get_vendor_by_id
+        vid = create_vendor('NoOp Test', street='Original')
+        update_vendor(vid)
+        v = get_vendor_by_id(vid)
+        assert v['street'] == 'Original'
+
+
+# ──────────────────────────────────────────────────────────────────
+# Enhanced Vendor Reimbursement data collector
+# ──────────────────────────────────────────────────────────────────
+class TestEnhancedVendorReimbursement:
+    """Tests for the enhanced _collect_vendor_reimbursement with
+    Month, Check Payable To, dynamic method columns, FMNP External,
+    and Total Due to Vendor."""
+
+    def setup_method(self):
+        _enable_all_optional_tabs()
+
+    def test_has_month_column(self):
+        """Vendor Reimbursement rows should have a Month column."""
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
-        from fam.sync.manager import SyncManager
-
-        conn = get_connection()
-        market_name = conn.execute(
-            "SELECT name FROM markets WHERE is_active = 1 LIMIT 1"
-        ).fetchone()['name']
-
-        backend = MockBackend()
-        manager = SyncManager(backend)
         data = collect_sync_data(md_id)
-        manager.sync_all(data)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        assert 'Month' in rows[0]
+        # Month should be a plain text month name (e.g. "October")
+        assert rows[0]['Month'] in [
+            'January', 'February', 'March', 'April', 'May', 'June',
+            'July', 'August', 'September', 'October', 'November', 'December',
+        ]
 
-        tracker_row = [c for c in backend.upsert_calls
-                       if c[0] == 'Agent Tracker'][0][1][0]
-        assert tracker_row['Market Name'] == market_name
+    def test_has_check_payable_to_column(self):
+        """Vendor Reimbursement rows should have Check Payable To."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        assert 'Check Payable To' in rows[0]
+
+    def test_check_payable_to_fallback(self):
+        """When check_payable_to is NULL, should fall back to vendor name."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        # Seed data doesn't set check_payable_to, so fallback to name
+        assert rows[0]['Check Payable To'] == rows[0]['Vendor']
+
+    def test_check_payable_to_uses_custom_value(self):
+        """When check_payable_to is set, should use it instead of name."""
+        conn = get_connection()
+        vendor = conn.execute("SELECT id FROM vendors LIMIT 1").fetchone()
+        conn.execute(
+            "UPDATE vendors SET check_payable_to = 'Custom LLC' WHERE id = ?",
+            (vendor['id'],))
+        conn.commit()
+
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        assert rows[0]['Check Payable To'] == 'Custom LLC'
+
+    def test_has_total_due_to_vendor(self):
+        """Vendor Reimbursement should have Total Due to Vendor column."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        assert 'Total Due to Vendor' in rows[0]
+        assert rows[0]['Total Due to Vendor'] == 25.00  # receipt_total
+
+    def test_dynamic_payment_method_columns(self):
+        """Each distinct payment method should get its own column."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        conn = get_connection()
+
+        # Look up the method_name_snapshot actually used in the payment line items
+        pm_row = conn.execute(
+            "SELECT method_name_snapshot FROM payment_line_items"
+            " WHERE transaction_id IN"
+            " (SELECT id FROM transactions WHERE market_day_id = ?)"
+            " LIMIT 1", (md_id,)
+        ).fetchone()
+        pm_name = pm_row['method_name_snapshot']
+
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        # The payment method name should be a column with the amount
+        assert pm_name in rows[0], \
+            f"Expected '{pm_name}' in columns: {list(rows[0].keys())}"
+        assert rows[0][pm_name] == 25.00
+
+    def test_multiple_payment_methods(self):
+        """Multiple payment methods create separate columns per vendor."""
+        conn = get_connection()
+        market = conn.execute("SELECT id FROM markets LIMIT 1").fetchone()
+        vendor = conn.execute("SELECT id FROM vendors LIMIT 1").fetchone()
+
+        # Use existing Cash payment method (from seed data)
+        cash_pm = conn.execute(
+            "SELECT id FROM payment_methods WHERE name='Cash'"
+        ).fetchone()
+        cash_pm_id = cash_pm['id'] if cash_pm else None
+        if cash_pm_id is None:
+            conn.execute(
+                "INSERT INTO payment_methods (id, name, match_percent, sort_order)"
+                " VALUES (99, 'Cash', 0.0, 5)")
+            cash_pm_id = 99
+
+        from fam.models.market_day import create_market_day
+        from fam.utils.app_settings import set_setting
+        set_setting('market_code', 'MPM')
+        set_setting('device_id', 'dev-mpm')
+        md_id = create_market_day(market['id'], '2026-06-15', opened_by='Test')
+
+        # Transaction with receipt_total = 35
+        conn.execute(
+            "INSERT INTO transactions (id, fam_transaction_id, market_day_id,"
+            " vendor_id, receipt_total, status)"
+            " VALUES (999, 'FAM-MPM-001', ?, ?, 35.00, 'Confirmed')",
+            (md_id, vendor['id']))
+        # Payment line: 20 SNAP, 15 Cash
+        pm1 = conn.execute("SELECT id, name, match_percent FROM payment_methods WHERE name != 'Cash' LIMIT 1").fetchone()
+        conn.execute(
+            "INSERT INTO payment_line_items"
+            " (transaction_id, payment_method_id, method_name_snapshot,"
+            "  match_percent_snapshot, method_amount, match_amount, customer_charged)"
+            " VALUES (999, ?, ?, ?, 20.00, 10.00, 10.00)",
+            (pm1['id'], pm1['name'], pm1['match_percent']))
+        conn.execute(
+            "INSERT INTO payment_line_items"
+            " (transaction_id, payment_method_id, method_name_snapshot,"
+            "  match_percent_snapshot, method_amount, match_amount, customer_charged)"
+            " VALUES (999, ?, 'Cash', 0.0, 15.00, 0.00, 15.00)",
+            (cash_pm_id,))
+        conn.commit()
+
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) == 1
+        assert 'Cash' in rows[0]
+        assert pm1['name'] in rows[0]
+        assert rows[0]['Cash'] == 15.00
+        assert rows[0][pm1['name']] == 20.00
+
+    def test_fmnp_external_column(self):
+        """FMNP External entries should appear in vendor reimbursement."""
+        md_id, _ = _create_market_day_with_transactions()
+        conn = get_connection()
+        vendor = conn.execute("SELECT id FROM vendors LIMIT 1").fetchone()
+
+        # Add an external FMNP entry
+        conn.execute(
+            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by)"
+            " VALUES (?, ?, 10.00, 'Test')",
+            (md_id, vendor['id']))
+        conn.commit()
+
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        assert rows[0]['FMNP (External)'] == 10.00
+        # Total Due = receipt_total (25) + FMNP external (10) = 35
+        assert rows[0]['Total Due to Vendor'] == 35.00
+
+    def test_fmnp_external_only_vendor(self):
+        """Vendor with only FMNP entries (no transactions) should appear."""
+        conn = get_connection()
+        market = conn.execute("SELECT id FROM markets LIMIT 1").fetchone()
+        # Create a vendor with no transactions
+        conn.execute(
+            "INSERT INTO vendors (id, name, check_payable_to)"
+            " VALUES (999, 'FMNP Only Vendor', 'FMNP Only LLC')")
+
+        from fam.models.market_day import create_market_day
+        from fam.utils.app_settings import set_setting
+        set_setting('market_code', 'FMNP')
+        set_setting('device_id', 'dev-fmnp')
+        md_id = create_market_day(market['id'], '2026-07-01', opened_by='Test')
+
+        # Add FMNP entry only (no transactions for this vendor)
+        conn.execute(
+            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by)"
+            " VALUES (?, 999, 20.00, 'Test')", (md_id,))
+        conn.commit()
+
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        fmnp_vendor = [r for r in rows if r['Vendor'] == 'FMNP Only Vendor']
+        assert len(fmnp_vendor) == 1
+        assert fmnp_vendor[0]['FMNP (External)'] == 20.00
+        assert fmnp_vendor[0]['Total Due to Vendor'] == 20.00
+        assert fmnp_vendor[0]['Check Payable To'] == 'FMNP Only LLC'
+
+    def test_month_derived_from_market_day_date(self):
+        """Month column should be plain text month name from the market day date."""
+        md_id, _ = _create_market_day_with_transactions(
+            market_date='2025-10-15')
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        assert rows[0]['Month'] == 'October'
+
+    def test_market_name_column(self):
+        """Market Name column shows full market name, not code."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        assert 'Market Name' in rows[0]
+        assert rows[0]['Market Name'] != ''
+
+    def test_has_address_column(self):
+        """Vendor Reimbursement rows should have an Address column."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        assert 'Address' in rows[0]
+
+    def test_address_built_from_vendor_fields(self):
+        """Address should combine street, city, state, zip_code."""
+        conn = get_connection()
+        vendor = conn.execute("SELECT id FROM vendors LIMIT 1").fetchone()
+        conn.execute(
+            "UPDATE vendors SET street='100 Farm Rd', city='Pittsburgh',"
+            " state='PA', zip_code='15213' WHERE id = ?",
+            (vendor['id'],))
+        conn.commit()
+
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        addr = rows[0]['Address']
+        assert '100 Farm Rd' in addr
+        assert 'Pittsburgh' in addr
+        assert 'PA' in addr
+        assert '15213' in addr
+
+    def test_address_empty_when_no_fields(self):
+        """Address should be empty string when vendor has no address fields."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        # Default seed vendors have no address fields set
+        assert rows[0]['Address'] == ''
+
+    def test_column_order_check_payable_to_after_fmnp(self):
+        """Check Payable To and Address should come after FMNP (External)."""
+        md_id, _ = _create_market_day_with_transactions()
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data(md_id)
+        rows = data['Vendor Reimbursement']
+        assert len(rows) >= 1
+        keys = list(rows[0].keys())
+        fmnp_idx = keys.index('FMNP (External)')
+        cpt_idx = keys.index('Check Payable To')
+        addr_idx = keys.index('Address')
+        assert cpt_idx > fmnp_idx, "Check Payable To should come after FMNP"
+        assert addr_idx > cpt_idx, "Address should come after Check Payable To"
+
+    def test_vendor_reimbursement_consolidates_market_days(self):
+        """Same vendor at same market on 2 different days => 1 consolidated row."""
+        _enable_all_optional_tabs()
+        conn = get_connection()
+        market = conn.execute("SELECT id FROM markets LIMIT 1").fetchone()
+        vendor = conn.execute("SELECT id, name FROM vendors LIMIT 1").fetchone()
+        pm = conn.execute(
+            "SELECT id, name, match_percent FROM payment_methods LIMIT 1"
+        ).fetchone()
+
+        from fam.models.market_day import create_market_day
+        from fam.utils.app_settings import set_setting
+        set_setting('market_code', 'TST')
+        set_setting('device_id', 'dev-01')
+
+        md1 = create_market_day(market['id'], '2026-04-01', opened_by="Test")
+        md2 = create_market_day(market['id'], '2026-04-08', opened_by="Test")
+
+        for md_id, seq in [(md1, 1), (md2, 2)]:
+            cursor = conn.execute(
+                """INSERT INTO transactions (market_day_id, vendor_id,
+                   receipt_total, status, fam_transaction_id)
+                   VALUES (?, ?, 25.00, 'Confirmed', ?)""",
+                (md_id, vendor['id'], f'FAM-TST-202604{seq:02d}-0001'))
+            txn_id = cursor.lastrowid
+            conn.execute(
+                """INSERT INTO payment_line_items
+                   (transaction_id, payment_method_id, method_name_snapshot,
+                    match_percent_snapshot, method_amount,
+                    customer_charged, match_amount)
+                   VALUES (?, ?, ?, ?, 25.00, 12.50, 12.50)""",
+                (txn_id, pm['id'], pm['name'], pm['match_percent']))
+        conn.commit()
+
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data()
+        vr = data['Vendor Reimbursement']
+        vendor_rows = [r for r in vr if r['Vendor'] == vendor['name']]
+        assert len(vendor_rows) == 1, \
+            f"Expected 1 consolidated row, got {len(vendor_rows)}"
+        assert vendor_rows[0]['Total Due to Vendor'] == 50.00
+        assert '2026-04-01' in vendor_rows[0]['Date(s)']
+        assert '2026-04-08' in vendor_rows[0]['Date(s)']
+
+    def test_vendor_reimbursement_splits_by_market(self):
+        """Same vendor at 2 different markets => 2 rows."""
+        _enable_all_optional_tabs()
+        conn = get_connection()
+        markets = conn.execute(
+            "SELECT id, name FROM markets ORDER BY id LIMIT 2"
+        ).fetchall()
+        assert len(markets) == 2, "Need at least 2 markets in seed data"
+        vendor = conn.execute("SELECT id, name FROM vendors LIMIT 1").fetchone()
+        pm = conn.execute(
+            "SELECT id, name, match_percent FROM payment_methods LIMIT 1"
+        ).fetchone()
+
+        from fam.models.market_day import create_market_day
+        from fam.utils.app_settings import set_setting
+        set_setting('market_code', 'TST')
+        set_setting('device_id', 'dev-01')
+
+        for i, mkt in enumerate(markets):
+            md_id = create_market_day(
+                mkt['id'], f'2026-05-0{i + 1}', opened_by="Test")
+            cursor = conn.execute(
+                """INSERT INTO transactions (market_day_id, vendor_id,
+                   receipt_total, status, fam_transaction_id)
+                   VALUES (?, ?, 25.00, 'Confirmed', ?)""",
+                (md_id, vendor['id'], f'FAM-TST-2026050{i + 1}-0001'))
+            txn_id = cursor.lastrowid
+            conn.execute(
+                """INSERT INTO payment_line_items
+                   (transaction_id, payment_method_id, method_name_snapshot,
+                    match_percent_snapshot, method_amount,
+                    customer_charged, match_amount)
+                   VALUES (?, ?, ?, ?, 25.00, 12.50, 12.50)""",
+                (txn_id, pm['id'], pm['name'], pm['match_percent']))
+        conn.commit()
+
+        from fam.sync.data_collector import collect_sync_data
+        data = collect_sync_data()
+        vr = data['Vendor Reimbursement']
+        vendor_rows = [r for r in vr if r['Vendor'] == vendor['name']]
+        assert len(vendor_rows) == 2, \
+            f"Expected 2 rows (one per market), got {len(vendor_rows)}"
+        market_names = {r['Market Name'] for r in vendor_rows}
+        assert markets[0]['name'] in market_names
+        assert markets[1]['name'] in market_names

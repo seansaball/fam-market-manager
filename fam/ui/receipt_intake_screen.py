@@ -640,7 +640,7 @@ class ReceiptIntakeScreen(QWidget):
         if index < 0 or index >= len(self._order_receipts):
             return
         entry = self._order_receipts[index]
-        void_transaction(entry['txn_id'])
+        void_transaction(entry['txn_id'], voided_by="Intake")
         self._order_receipts.pop(index)
         self._refresh_receipts_table()
 

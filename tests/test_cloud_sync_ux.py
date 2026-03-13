@@ -757,12 +757,12 @@ class TestRetryOnQuota:
     """Test the rate-limit retry helper."""
 
     def test_success_first_try(self):
-        from fam.sync.gsheets import _retry_on_quota
+        from fam.sync.gsheets import _retry_on_error as _retry_on_quota
         result = _retry_on_quota(lambda: 42)
         assert result == 42
 
     def test_non_429_error_raises_immediately(self):
-        from fam.sync.gsheets import _retry_on_quota
+        from fam.sync.gsheets import _retry_on_error as _retry_on_quota
         def fail():
             raise ValueError("not a rate limit")
         with pytest.raises(ValueError, match="not a rate limit"):
@@ -784,7 +784,7 @@ class TestRetryOnQuota:
         return gspread.exceptions.APIError(resp)
 
     def test_429_retries_then_succeeds(self):
-        from fam.sync.gsheets import _retry_on_quota
+        from fam.sync.gsheets import _retry_on_error as _retry_on_quota
 
         call_count = 0
         def sometimes_429():
@@ -800,7 +800,7 @@ class TestRetryOnQuota:
         assert call_count == 3
 
     def test_429_exhausts_retries(self):
-        from fam.sync.gsheets import _retry_on_quota
+        from fam.sync.gsheets import _retry_on_error as _retry_on_quota
         import gspread
 
         def always_429():
@@ -811,7 +811,7 @@ class TestRetryOnQuota:
                 _retry_on_quota(always_429, max_retries=2)
 
     def test_non_429_api_error_not_retried(self):
-        from fam.sync.gsheets import _retry_on_quota
+        from fam.sync.gsheets import _retry_on_error as _retry_on_quota
         import gspread
 
         call_count = 0
@@ -1777,9 +1777,9 @@ class TestSchemaMigrationV18:
         col_names = {r['name'] for r in rows}
         assert col_names == {'content_hash', 'relative_path', 'created_at'}
 
-    def test_version_is_18(self):
+    def test_version_is_21(self):
         from fam.database.schema import CURRENT_SCHEMA_VERSION
-        assert CURRENT_SCHEMA_VERSION == 18
+        assert CURRENT_SCHEMA_VERSION == 21
 
 
 # ══════════════════════════════════════════════════════════════════

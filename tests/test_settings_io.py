@@ -519,3 +519,192 @@ class TestRoundTrip:
         result.markets = [ImportMarket('Existing', '', 100.0, True)]
         result.existing_market_names = {'Existing'}
         assert result.has_new_data is False
+
+
+# ══════════════════════════════════════════════════════════════════
+# Vendor registration fields — export, parse, apply
+# ══════════════════════════════════════════════════════════════════
+class TestVendorRegistrationFields:
+
+    def _write_fam(self, tmp_path, content):
+        filepath = str(tmp_path / "vendor_reg.fam")
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return filepath
+
+    def test_export_includes_new_vendor_columns(self, fresh_db, tmp_path):
+        """Export should include Check Payable To, Street, City, State, Zip, ACH."""
+        fresh_db.execute(
+            "INSERT INTO vendors (name, contact_info, check_payable_to,"
+            " street, city, state, zip_code, ach_enabled)"
+            " VALUES ('Test Farm', 'info@farm.com', 'Farm LLC',"
+            " '100 Farm Rd', 'Pittsburgh', 'PA', '15213', 1)")
+        fresh_db.commit()
+        filepath = str(tmp_path / "vendor_export.fam")
+        export_settings(filepath)
+        with open(filepath, 'r') as f:
+            content = f.read()
+        assert 'Farm LLC' in content
+        assert '100 Farm Rd' in content
+        assert 'Pittsburgh' in content
+        assert 'PA' in content
+        assert '15213' in content
+        assert 'Yes' in content  # ach_enabled
+
+    def test_export_vendor_header_has_new_columns(self, fresh_db, tmp_path):
+        """Vendor header should list all 8 columns."""
+        filepath = str(tmp_path / "vendor_header.fam")
+        export_settings(filepath)
+        with open(filepath, 'r') as f:
+            content = f.read()
+        assert 'Name | Contact Info | Check Payable To | Street | City | State | Zip | ACH' in content
+
+    def test_parse_new_8_column_vendor_format(self, fresh_db, tmp_path):
+        """Parsing 8-column vendor rows should populate all new fields."""
+        content = """=== Vendors ===
+Name | Contact Info | Check Payable To | Street | City | State | Zip | ACH
+Organic Farm | org@farm.com | Organic Farm LLC | 200 Green St | Bellevue | PA | 15202 | Yes
+"""
+        filepath = self._write_fam(tmp_path, content)
+        result = parse_settings_file(filepath)
+        assert len(result.vendors) == 1
+        v = result.vendors[0]
+        assert v.name == 'Organic Farm'
+        assert v.contact_info == 'org@farm.com'
+        assert v.check_payable_to == 'Organic Farm LLC'
+        assert v.street == '200 Green St'
+        assert v.city == 'Bellevue'
+        assert v.state == 'PA'
+        assert v.zip_code == '15202'
+        assert v.ach_enabled is True
+
+    def test_parse_old_2_column_vendor_backward_compat(self, fresh_db, tmp_path):
+        """Old-format 2-column vendor rows should still parse with defaults."""
+        content = """=== Vendors ===
+Name | Contact Info
+Legacy Farm | legacy@farm.com
+"""
+        filepath = self._write_fam(tmp_path, content)
+        result = parse_settings_file(filepath)
+        assert len(result.vendors) == 1
+        v = result.vendors[0]
+        assert v.name == 'Legacy Farm'
+        assert v.contact_info == 'legacy@farm.com'
+        assert v.check_payable_to == ''
+        assert v.street == ''
+        assert v.city == ''
+        assert v.state == ''
+        assert v.zip_code == ''
+        assert v.ach_enabled is False
+
+    def test_parse_ach_variations(self, fresh_db, tmp_path):
+        """ACH field should accept 'Yes', 'true', '1', 'on'."""
+        content = """=== Vendors ===
+Name | Contact | Payable | Street | City | State | Zip | ACH
+Farm1 | | | | | | | Yes
+Farm2 | | | | | | | true
+Farm3 | | | | | | | 1
+Farm4 | | | | | | | no
+"""
+        filepath = self._write_fam(tmp_path, content)
+        result = parse_settings_file(filepath)
+        assert result.vendors[0].ach_enabled is True
+        assert result.vendors[1].ach_enabled is True
+        assert result.vendors[2].ach_enabled is True
+        assert result.vendors[3].ach_enabled is False
+
+    def test_parse_state_truncated_to_2_chars(self, fresh_db, tmp_path):
+        """State should be truncated to 2 characters."""
+        content = """=== Vendors ===
+Name | Contact | Payable | Street | City | State | Zip | ACH
+Test | | | | | Pennsylvania | |
+"""
+        filepath = self._write_fam(tmp_path, content)
+        result = parse_settings_file(filepath)
+        assert result.vendors[0].state == 'Pe'
+
+    def test_parse_zip_truncated_to_10_chars(self, fresh_db, tmp_path):
+        """Zip should be truncated to 10 characters."""
+        content = """=== Vendors ===
+Name | Contact | Payable | Street | City | State | Zip | ACH
+Test | | | | | PA | 15213-456789 |
+"""
+        filepath = self._write_fam(tmp_path, content)
+        result = parse_settings_file(filepath)
+        assert len(result.vendors[0].zip_code) <= 10
+
+    def test_apply_import_vendor_with_new_fields(self, fresh_db):
+        """apply_import should insert vendors with all new registration fields."""
+        result = ImportResult()
+        result.vendors = [ImportVendor(
+            'New Farm', 'new@farm.com', 'New Farm LLC',
+            '300 New Rd', 'Moon', 'PA', '15108', True
+        )]
+        result.existing_vendor_names = set()
+        counts = apply_import(result)
+        assert counts['vendors_added'] == 1
+
+        row = fresh_db.execute(
+            "SELECT * FROM vendors WHERE name='New Farm'"
+        ).fetchone()
+        assert row is not None
+        assert row['contact_info'] == 'new@farm.com'
+        assert row['check_payable_to'] == 'New Farm LLC'
+        assert row['street'] == '300 New Rd'
+        assert row['city'] == 'Moon'
+        assert row['state'] == 'PA'
+        assert row['zip_code'] == '15108'
+        assert row['ach_enabled'] == 1
+
+    def test_apply_import_vendor_defaults(self, fresh_db):
+        """apply_import with minimal vendor should use defaults for new fields."""
+        result = ImportResult()
+        result.vendors = [ImportVendor('Minimal Farm', 'min@farm.com')]
+        result.existing_vendor_names = set()
+        counts = apply_import(result)
+        assert counts['vendors_added'] == 1
+
+        row = fresh_db.execute(
+            "SELECT * FROM vendors WHERE name='Minimal Farm'"
+        ).fetchone()
+        assert row['check_payable_to'] is None
+        assert row['street'] is None
+        assert row['ach_enabled'] == 0
+
+    def test_round_trip_with_new_vendor_fields(self, fresh_db, tmp_path):
+        """Export vendors with new fields, then re-import — data should match."""
+        fresh_db.execute(
+            "INSERT INTO vendors (name, contact_info, check_payable_to,"
+            " street, city, state, zip_code, ach_enabled)"
+            " VALUES ('Round Trip Farm', 'rt@farm.com', 'RT LLC',"
+            " '500 RT Blvd', 'Robinson', 'PA', '15205', 1)")
+        fresh_db.commit()
+
+        filepath = str(tmp_path / "rt_vendor.fam")
+        export_settings(filepath)
+
+        # Clear vendors and re-import
+        fresh_db.execute("DELETE FROM market_payment_methods")
+        fresh_db.execute("DELETE FROM market_vendors")
+        fresh_db.execute("DELETE FROM vendors")
+        fresh_db.commit()
+
+        result = parse_settings_file(filepath)
+        assert len(result.errors) == 0
+        v = result.vendors[0]
+        assert v.name == 'Round Trip Farm'
+        assert v.check_payable_to == 'RT LLC'
+        assert v.street == '500 RT Blvd'
+        assert v.city == 'Robinson'
+        assert v.state == 'PA'
+        assert v.zip_code == '15205'
+        assert v.ach_enabled is True
+
+        counts = apply_import(result)
+        assert counts['vendors_added'] == 1
+
+        row = fresh_db.execute(
+            "SELECT * FROM vendors WHERE name='Round Trip Farm'"
+        ).fetchone()
+        assert row['check_payable_to'] == 'RT LLC'
+        assert row['ach_enabled'] == 1

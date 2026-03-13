@@ -2,6 +2,7 @@
 
 import logging
 import platform
+import time
 from datetime import datetime
 
 from fam.sync.base import SyncBackend, SyncResult
@@ -19,21 +20,23 @@ class SyncManager:
     # market_code + device_id are always the first two key columns
     # (except Agent Tracker which is keyed by device_id alone).
     SHEET_KEYS: dict[str, list[str]] = {
-        'Vendor Reimbursement': ['market_code', 'device_id', 'Vendor'],
-        'FAM Match Report':     ['market_code', 'device_id', 'Payment Method'],
+        'Vendor Reimbursement': ['market_code', 'device_id', 'Market Name', 'Vendor'],
+        'FAM Match Report':     ['market_code', 'device_id', 'Payment Method', 'Date'],
         'Detailed Ledger':      ['market_code', 'device_id', 'Transaction ID'],
-        'Transaction Log':      ['market_code', 'device_id', 'Time', 'Transaction'],
+        'Transaction Log':      ['market_code', 'device_id', 'Time', 'Transaction',
+                                 'Action'],
         'Activity Log':         ['market_code', 'device_id', 'Timestamp',
                                  'Record ID', 'Action'],
-        'Geolocation':          ['market_code', 'device_id', 'Zip Code'],
+        'Geolocation':          ['market_code', 'device_id', 'Zip Code', 'Date'],
         'FMNP Entries':         ['market_code', 'device_id', 'Entry ID'],
         'Market Day Summary':   ['market_code', 'device_id', 'Date'],
         'Error Log':            ['market_code', 'device_id', 'Timestamp', 'Module', 'Message'],
         'Agent Tracker':        ['device_id'],
     }
 
-    def __init__(self, backend: SyncBackend):
+    def __init__(self, backend: SyncBackend, throttle_writes: bool = True):
         self._backend = backend
+        self._throttle_writes = throttle_writes
 
     def is_available(self) -> bool:
         """Return True if the backend is configured."""
@@ -50,7 +53,7 @@ class SyncManager:
         """
         results: dict[str, SyncResult] = {}
 
-        for sheet_name, rows in report_data.items():
+        for idx, (sheet_name, rows) in enumerate(report_data.items()):
             key_cols = self.SHEET_KEYS.get(
                 sheet_name,
                 ['market_code', 'device_id'],
@@ -63,6 +66,11 @@ class SyncManager:
                 logger.exception("sync_all: %s failed", sheet_name)
                 results[sheet_name] = SyncResult(
                     success=False, error=str(e))
+
+            # Throttle between tabs to stay within Google Sheets
+            # write-request quota (60 writes/min/user).
+            if idx < len(report_data) - 1 and self._throttle_writes:
+                time.sleep(1.0)
 
         # Record outcome in app_settings
         failed = [n for n, r in results.items() if not r.success]
@@ -80,7 +88,7 @@ class SyncManager:
 
         # Sync agent tracker as the final step — reports this sync's outcome
         try:
-            tracker_result = self._sync_agent_tracker(results)
+            tracker_result = self._sync_agent_tracker(results, report_data)
             results['Agent Tracker'] = tracker_result
         except Exception as e:
             logger.exception("Agent tracker sync failed")
@@ -89,38 +97,36 @@ class SyncManager:
 
         return results
 
-    def _sync_agent_tracker(self, data_results: dict[str, SyncResult]
+    def _sync_agent_tracker(self, data_results: dict[str, SyncResult],
+                             report_data: dict[str, list[dict]]
                              ) -> SyncResult:
         """Sync a single 'Agent Tracker' row with this device's metadata.
 
         Called after data tabs finish so the row reflects current sync
         results.  One row per device_id, updated on every sync.
+
+        market_code and Market Name are intentionally omitted — a single
+        device can serve multiple markets on different days, so there is
+        no 1:1 correlation.
         """
         from fam import __version__
-        from fam.database.connection import get_connection
 
-        mc = get_market_code() or ''
         did = get_device_id() or ''
-
-        # Resolve human-readable market name
-        conn = get_connection()
-        market_row = conn.execute(
-            "SELECT name FROM markets WHERE is_active = 1 LIMIT 1"
-        ).fetchone()
-        market_name = market_row['name'] if market_row else ''
 
         # Summarize data sync results
         success_count = sum(1 for r in data_results.values() if r.success)
         total_tabs = len(data_results)
-        total_rows = sum(r.rows_synced for r in data_results.values()
-                         if r.success)
         failed = [n for n, r in data_results.items() if not r.success]
         status = 'OK' if not failed else 'Error'
 
+        # Total Rows = total data rows managed across all tabs (not just
+        # the rows that changed).  The dirty-check optimisation means
+        # rows_synced can be 0 when nothing changed, but the operator
+        # still wants to see how much data is being tracked.
+        total_rows = sum(len(rows) for rows in report_data.values())
+
         row = {
             'device_id': did,
-            'market_code': mc,
-            'Market Name': market_name,
             'App Version': __version__,
             'Last Sync': datetime.now().isoformat(sep=' ',
                                                   timespec='seconds'),

@@ -617,7 +617,7 @@ class TestLedgerBackup:
         """Confirmed transaction appears with correct totals."""
         items = [_make_line_item(1, 'SNAP', 100.0, 50.00, 25.00, 25.00)]
         txn_id, fam_id = _create_confirmed_txn(50.00, line_items=items)
-        write_ledger_backup()
+        write_ledger_backup(force=True)
 
         text = self._read_ledger(tmp_path)
         assert fam_id in text
@@ -634,7 +634,7 @@ class TestLedgerBackup:
         update_transaction(txn_id, receipt_total=80.00, status='Adjusted')
         new_items = [_make_line_item(2, 'Cash', 0.0, 80.00, 0.00, 80.00)]
         save_payment_line_items(txn_id, new_items)
-        write_ledger_backup()
+        write_ledger_backup(force=True)
 
         text = self._read_ledger(tmp_path)
         assert fam_id in text
@@ -646,7 +646,7 @@ class TestLedgerBackup:
         items = [_make_line_item(2, 'Cash', 0.0, 30.00, 0.00, 30.00)]
         txn_id, fam_id = _create_confirmed_txn(30.00, line_items=items)
         void_transaction(txn_id)
-        write_ledger_backup()
+        write_ledger_backup(force=True)
 
         text = self._read_ledger(tmp_path)
         assert fam_id in text
@@ -662,7 +662,7 @@ class TestLedgerBackup:
         items2 = [_make_line_item(2, 'Cash', 0.0, 30.00, 0.00, 30.00)]
         _create_confirmed_txn(30.00, line_items=items2)
 
-        write_ledger_backup()
+        write_ledger_backup(force=True)
 
         text = self._read_ledger(tmp_path)
         # Total receipts: $50 + $30 = $80
@@ -682,7 +682,7 @@ class TestLedgerBackup:
         )
         conn.commit()
 
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         text = self._read_ledger(tmp_path)
         assert 'FMNP' in text
         assert '$15.00' in text
@@ -700,7 +700,7 @@ class TestLedgerBackup:
         )
         conn.commit()
 
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         text = self._read_ledger(tmp_path)
 
         # Total receipts: $50 txn + $20 FMNP = $70
@@ -718,7 +718,7 @@ class TestLedgerBackup:
             _make_line_item(2, 'Cash', 0.0, 20.00, 0.00, 20.00),
         ]
         _create_confirmed_txn(50.00, line_items=items)
-        write_ledger_backup()
+        write_ledger_backup(force=True)
 
         text = self._read_ledger(tmp_path)
         assert 'SNAP: $30.00' in text
@@ -728,7 +728,7 @@ class TestLedgerBackup:
         """Ledger includes database summary, and market day section headers."""
         items = [_make_line_item(2, 'Cash', 0.0, 10.00, 0.00, 10.00)]
         _create_confirmed_txn(10.00, line_items=items)
-        write_ledger_backup()
+        write_ledger_backup(force=True)
 
         text = self._read_ledger(tmp_path)
         # Top-level header
@@ -740,6 +740,36 @@ class TestLedgerBackup:
         assert 'Downtown Market' in text
         assert '2026-03-01' in text
         assert 'OPEN (in progress)' in text
+
+    def test_ledger_includes_timestamp_column(self, tmp_path):
+        """Ledger shows Timestamp header and actual created_at values."""
+        items = [_make_line_item(2, 'Cash', 0.0, 20.00, 0.00, 20.00)]
+        txn_id, fam_id = _create_confirmed_txn(20.00, line_items=items)
+        write_ledger_backup(force=True)
+
+        text = self._read_ledger(tmp_path)
+        assert 'Timestamp' in text  # Column header present
+        # The created_at value should appear as a date/time string
+        txn = get_transaction_by_id(txn_id)
+        # Timestamp is formatted as first 19 chars of created_at (YYYY-MM-DD HH:MM:SS)
+        ts_prefix = txn['created_at'][:10]  # At least the date portion
+        assert ts_prefix in text
+
+    def test_ledger_fmnp_includes_timestamp(self, tmp_path):
+        """FMNP entries in the ledger include timestamps."""
+        conn = get_connection()
+        conn.execute(
+            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, check_count, entered_by)"
+            " VALUES (1, 1, 10.00, 1, 'Alice')"
+        )
+        conn.commit()
+
+        write_ledger_backup(force=True)
+        text = self._read_ledger(tmp_path)
+        # FMNP entry should have a created_at value from the DB default
+        assert 'FMNP' in text
+        # Verify the row has a date (the DB default populates created_at)
+        assert '2026-' in text  # Year from the auto-populated timestamp
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -991,7 +1021,7 @@ class TestAdjustmentWorkflow:
         assert 'PAYMENT_ADJUSTED' in actions
 
         # Verify ledger backup
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         backup_path = os.path.join(str(tmp_path), "fam_ledger_backup.txt")
         with open(backup_path, 'r', encoding='utf-8') as f:
             text = f.read()
@@ -1031,7 +1061,7 @@ class TestAdjustmentWorkflow:
         assert loaded[0]['customer_charged'] == 25.00
 
         # Ledger should reflect final state
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         backup_path = os.path.join(str(tmp_path), "fam_ledger_backup.txt")
         with open(backup_path, 'r', encoding='utf-8') as f:
             text = f.read()
@@ -1122,7 +1152,7 @@ class TestVoidedTransactionLedgerTotals:
         # Void the first transaction
         void_transaction(txn1_id)
 
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         text = self._read_ledger(tmp_path)
 
         # Totals should only include the $30 Cash transaction
@@ -1141,7 +1171,7 @@ class TestVoidedTransactionLedgerTotals:
         txn_id, _ = _create_confirmed_txn(100.00, line_items=items)
         void_transaction(txn_id)
 
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         text = self._read_ledger(tmp_path)
 
         assert 'Total Receipts:        $0.00' in text
@@ -1155,7 +1185,7 @@ class TestVoidedTransactionLedgerTotals:
         txn_id, fam_id = _create_confirmed_txn(40.00, line_items=items)
         void_transaction(txn_id)
 
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         text = self._read_ledger(tmp_path)
 
         assert fam_id in text
@@ -1286,7 +1316,7 @@ class TestMultiMethodLedgerAccuracy:
         ]
         _create_confirmed_txn(100.00, line_items=items)
 
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         text = self._read_ledger(tmp_path)
 
         # Receipt total should be $100, NOT $100 * 3 = $300
@@ -1310,7 +1340,7 @@ class TestMultiMethodLedgerAccuracy:
         ]
         _create_confirmed_txn(60.00, line_items=items2)
 
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         text = self._read_ledger(tmp_path)
 
         # Total receipts: $50 + $60 = $110

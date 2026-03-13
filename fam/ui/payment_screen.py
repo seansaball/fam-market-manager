@@ -931,7 +931,7 @@ class PaymentScreen(QWidget):
             self.payment_confirmed.emit()
 
     def _distribute_and_save_payments(self, items, order_total, commit=True):
-        if order_total <= 0:
+        if not order_total or order_total <= 0:
             return
 
         # Build all per-transaction line items using remainder-based

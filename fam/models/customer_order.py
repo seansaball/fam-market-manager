@@ -126,15 +126,20 @@ def update_customer_order_zip_code(order_id: int, zip_code: str | None, commit=T
 def void_customer_order(order_id: int):
     """Void all transactions in the order and mark order as Voided."""
     conn = get_connection()
-    conn.execute(
-        "UPDATE transactions SET status='Voided' WHERE customer_order_id=? AND status != 'Voided'",
-        (order_id,)
-    )
-    conn.execute(
-        "UPDATE customer_orders SET status='Voided' WHERE id=?",
-        (order_id,)
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            "UPDATE transactions SET status='Voided' "
+            "WHERE customer_order_id=? AND status != 'Voided'",
+            (order_id,)
+        )
+        conn.execute(
+            "UPDATE customer_orders SET status='Voided' WHERE id=?",
+            (order_id,)
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     log_action('customer_orders', order_id, 'VOID', 'System',
                notes='Customer order and all transactions voided')

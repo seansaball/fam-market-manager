@@ -30,7 +30,7 @@ A desktop application for managing Food Assistance Match (FAM) market day transa
 1. Download the latest `FAM_Manager_vX.X.X.zip` from [Releases](https://github.com/seansaball/fam-market-manager/releases)
 2. Extract the zip to any folder
 3. Double-click **FAM Manager.exe** to run
-4. Follow the tutorial — on the final step, click **"Yes — Load Default Data"** to auto-configure 3 markets, 8 vendors, and 6 payment methods
+4. Follow the tutorial — on the final step, click **"Yes — Load Default Data"** to auto-configure 3 markets, 23 vendors, and 6 payment methods
 
 No Python installation required. Works on Windows 10/11 (64-bit).
 
@@ -72,7 +72,7 @@ python run.py
 python -m pytest tests/ -v
 ```
 
-1036 tests across 18 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, settings import/export, cloud sync, auto-update, charge conversion, denomination validation, photo storage, multi-photo workflows, and photo deduplication.
+1095 tests across 18 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, settings import/export, cloud sync, auto-update, charge conversion, denomination validation, photo storage, multi-photo workflows, photo deduplication, and FMNP sync integration.
 
 ## Building the Executable
 
@@ -96,6 +96,7 @@ Output: `dist\FAM Manager\FAM Manager.exe`
 
 | Version | Summary |
 |---------|---------|
+| v1.8.5 | Production hardening: Drive retry logic, FMNP dual-source sync (per-check rows), scrollable photo slots, resizable report columns, auto re-upload of deleted Drive photos, inherited folder permissions, 3 new DB indexes, 1095 tests |
 | v1.8.0 | Photo receipts, multi-photo FMNP, Google Drive photo sync, 3-layer SHA-256 dedup, charge-based payment input, agent tracker, denomination validation, 1036 tests |
 | v1.7.0 | Google Sheets cloud sync, auto-update from GitHub Releases, 618 tests |
 | v1.6.1 | Tutorial auto-configure, market code/device ID tracking, receipt printing, settings import/export, database backups, ledger backup, data directory migration |

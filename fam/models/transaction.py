@@ -81,6 +81,8 @@ def create_transaction(market_day_id, vendor_id, receipt_total, receipt_number=N
 
     if market_day_date is None:
         row = conn.execute("SELECT date FROM market_days WHERE id=?", (market_day_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Market day {market_day_id} not found")
         market_day_date = row[0]
 
     fam_tid = generate_transaction_id(market_day_date)
@@ -163,9 +165,12 @@ def confirm_transaction(txn_id, confirmed_by="Volunteer", commit=True):
     logger.info("Transaction confirmed: id=%s by=%s", txn_id, confirmed_by)
 
 
-def void_transaction(txn_id):
+def void_transaction(txn_id, voided_by="System"):
     """Void a transaction (soft delete)."""
     update_transaction(txn_id, status='Voided')
+    log_action('transactions', txn_id, 'VOID', voided_by,
+               notes='Transaction voided')
+    logger.info("Transaction voided: id=%s by=%s", txn_id, voided_by)
 
 
 def get_draft_transactions(market_day_id):

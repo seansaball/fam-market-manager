@@ -1,13 +1,13 @@
 # FAM Market Manager — User Guide
 
 > **For volunteers, coordinators, and market day staff**
-> Version 1.7.0
+> Version 1.8.5
 
 ---
 
 ## Welcome
 
-FAM Market Manager helps you run a farmers market day from start to finish. You can record customer purchases, calculate FAM matching funds, track payments, and generate end-of-day reports — all from one application.
+FAM Market Manager helps you run a farmers market day from start to finish. You can record customer purchases, calculate FAM matching funds, track payments, attach receipt photos, and generate end-of-day reports — all from one application.
 
 This guide walks you through everything you need to know.
 
@@ -21,7 +21,7 @@ Double-click **FAM Manager.exe** to launch. On first launch:
 
 1. The app creates a data folder at `%APPDATA%\FAM Market Manager\`
 2. A guided tutorial automatically starts, walking you through every section
-3. On the final tutorial step, you'll see **"Quick Setup"** — click **"Yes — Load Default Data"** to auto-configure 3 markets, 8 vendors, and 6 payment methods
+3. On the final tutorial step, you'll see **"Quick Setup"** — click **"Yes — Load Default Data"** to auto-configure 3 markets, 23 vendors, and 6 payment methods
 4. If you prefer, click **"No Thanks — Start Blank"** to configure everything manually or import a `.fam` settings file
 
 > **Windows SmartScreen:** On first run, Windows may show a warning. Click **"More info"** then **"Run anyway."**
@@ -145,10 +145,16 @@ At the top of the screen you will see:
 
 1. Click **"+ Add Payment Method"**
 2. Select the payment type (SNAP, FMNP, Cash, etc.)
-3. Enter the **amount** for that payment method
-4. The app automatically calculates the **FAM Match** and **Customer Pays** amounts
+3. Enter the **customer charge** — the amount the customer is paying with this method. The app automatically computes the corresponding FAM match and the total allocated based on the method's match percentage.
+4. The summary cards update in real time as you enter amounts
 
 You can add multiple payment methods if the customer is splitting their payment.
+
+**Denomination validation:** For payment methods that use fixed denominations (such as FMNP checks), the app validates that the amount you enter is a valid multiple of the denomination. If you enter an amount that does not divide evenly, a warning appears and the entry is blocked until corrected.
+
+### Attaching a receipt photo
+
+You can attach a photo of the customer's physical receipt or check to any payment entry. Click the camera icon next to a payment method row to capture or select a photo. The photo is stored locally and will upload to Google Drive during the next cloud sync (see the Cloud Sync section below).
 
 ### Confirming payment
 
@@ -192,6 +198,20 @@ Use this screen to record FMNP (Farmers Market Nutrition Program) checks receive
 6. Click **"Add FMNP Entry"**
 
 The entry appears in the table below. You can **Edit** or **Delete** entries using the buttons in the Actions column.
+
+### Attaching check photos
+
+You can attach photos of FMNP checks directly to each entry. The app provides **multi-photo support** — the number of available photo slots is automatically calculated based on the dollar amount divided by the check denomination. For example, if you enter $30 and the denomination is $5, six photo slots appear for you to attach one photo per check.
+
+When the number of checks is large, the photo attachment area becomes **scrollable** so it does not crowd the rest of the form.
+
+### Photo deduplication
+
+The app uses a 3-layer deduplication system to prevent the same check photo from being recorded twice:
+
+- **Within-entry block:** The same photo cannot be attached to two slots within the same FMNP entry.
+- **Cross-transaction warning:** If a photo matches one already used in a different transaction, the app warns you before allowing it.
+- **Drive upload reuse:** During cloud sync, if an identical photo already exists in Google Drive, the existing file is reused instead of uploading a duplicate.
 
 ---
 
@@ -265,6 +285,10 @@ Use the controls at the top of the screen to narrow your view:
 - **Vendor:** Check/uncheck specific vendors
 - **Payment Method:** Check/uncheck specific payment types
 
+### Resizable columns
+
+All report tables automatically fit their columns to the content width. You can also **manually drag column borders** to resize them to your preference. This applies to every report tab.
+
 ### Exporting data
 
 Each report tab has an **Export** button that saves the data as a CSV file. The file name is automatically generated with a timestamp and market code (e.g., `fam_BPFM_vendor_reimbursement_20260306_140530.csv`).
@@ -327,7 +351,25 @@ One-way sync that uploads end-of-day reports to Google Sheets so coordinators an
 3. A progress indicator shows while the sync is running
 4. On success, the "Last Synced" timestamp updates
 
-> **Note:** Sync requires an internet connection. If it fails, the error is displayed and your local data is unaffected.
+**Google Drive photo sync:**
+
+When cloud sync is configured, all receipt and FMNP check photos are automatically uploaded to Google Drive during each sync. Photos are organized into folders by market and date. Uploaded photos inherit the permissions of their parent folder — they are not shared publicly.
+
+If a photo is deleted or trashed from Google Drive, the app detects this on the next sync cycle and automatically re-uploads the missing file. Stale URL references are cleaned up so re-uploads happen reliably.
+
+**FMNP Entries sync:**
+
+FMNP data is synced from both the FMNP Entry screen and the Payment flow. Each check produces one row in the spreadsheet, with individual photo links and Transaction IDs included for full traceability.
+
+**Agent tracker:**
+
+Each device reports its sync activity to a dedicated tracker tab in Google Sheets. This allows coordinators to monitor which devices have synced and when, on a per-device basis.
+
+**Retry behavior:**
+
+Cloud sync uses exponential backoff when it encounters transient Google API errors (such as rate limits or temporary outages). The sync will retry automatically several times before reporting a failure.
+
+> **Note:** Sync requires an internet connection. If it fails after all retries, the error is displayed and your local data is unaffected.
 
 ### Updates tab
 
@@ -403,11 +445,11 @@ All data is saved in your Windows **AppData** folder:
 
 ```
 %APPDATA%\FAM Market Manager\
-├── fam_data.db             ← your database (all transactions, settings, etc.)
-├── fam_ledger_backup.txt   ← auto-generated human-readable ledger backup
-├── fam_manager.log         ← application log file
-├── sync_credentials.json   ← Google Sheets credentials (if cloud sync configured)
-└── backups/                ← automatic database backups (20 most recent)
+├── fam_data.db             <- your database (all transactions, settings, etc.)
+├── fam_ledger_backup.txt   <- auto-generated human-readable ledger backup
+├── fam_manager.log         <- application log file
+├── sync_credentials.json   <- Google Sheets credentials (if cloud sync configured)
+└── backups/                <- automatic database backups (20 most recent)
 ```
 
 You can quickly open this folder from the app: click the **About** button in the sidebar, then click **"Open Data Folder"**.

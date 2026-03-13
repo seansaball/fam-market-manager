@@ -315,7 +315,7 @@ class MarketDayScreen(QWidget):
         from fam.database.backup import create_backup
         create_backup(reason="market_close")
 
-        write_ledger_backup()
+        write_ledger_backup(force=True)
         self.refresh()
         self.market_day_changed.emit()
 

@@ -5,7 +5,7 @@
 > needs to understand, maintain, or extend the project **without** access to
 > previous conversation history. Keep this file up to date with every commit.
 >
-> **Last updated:** 2026-03-11 — v1.8.0
+> **Last updated:** 2026-03-12 — v1.8.5
 
 ---
 
@@ -28,7 +28,7 @@ dedicated Windows PC.
 | Packaging     | PyInstaller (Windows .exe)          |
 | Cloud Sync    | gspread + google-auth               |
 | Auto-Update   | urllib.request (stdlib)              |
-| Tests         | pytest (1036 tests)                 |
+| Tests         | pytest (1095 tests)                 |
 
 ---
 
@@ -37,12 +37,12 @@ dedicated Windows PC.
 ```
 fam-market-manager/
 ├── fam/                          # Application package
-│   ├── __init__.py               # __version__ = "1.8.0"
+│   ├── __init__.py               # __version__ = "1.8.5"
 │   ├── app.py                    # Qt app entry, data dir, exception handler
 │   ├── settings_io.py            # .fam file import/export
 │   ├── database/
 │   │   ├── connection.py         # Thread-local SQLite connection
-│   │   ├── schema.py             # Table DDL + migrations (v1–v18)
+│   │   ├── schema.py             # Table DDL + migrations (v1–v21)
 │   │   ├── seed.py               # Opt-in sample data (via tutorial)
 │   │   └── backup.py             # SQLite backup API + retention
 │   ├── models/
@@ -97,7 +97,7 @@ fam-market-manager/
 │   ├── test_backup.py            # 12 tests — backup creation + retention
 │   ├── test_schema.py            # 35 tests — migrations, triggers, indexes
 │   ├── test_settings_io.py       # 102 tests — import/export round-trip
-│   ├── test_sync.py              # 96 tests — cloud sync, data collection, agent tracker
+│   ├── test_sync.py              # 155 tests — cloud sync, data collection, FMNP dual-source, agent tracker
 │   ├── test_update.py            # 77 tests — URL parsing, version comparison, update flow
 │   ├── test_charge_conversion.py # NEW — charge ↔ method_amount conversion
 │   ├── test_auto_distribute.py   # NEW — auto-distribute payment allocation
@@ -170,7 +170,7 @@ When a customer's total match exceeds the cap, all match amounts are
 
 ---
 
-## 4. Database Schema (v18)
+## 4. Database Schema (v21)
 
 ### Tables
 
@@ -202,7 +202,7 @@ When a customer's total match exceeds the cap, all match amounts are
 
 **local_photo_hashes** — content_hash (PK) → relative_path (cross-transaction UI attachment dedup)
 
-**schema_version** — version (current: 18), applied_at
+**schema_version** — version (current: 21), applied_at
 
 ### Migration History
 
@@ -225,6 +225,9 @@ When a customer's total match exceeds the cap, all match amounts are
 | v15→v16 | Added app_version + device_id to audit_log |
 | v16→v17 | Added photo_hashes table (Drive upload content-hash dedup) |
 | v17→v18 | Added local_photo_hashes table (cross-transaction UI dedup) + backfill |
+| v18→v19 | Added drive_photos_folder_id to app_settings; photo subfolder structure |
+| v19→v20 | Added entered_by to fmnp_entries; FMNP entry audit fields |
+| v20→v21 | Added performance indexes: transactions(customer_order_id), market_days(market_id, date), audit_log(table_name, record_id) |
 
 ---
 
@@ -270,7 +273,7 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 1. App starts with clean slate (no pre-loaded data)
 2. Tutorial auto-launches on first run (11 steps)
 3. Final step: "Quick Setup" with Yes/No buttons
-4. "Yes" calls `seed_sample_data()` → loads 3 markets, 8 vendors, 6 payment methods
+4. "Yes" calls `seed_sample_data()` → loads 3 markets, 23 vendors, 6 payment methods
 5. "No" → blank app, user configures manually or imports `.fam` file
 6. `tutorial_shown` flag persisted in `app_settings` to prevent re-launch
 7. Tutorial can be re-run anytime via "Start Tutorial" button
@@ -302,6 +305,7 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 ### Screen 3 — FMNP Entry
 - Market day + vendor + amount + check count
 - Multi-photo attachment — dynamic check photo slots based on amount ÷ denomination
+- Scrollable photo slot area for large check volumes (fixed 160px, scrolls when >3 rows)
 - Photo dedup: within-entry (hard block) + cross-entry (warning with override)
 - Edit/delete with soft-delete (status: Active/Deleted)
 
@@ -310,7 +314,8 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 - Audit log with reason codes
 
 ### Screen 5 — Reports
-- Summary, Detailed Ledger, Vendor Reimbursement, FAM Match, Geolocation, Activity Log, Error Log
+- Summary, Detailed Ledger, Vendor Reimbursement, FAM Match, Transaction Log, Activity Log, Geolocation, Charts, Error Log
+- All report table columns auto-fit to content and are manually resizable (drag to adjust)
 - CSV export with market code in filenames and identity columns
 
 ### Screen 6 — Settings
@@ -326,7 +331,7 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 
 **Run:** `python -m pytest tests/ -v` from project root
 
-**1036 total tests across 18 files** — all must pass before committing.
+**1095 total tests across 18 files** — all must pass before committing.
 
 ---
 
@@ -363,6 +368,7 @@ Legacy data (v1.5.1 and earlier) auto-migrated from exe directory on first launc
 
 | Version | Date       | Summary |
 |---------|------------|---------|
+| v1.8.5  | 2026-03-12 | Production hardening: Drive API retry with exponential backoff, FMNP dual-source sync (per-check rows with photo links + Transaction IDs), scrollable FMNP photo slots, resizable report columns, auto re-upload of deleted/trashed Drive photos, inherited folder permissions, dead URL hash cache cleanup, QThread lifecycle fix, data collection off UI thread, 3 new DB indexes, schema v21, 1095 tests |
 | v1.8.0  | 2026-03-11 | Photo receipts, multi-photo FMNP, Google Drive photo sync, 3-layer SHA-256 dedup, charge-based payment input, agent tracker, denomination validation, schema v18, 1036 tests |
 | v1.7.0  | 2026-03-09 | Google Sheets cloud sync, auto-update from GitHub Releases, sync/update packages, 618 tests |
 | v1.6.1  | 2026-03-06 | Tutorial auto-configure, market code/device ID, receipt printing, settings import/export, database backups, ledger backup, data dir migration, global exception handler, 479 tests |
@@ -384,7 +390,7 @@ Optional one-way sync from local SQLite to a shared Google Spreadsheet + Google 
 | Module | Purpose |
 |--------|---------|
 | `sync/base.py` | `SyncResult` dataclass |
-| `sync/data_collector.py` | Queries DB for summary, vendor, payment, transaction, FMNP data + photo URLs |
+| `sync/data_collector.py` | Queries DB for summary, vendor, payment, transaction, FMNP data + photo URLs. FMNP entries pull from both fmnp_entries table and payment_line_items (FMNP method), expanding into per-check rows with individual photo links and Transaction IDs |
 | `sync/gsheets.py` | Google Sheets backend via `gspread` (service account auth) |
 | `sync/drive.py` | Google Drive photo upload via REST API (uses `google-auth` AuthorizedSession) |
 | `sync/manager.py` | `SyncManager` — orchestrates data collection + backend calls + agent tracker |
@@ -398,9 +404,13 @@ Optional one-way sync from local SQLite to a shared Google Spreadsheet + Google 
 
 ### Photo Upload (Google Drive)
 - Photos uploaded to a shared Drive folder ("FAM Market Manager Photos")
+- Organized hierarchy: Root > Market Name > Payment Type subfolders
 - Two-layer upload dedup: rel_path cache (in-memory) + SHA-256 content hash (DB-persisted)
 - Drive URLs written back to `photo_drive_url` columns in FMNP entries and payment line items
 - Photo URLs included in synced spreadsheet data for remote visibility
+- Files inherit parent folder permissions (no public "anyone with link" sharing)
+- Dead URL detection: each sync verifies existing Drive URLs (including trashed files), clears stale URLs + hash cache entries, and re-uploads missing photos automatically
+- Retry with exponential backoff for transient Drive API errors (429, 500, 502, 503)
 
 ### Agent Tracker
 - Each sync appends a row to the "Agent Tracker" sheet with device metadata

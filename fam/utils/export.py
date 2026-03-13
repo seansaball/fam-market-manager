@@ -85,7 +85,11 @@ def export_error_log(data: list[dict], filepath: str) -> str:
 
 # ── Automatic ledger backup ──────────────────────────────────────
 
-def write_ledger_backup():
+_last_backup_time: float = 0.0
+_BACKUP_COOLDOWN = 120.0  # seconds — at most one full rewrite per 2 minutes
+
+
+def write_ledger_backup(force: bool = False):
     """Write a human-readable text backup of the **entire** database ledger.
 
     Produces ``fam_ledger_backup.txt`` next to the database file.  Called
@@ -97,6 +101,11 @@ def write_ledger_backup():
     transactions across every market day — grouped by market, then by
     date — with per-day subtotals and grand totals.
 
+    Because this rewrites the entire file from scratch each time, a
+    cooldown prevents excessive I/O during rapid-fire payment
+    confirmations.  Pass *force=True* (used by market-day close) to
+    bypass the cooldown and guarantee an immediate write.
+
     After writing the backup, this also notifies the main window to
     trigger a cloud sync (if configured).  This ensures every data
     change that updates the ledger is also pushed to Google Sheets.
@@ -104,12 +113,28 @@ def write_ledger_backup():
     This function **never raises** — all errors are logged silently so it
     cannot interfere with the normal workflow.
     """
+    import time as _time
+    global _last_backup_time
+
+    if not force:
+        elapsed = _time.monotonic() - _last_backup_time
+        if elapsed < _BACKUP_COOLDOWN:
+            logger.debug("Ledger backup skipped — %.0fs since last write", elapsed)
+            # Still trigger sync even when backup is debounced
+            _notify_sync()
+            return
+
     try:
         _write_ledger_backup_inner()
+        _last_backup_time = _time.monotonic()
     except Exception:
         logger.exception("Failed to write ledger backup")
 
-    # Notify main window to sync (if configured and running)
+    _notify_sync()
+
+
+def _notify_sync():
+    """Notify the main window to trigger a cloud sync (best-effort)."""
     try:
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance()
@@ -125,12 +150,12 @@ def write_ledger_backup():
 # ── Column-formatting helpers ─────────────────────────────────────
 
 _COL_HEADER = (
-    f"  {'#':<4} {'Transaction ID':<22} {'Customer':<12} "
+    f"  {'#':<4} {'Transaction ID':<22} {'Timestamp':<20} {'Customer':<12} "
     f"{'Vendor':<24} {'Receipt':>10} {'Cust Paid':>10} "
     f"{'FAM Match':>10}  {'Status':<12} Payment Methods"
 )
 _COL_RULE = (
-    f"  {'─' * 3:<4} {'─' * 20:<22} {'─' * 10:<12} "
+    f"  {'─' * 3:<4} {'─' * 20:<22} {'─' * 18:<20} {'─' * 10:<12} "
     f"{'─' * 22:<24} {'─' * 9:>10} {'─' * 9:>10} "
     f"{'─' * 9:>10}  {'─' * 10:<12} {'─' * 15}"
 )
@@ -139,6 +164,13 @@ _COL_RULE = (
 def _fmt_vendor(name: str, max_len: int = 22) -> str:
     """Truncate long vendor names for column alignment."""
     return (name[:max_len - 2] + '..') if len(name) > max_len else name
+
+
+def _fmt_timestamp(raw: str | None, max_len: int = 19) -> str:
+    """Format a created_at ISO string for column display (YYYY-MM-DD HH:MM:SS)."""
+    if not raw:
+        return ''
+    return raw[:max_len]
 
 
 def _write_ledger_backup_inner():
@@ -163,7 +195,7 @@ def _write_ledger_backup_inner():
     all_txns = conn.execute("""
         SELECT t.market_day_id,
                t.fam_transaction_id, v.name AS vendor,
-               t.receipt_total, t.status,
+               t.receipt_total, t.status, t.created_at,
                COALESCE(co.customer_label, '') AS customer_id,
                COALESCE(SUM(pl.customer_charged), 0) AS customer_paid,
                COALESCE(SUM(pl.match_amount), 0) AS fam_match,
@@ -182,7 +214,7 @@ def _write_ledger_backup_inner():
 
     all_fmnp = conn.execute("""
         SELECT fe.market_day_id, fe.id, v.name AS vendor,
-               fe.amount, fe.check_count, fe.notes
+               fe.amount, fe.check_count, fe.notes, fe.created_at
         FROM fmnp_entries fe
         JOIN vendors v ON fe.vendor_id = v.id
         WHERE fe.status = 'Active'
@@ -214,7 +246,7 @@ def _write_ledger_backup_inner():
     total_fmnp = len(all_fmnp)
 
     # ── Build the text ────────────────────────────────────────────
-    W = 115  # line width
+    W = 135  # line width
     lines: list[str] = []
 
     lines.append("=" * W)
@@ -298,9 +330,10 @@ def _write_ledger_backup_inner():
             day_count += 1
 
             vendor = _fmt_vendor(r['vendor'])
+            ts = _fmt_timestamp(r['created_at'])
             lines.append(
                 f"  {i:<4} {r['fam_transaction_id']:<22} "
-                f"{r['customer_id']:<12} {vendor:<24} "
+                f"{ts:<20} {r['customer_id']:<12} {vendor:<24} "
                 f"${receipt:>9.2f} ${cust_paid:>9.2f} "
                 f"${fam_match:>9.2f}  {r['status']:<12} "
                 f"{r['methods'] or ''}"
@@ -316,13 +349,14 @@ def _write_ledger_backup_inner():
                 day_receipt += amt
                 day_match += amt
                 check_info = (
-                    f"FMNP \u2013 {r['check_count']} checks"
+                    f"FMNP (External) - {r['check_count']} checks"
                     if r['check_count'] else "FMNP (External)"
                 )
                 vendor = _fmt_vendor(r['vendor'])
+                fmnp_ts = _fmt_timestamp(r['created_at'])
                 lines.append(
                     f"  {day_count:<4} {'FMNP-' + str(r['id']):<22} "
-                    f"{'':<12} {vendor:<24} "
+                    f"{fmnp_ts:<20} {'':<12} {vendor:<24} "
                     f"${amt:>9.2f} ${'0.00':>9} "
                     f"${amt:>9.2f}  {'FMNP Entry':<12} "
                     f"{check_info}"

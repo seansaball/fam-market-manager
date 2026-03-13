@@ -37,6 +37,20 @@ def store_photo_hash(content_hash: str, drive_url: str) -> None:
     conn.commit()
 
 
+def delete_photo_hash_by_url(drive_url: str) -> None:
+    """Remove any hash entries that point to a dead Drive URL.
+
+    Called when a Drive file is detected as deleted/trashed so the
+    hash cache won't short-circuit re-upload with the stale URL.
+    """
+    conn = get_connection()
+    conn.execute(
+        "DELETE FROM photo_hashes WHERE drive_url = ?",
+        (drive_url,)
+    )
+    conn.commit()
+
+
 def get_all_photo_hashes() -> dict[str, str]:
     """Return all stored hashes as {content_hash: drive_url}.
 

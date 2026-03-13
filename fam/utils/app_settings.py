@@ -99,6 +99,23 @@ def update_market_code_from_name(market_name: str) -> str:
     return code
 
 
+def check_market_code_collisions() -> list[tuple[str, list[str]]]:
+    """Check if any active markets produce the same derived market code.
+
+    Returns a list of (code, [market_names]) for codes that map to more
+    than one market.  An empty list means no collisions.
+    """
+    from fam.database.connection import get_connection
+    conn = get_connection()
+    rows = conn.execute("SELECT name FROM markets").fetchall()
+    code_to_names: dict[str, list[str]] = {}
+    for r in rows:
+        code = derive_market_code(r['name'])
+        code_to_names.setdefault(code, []).append(r['name'])
+    return [(code, names) for code, names in code_to_names.items()
+            if len(names) > 1]
+
+
 # ── Device ID (auto-captured machine fingerprint) ─────────────
 
 def get_device_id() -> str | None:
@@ -140,6 +157,54 @@ def get_last_sync_at() -> str | None:
 def get_last_sync_error() -> str | None:
     """Return the error from the last sync attempt, if any."""
     return get_setting('last_sync_error')
+
+
+# ── Per-tab sync toggles ─────────────────────────────────────
+
+REQUIRED_SYNC_TABS: frozenset[str] = frozenset({
+    'Vendor Reimbursement',
+    'Detailed Ledger',
+    'Error Log',
+    'Agent Tracker',
+    'Geolocation',
+    'FMNP Entries',
+})
+
+OPTIONAL_SYNC_TABS: frozenset[str] = frozenset({
+    'FAM Match Report',
+    'Transaction Log',
+    'Activity Log',
+    'Market Day Summary',
+})
+
+
+def _sync_tab_key(tab_name: str) -> str:
+    """Derive the app_settings key for a tab toggle.
+
+    Example: 'Vendor Reimbursement' -> 'sync_tab_vendor_reimbursement'
+    """
+    return 'sync_tab_' + tab_name.lower().replace(' ', '_')
+
+
+def is_sync_tab_enabled(tab_name: str) -> bool:
+    """Return True if a sheet tab should be included in sync.
+
+    Required tabs always return True.  Optional tabs are off by default
+    and stored as ``sync_tab_<sanitized_name>`` = '1' when enabled.
+    """
+    if tab_name in REQUIRED_SYNC_TABS:
+        return True
+    if tab_name in OPTIONAL_SYNC_TABS:
+        return get_setting(_sync_tab_key(tab_name), '0') == '1'
+    # Unknown tabs: sync by default (forward-compat safety)
+    return True
+
+
+def set_sync_tab_enabled(tab_name: str, enabled: bool) -> None:
+    """Persist the sync toggle for an optional tab."""
+    if tab_name not in OPTIONAL_SYNC_TABS:
+        return
+    set_setting(_sync_tab_key(tab_name), '1' if enabled else '0')
 
 
 # ── Auto-update settings ─────────────────────────────────────

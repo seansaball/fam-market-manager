@@ -1,0 +1,66 @@
+Subject: FAM Market Manager v1.8.0 Release Notes
+
+
+Hi team,
+
+v1.8.0 is ready. This is a major update — here's what's new:
+
+
+PHOTO RECEIPTS & MULTI-PHOTO FMNP
+- You can now attach check/receipt photos directly to payment transactions
+- Photos are assigned to denominated slots (e.g., $5 SNAP check → photo slot for that denomination)
+- FMNP entries support multiple photos per check (front and back)
+- All photos are stored locally in AppData with an organized folder structure
+
+
+3-LAYER PHOTO DEDUPLICATION
+- Layer 1 (within entry): If you try to attach the same image twice to one transaction, it's blocked immediately
+- Layer 2 (cross-transaction): If the image was already attached to a different transaction, you get a warning with the option to override
+- Layer 3 (Drive upload): If the same file was already uploaded to Google Drive, it silently reuses the existing file instead of uploading again
+- Uses SHA-256 content hashing so renamed copies of the same image are still caught
+
+
+GOOGLE DRIVE PHOTO SYNC
+- Check photos now sync to organized Google Drive folders alongside spreadsheet data
+- Photos are uploaded during the normal end-of-day sync process
+- Already-uploaded files are detected by content hash to avoid duplicates
+
+
+CHARGE-BASED PAYMENT INPUT
+- Payment amounts are now entered as charge counts multiplied by denomination value (e.g., 3 x $5 = $15)
+- Auto-distribution of charges across denominations when a total is entered
+- Denomination validation ensures entries add up correctly
+
+
+AGENT TRACKER
+- New "Agent Tracker" sheet tab in Google Sheets — one row per device, updated every sync
+- Shows: device ID, market code, market name, app version, last sync time, hostname, OS, sync status
+- Reports OK/Error status with details on which sheets synced and any errors
+- Useful for monitoring which devices are active, what version they're running, and whether sync is healthy
+
+
+SCHEMA & DATABASE
+- Database schema updated to v18 (from v11 in v1.7.0)
+- New local_photo_hashes table for cross-transaction duplicate detection
+- Migration automatically backfills hashes for any existing photos
+
+
+TESTING
+- 1,036 tests across 18 test files (up from 618 tests / 13 files in v1.7.0)
+- New test coverage for: photo deduplication, multi-photo workflows, denomination validation, charge conversion, auto-distribution, agent tracker, Drive sync
+
+
+DOCUMENTATION & BUILD
+- Updated README and project documentation for v1.8.0
+- PyInstaller spec updated to include all new dependencies for the standalone .exe
+
+
+UPGRADE
+- In-app: Settings > Updates > Check for Updates > Download & Install
+- Manual: Download FAM_Manager_v1.8.0.zip from GitHub Releases, extract, and run
+- Your existing data is preserved automatically — no migration steps needed
+
+
+Let me know if you have any questions.
+
+Sean

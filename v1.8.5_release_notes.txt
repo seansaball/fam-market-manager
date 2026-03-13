@@ -1,0 +1,46 @@
+Subject: FAM Market Manager v1.8.5 Release Notes
+
+
+Hi team,
+
+v1.8.5 is ready. This is a production hardening release focused on reliability, sync improvements, and UI polish.
+
+
+DRIVE SYNC RELIABILITY
+- Added exponential backoff retry for transient Google Drive API errors (rate limits, server errors)
+- Photos now inherit parent folder permissions instead of being set to public "anyone with link"
+- If a photo is deleted or trashed in Google Drive, the app automatically detects it and re-uploads on the next sync
+- Fixed hash cache bug that prevented re-upload of deleted Drive photos
+
+
+FMNP ENTRIES SYNC (DUAL SOURCE)
+- The FMNP Entries sheet tab now pulls from BOTH the FMNP Entry screen and the Payment flow
+- Each check is expanded into its own row with an individual photo link
+- Payment-source entries include the Transaction ID for cross-referencing
+- New columns: Entry ID, Transaction ID, Check Amount, Check (e.g. "1 of 3"), Total Amount, Source, Photo
+
+
+UI IMPROVEMENTS
+- FMNP Entry: Photo attachment area is now scrollable for large check volumes (e.g. 20 checks at $5)
+- Reports: All table columns auto-fit to content width and can be manually resized by dragging
+- Fixed QThread crash when closing the app after a sync operation
+
+
+PERFORMANCE
+- Data collection for sync now runs on a background thread (UI stays responsive)
+- 3 new database indexes for faster queries: transactions(customer_order_id), market_days(market_id, date), audit_log(table_name, record_id)
+- Database schema updated to v21
+
+
+TESTING
+- 1,095 tests across 18 test files (up from 1,036 in v1.8.0)
+- New coverage for: FMNP dual-source sync, per-check row expansion, Drive retry logic, dead URL detection
+
+
+UPGRADE
+- In-app: Settings > Updates > Check for Updates > Download & Install
+- Manual: Download FAM_Manager_v1.8.5.zip from GitHub Releases, extract, and run
+- Your existing data is preserved automatically -- no migration steps needed
+
+
+Sean

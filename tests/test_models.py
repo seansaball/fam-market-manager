@@ -873,3 +873,318 @@ class TestDataIntegrity:
         entries = get_fmnp_entries(market_day_id=1, active_only=False)
         statuses = [e['status'] for e in entries]
         assert 'Deleted' in statuses
+
+
+# ──────────────────────────────────────────────────────────────────
+# Stability Audit — edge-case and regression tests
+# ──────────────────────────────────────────────────────────────────
+class TestStabilityAudit:
+    """Targeted tests for issues found during the v1.8.0 stability audit."""
+
+    def test_create_transaction_invalid_market_day(self, fresh_db):
+        """create_transaction raises ValueError for nonexistent market_day_id."""
+        _seed_full(fresh_db)
+        from fam.models.transaction import create_transaction
+        with pytest.raises(ValueError, match="not found"):
+            create_transaction(market_day_id=999999, vendor_id=1,
+                               receipt_total=10.0)
+
+    def test_void_customer_order_atomic(self, fresh_db):
+        """Voiding an order updates both transactions and order in one commit."""
+        _seed_full(fresh_db)
+        from fam.models.customer_order import (
+            create_customer_order, void_customer_order,
+        )
+        from fam.models.transaction import create_transaction
+
+        co_id, label = create_customer_order(1)
+        t1, _ = create_transaction(1, 1, 20.0, customer_order_id=co_id)
+        t2, _ = create_transaction(1, 1, 30.0, customer_order_id=co_id)
+
+        void_customer_order(co_id)
+
+        # Both transactions and the order should be Voided
+        txn1 = fresh_db.execute(
+            "SELECT status FROM transactions WHERE id=?", (t1,)).fetchone()
+        txn2 = fresh_db.execute(
+            "SELECT status FROM transactions WHERE id=?", (t2,)).fetchone()
+        order = fresh_db.execute(
+            "SELECT status FROM customer_orders WHERE id=?", (co_id,)).fetchone()
+        assert txn1['status'] == 'Voided'
+        assert txn2['status'] == 'Voided'
+        assert order['status'] == 'Voided'
+
+    def test_create_vendor_with_v19_fields(self, fresh_db):
+        """Vendor creation with all v19 registration fields."""
+        _seed_full(fresh_db)
+        vid = create_vendor(
+            'Test Vendor', contact_info='test@example.com',
+            check_payable_to='Test Vendor LLC',
+            street='123 Main St', city='Pittsburgh',
+            state='PA', zip_code='15213', ach_enabled=True,
+        )
+        v = get_vendor_by_id(vid)
+        assert v['check_payable_to'] == 'Test Vendor LLC'
+        assert v['street'] == '123 Main St'
+        assert v['city'] == 'Pittsburgh'
+        assert v['state'] == 'PA'
+        assert v['zip_code'] == '15213'
+        assert v['ach_enabled'] == 1
+
+    def test_update_vendor_v19_fields(self, fresh_db):
+        """Vendor update with v19 fields preserves other fields."""
+        _seed_full(fresh_db)
+        vid = create_vendor('V1', contact_info='info@v1.com',
+                            street='100 Oak Ave')
+        update_vendor(vid, city='Bethel Park', state='PA')
+        v = get_vendor_by_id(vid)
+        assert v['street'] == '100 Oak Ave'  # preserved
+        assert v['city'] == 'Bethel Park'
+        assert v['state'] == 'PA'
+        assert v['check_payable_to'] is None  # never set
+
+    def test_generate_transaction_id_sequence_continuity(self, fresh_db):
+        """Transaction IDs increment correctly."""
+        _seed_full(fresh_db)
+        from fam.utils.app_settings import set_setting
+        set_setting('market_code', 'DT')
+        set_setting('device_id', 'abcd-1234')
+
+        from fam.models.transaction import create_transaction
+        _, fam1 = create_transaction(1, 1, 10.0)
+        _, fam2 = create_transaction(1, 1, 20.0)
+
+        seq1 = int(fam1.split('-')[-1])
+        seq2 = int(fam2.split('-')[-1])
+        assert seq2 == seq1 + 1
+
+    def test_save_payment_line_items_replaces(self, fresh_db):
+        """save_payment_line_items replaces old items atomically."""
+        _seed_full(fresh_db)
+        from fam.models.transaction import (
+            create_transaction, save_payment_line_items,
+            get_payment_line_items,
+        )
+        tid, _ = create_transaction(1, 1, 50.0)
+        pm = fresh_db.execute(
+            "SELECT id, name, match_percent FROM payment_methods LIMIT 1"
+        ).fetchone()
+
+        # Save initial items
+        items_v1 = [{'payment_method_id': pm['id'],
+                     'method_name_snapshot': pm['name'],
+                     'match_percent_snapshot': pm['match_percent'],
+                     'method_amount': 50.0,
+                     'match_amount': 25.0,
+                     'customer_charged': 25.0}]
+        save_payment_line_items(tid, items_v1)
+        assert len(get_payment_line_items(tid)) == 1
+
+        # Replace with two items
+        items_v2 = [
+            {**items_v1[0], 'method_amount': 30.0, 'match_amount': 15.0,
+             'customer_charged': 15.0},
+            {**items_v1[0], 'method_amount': 20.0, 'match_amount': 10.0,
+             'customer_charged': 10.0},
+        ]
+        save_payment_line_items(tid, items_v2)
+        result = get_payment_line_items(tid)
+        assert len(result) == 2
+        total = sum(r['method_amount'] for r in result)
+        assert total == 50.0
+
+    def test_market_day_summary_collector_empty(self, fresh_db):
+        """Market Day Summary returns empty list for nonexistent md_id."""
+        from fam.sync.data_collector import _collect_market_day_summary
+        conn = get_connection()
+        rows = _collect_market_day_summary(conn, 999999)
+        assert rows == []
+
+    def test_error_log_uses_global_market_code(self, fresh_db):
+        """Error Log tab uses app_settings market_code, not derived."""
+        from fam.sync.data_collector import collect_sync_data
+        from fam.utils.app_settings import set_setting
+
+        _seed_full(fresh_db)
+        set_setting('market_code', 'ZZZ')
+        set_setting('device_id', 'dev-test')
+        md_id = create_market_day(1, '2026-06-15', opened_by="Test")
+
+        data = collect_sync_data(md_id)
+        error_rows = data.get('Error Log', [])
+        for row in error_rows:
+            assert row['market_code'] == 'ZZZ'
+
+    def test_multi_market_day_sync_correct_codes(self, fresh_db):
+        """All-market-day sync assigns correct market_code per market day."""
+        from fam.sync.data_collector import collect_sync_data
+        from fam.utils.app_settings import set_setting, derive_market_code
+
+        _seed_full(fresh_db)
+        # Enable optional sync tabs so we can check per-market codes
+        set_setting('sync_tab_market_day_summary', '1')
+        # Create a second market
+        fresh_db.execute(
+            "INSERT INTO markets (id, name, address)"
+            " VALUES (2, 'Riverside Farmers Market', '456 River Rd')")
+        fresh_db.commit()
+        set_setting('device_id', 'dev-test')
+
+        m1 = fresh_db.execute(
+            "SELECT id, name FROM markets WHERE id=1").fetchone()
+        m2 = fresh_db.execute(
+            "SELECT id, name FROM markets WHERE id=2").fetchone()
+
+        md1 = create_market_day(m1['id'], '2026-07-01', opened_by="T")
+        md2 = create_market_day(m2['id'], '2026-07-02', opened_by="T")
+
+        # Create a transaction on each market day
+        from fam.models.transaction import create_transaction
+        set_setting('market_code', derive_market_code(m1['name']))
+        create_transaction(md1, 1, 10.0)
+        set_setting('market_code', derive_market_code(m2['name']))
+        create_transaction(md2, 1, 20.0)
+
+        # Sync all market days
+        data = collect_sync_data()
+        summary_rows = data['Market Day Summary']
+
+        codes_found = {r['market_code'] for r in summary_rows}
+        expected = {derive_market_code(m1['name']),
+                    derive_market_code(m2['name'])}
+        assert codes_found == expected
+
+
+class TestProductionReadiness:
+    """Production-readiness tests for 3-market simultaneous operation."""
+
+    def test_schema_forward_compat_guard(self, fresh_db):
+        """Opening a DB with a newer schema version raises RuntimeError."""
+        from fam.database.schema import initialize_database, CURRENT_SCHEMA_VERSION
+        # Bump the schema version beyond what the code supports
+        fresh_db.execute(
+            "UPDATE schema_version SET version = ?",
+            (CURRENT_SCHEMA_VERSION + 1,)
+        )
+        fresh_db.commit()
+
+        with pytest.raises(RuntimeError, match="newer than"):
+            initialize_database()
+
+    def test_market_code_collision_detection_no_collision(self, fresh_db):
+        """No collision when markets have distinct initials."""
+        from fam.utils.app_settings import check_market_code_collisions
+        _seed_full(fresh_db)
+        # Default seed has one market; add a second with different initials
+        fresh_db.execute(
+            "INSERT INTO markets (name, address) "
+            "VALUES ('Riverside Market', '456 River Rd')")
+        fresh_db.commit()
+        collisions = check_market_code_collisions()
+        assert collisions == []
+
+    def test_market_code_collision_detection_with_collision(self, fresh_db):
+        """Detects collision when two markets produce the same code."""
+        from fam.utils.app_settings import check_market_code_collisions
+        _seed_full(fresh_db)
+        # _seed_full already has 'Downtown Market' (code "DM").
+        # Add another market that also produces "DM".
+        fresh_db.execute(
+            "INSERT INTO markets (name, address) "
+            "VALUES ('Deer Meadow', '200 Elm St')")
+        fresh_db.commit()
+        collisions = check_market_code_collisions()
+        collision_codes = [c[0] for c in collisions]
+        assert 'DM' in collision_codes
+
+    def test_three_markets_distinct_codes(self, fresh_db):
+        """Three real markets produce unique derived codes."""
+        from fam.utils.app_settings import derive_market_code
+        names = [
+            "Bethel Park Farmers Market",
+            "Cranberry Farmers Market",
+            "Bellevue Farmers Market",
+        ]
+        codes = [derive_market_code(n) for n in names]
+        assert len(set(codes)) == 3, (
+            f"Expected 3 unique codes but got {codes}"
+        )
+
+    def test_void_customer_order_atomic(self, fresh_db):
+        """void_customer_order rolls back on failure — no partial voids."""
+        from fam.utils.app_settings import set_setting
+        from fam.models.market_day import create_market_day
+        from fam.models.transaction import create_transaction
+        from fam.models.customer_order import (
+            create_customer_order, void_customer_order, get_customer_order,
+        )
+
+        _seed_full(fresh_db)
+        set_setting('market_code', 'TST')
+        set_setting('device_id', 'dev-atom')
+        market = fresh_db.execute("SELECT id FROM markets LIMIT 1").fetchone()
+        md_id = create_market_day(market['id'], '2026-08-01', opened_by="T")
+        vendor = fresh_db.execute("SELECT id FROM vendors LIMIT 1").fetchone()
+        order_id, _ = create_customer_order(md_id)
+        txn_id, _ = create_transaction(md_id, vendor['id'], 10.0, customer_order_id=order_id)
+
+        # Verify void succeeds and both order + transactions are voided
+        void_customer_order(order_id)
+        order = get_customer_order(order_id)
+        assert order['status'] == 'Voided'
+        txn_rows = fresh_db.execute(
+            "SELECT status FROM transactions WHERE customer_order_id=?",
+            (order_id,)
+        ).fetchall()
+        assert all(r['status'] == 'Voided' for r in txn_rows)
+
+    def test_detailed_ledger_has_timestamp(self, fresh_db):
+        """Detailed Ledger sync data includes Timestamp column."""
+        from fam.utils.app_settings import set_setting
+        from fam.models.market_day import create_market_day
+        from fam.models.transaction import create_transaction, confirm_transaction
+        from fam.sync.data_collector import collect_sync_data
+
+        _seed_full(fresh_db)
+        set_setting('market_code', 'TST')
+        set_setting('device_id', 'dev-ts')
+        market = fresh_db.execute("SELECT id FROM markets LIMIT 1").fetchone()
+        md_id = create_market_day(market['id'], '2026-08-02', opened_by="T")
+        vendor = fresh_db.execute("SELECT id FROM vendors LIMIT 1").fetchone()
+        txn_id, _ = create_transaction(md_id, vendor['id'], 15.0)
+        confirm_transaction(txn_id)
+
+        data = collect_sync_data(md_id)
+        ledger = data['Detailed Ledger']
+        assert len(ledger) >= 1
+        assert 'Timestamp' in ledger[0]
+        assert ledger[0]['Timestamp'] != ''
+
+    def test_fmnp_entries_has_timestamp(self, fresh_db):
+        """FMNP Entries sync data includes Timestamp and new per-check columns."""
+        from fam.utils.app_settings import set_setting
+        from fam.models.market_day import create_market_day
+        from fam.models.fmnp import create_fmnp_entry
+        from fam.sync.data_collector import collect_sync_data
+
+        _seed_full(fresh_db)
+        set_setting('market_code', 'TST')
+        set_setting('device_id', 'dev-ts')
+        set_setting('sync_tab_fam_match_report', '1')
+        market = fresh_db.execute("SELECT id FROM markets LIMIT 1").fetchone()
+        md_id = create_market_day(market['id'], '2026-08-03', opened_by="T")
+        vendor = fresh_db.execute("SELECT id FROM vendors LIMIT 1").fetchone()
+        create_fmnp_entry(md_id, vendor['id'], 20.0, entered_by='Test')
+
+        data = collect_sync_data(md_id)
+        fmnp = data['FMNP Entries']
+        assert len(fmnp) >= 1
+        row = fmnp[0]
+        assert 'Timestamp' in row
+        assert row['Timestamp'] != ''
+        assert 'Entry ID' in row
+        assert 'Transaction ID' in row
+        assert 'Source' in row
+        assert 'Check' in row
+        assert 'Check Amount' in row
+        assert 'Total Amount' in row
