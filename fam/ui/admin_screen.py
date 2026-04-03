@@ -30,6 +30,7 @@ from fam.ui.helpers import (
     NoScrollDoubleSpinBox, NoScrollComboBox
 )
 from fam.ui.widgets.payment_row import PaymentRow
+from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
 
 logger = logging.getLogger('fam.ui.admin_screen')
 
@@ -64,7 +65,7 @@ class AdjustmentDialog(QDialog):
                 (self._market_id,)
             ).fetchone()
             if market and market['match_limit_active']:
-                self._match_limit = market['daily_match_limit'] or 100.00
+                self._match_limit = market['daily_match_limit'] or 10000
         self.setStyleSheet(f"""
             QDialog {{
                 background-color: {BACKGROUND};
@@ -84,8 +85,8 @@ class AdjustmentDialog(QDialog):
         self.receipt_spin.setRange(0.01, 99999.99)
         self.receipt_spin.setDecimals(2)
         self.receipt_spin.setPrefix("$")
-        self.receipt_spin.setValue(txn['receipt_total'])
-        self._last_receipt_total = txn['receipt_total']  # track for proportional rescale
+        self.receipt_spin.setValue(cents_to_dollars(txn['receipt_total']))
+        self._last_receipt_total = cents_to_dollars(txn['receipt_total'])  # track for proportional rescale
         self.receipt_spin.valueChanged.connect(self._on_receipt_total_changed)
         form.addRow("Receipt Total:", self.receipt_spin)
 
@@ -180,7 +181,7 @@ class AdjustmentDialog(QDialog):
         self._original_items = existing_items
         self._original_customer_paid = sum(
             it['customer_charged'] for it in existing_items
-        )
+        )  # integer cents from DB
 
         if existing_items:
             for item in existing_items:
@@ -240,27 +241,36 @@ class AdjustmentDialog(QDialog):
     # ── Receipt total change → proportional rescale ──────────
 
     def _on_receipt_total_changed(self, new_total):
-        """When receipt total changes, proportionally rescale all payment amounts."""
-        old_total = self._last_receipt_total
-        if old_total > 0 and abs(new_total - old_total) > 0.001:
-            # Collect current amounts
-            amounts = []
-            for row in self._payment_rows:
-                amounts.append(row.amount_spin.value())
-            current_sum = sum(amounts)
-            # Only rescale if payments previously matched the old total (within tolerance)
-            if current_sum > 0 and abs(current_sum - old_total) < 0.02:
-                scale = new_total / current_sum
-                rescaled = [round(a * scale, 2) for a in amounts]
+        """When receipt total changes, proportionally rescale all payment amounts.
+
+        The spinbox emits dollar values; we convert to integer cents for
+        proportional math and convert back to dollars before writing to
+        the spinboxes.
+        """
+        old_total_cents = dollars_to_cents(self._last_receipt_total)
+        new_total_cents = dollars_to_cents(new_total)
+        if old_total_cents > 0 and new_total_cents != old_total_cents:
+            # Collect current amounts in cents
+            amounts_cents = [
+                dollars_to_cents(row.amount_spin.value())
+                for row in self._payment_rows
+            ]
+            current_sum_cents = sum(amounts_cents)
+            # Only rescale if payments previously matched the old total (within 1 cent)
+            if current_sum_cents > 0 and abs(current_sum_cents - old_total_cents) <= 1:
+                rescaled = [
+                    round(a * new_total_cents / current_sum_cents)
+                    for a in amounts_cents
+                ]
                 # Fix rounding drift — adjust the largest row
-                drift = round(new_total - sum(rescaled), 2)
-                if abs(drift) > 0 and rescaled:
+                drift = new_total_cents - sum(rescaled)
+                if drift != 0 and rescaled:
                     idx = rescaled.index(max(rescaled))
-                    rescaled[idx] = round(rescaled[idx] + drift, 2)
+                    rescaled[idx] += drift
                 # Apply new amounts (block signals to avoid recursion)
-                for row, amt in zip(self._payment_rows, rescaled):
+                for row, amt_cents in zip(self._payment_rows, rescaled):
                     row.amount_spin.blockSignals(True)
-                    row.amount_spin.setValue(amt)
+                    row.amount_spin.setValue(cents_to_dollars(amt_cents))
                     row.amount_spin.blockSignals(False)
         self._last_receipt_total = new_total
         self._update_customer_impact()
@@ -268,15 +278,19 @@ class AdjustmentDialog(QDialog):
     # ── Customer impact calculation ───────────────────────────
 
     def _update_customer_impact(self):
-        """Update the customer impact info panel based on current payment data."""
+        """Update the customer impact info panel based on current payment data.
+
+        All internal monetary values are integer cents.  The receipt spinbox
+        is in dollars and is converted at the boundary.
+        """
         from fam.utils.calculations import calculate_payment_breakdown
 
-        new_total = self.receipt_spin.value()
+        new_total_cents = dollars_to_cents(self.receipt_spin.value())
 
-        # Collect valid payment data from rows
+        # Collect valid payment data from rows (all values already in cents)
         calc_entries = []
         active_rows = []
-        allocated = 0.0
+        allocated = 0  # integer cents
         has_payments = False
         for row in self._payment_rows:
             data = row.get_data()
@@ -295,12 +309,11 @@ class AdjustmentDialog(QDialog):
             return
 
         # Show allocation error if payment total doesn't match receipt total
-        if abs(allocated - new_total) > 0.01:
-            remaining = new_total - allocated
+        if abs(allocated - new_total_cents) > 1:
             self.payment_error_label.setText(
-                f"Payment total (${allocated:.2f}) does not match "
-                f"receipt total (${new_total:.2f}). "
-                f"Remaining: ${remaining:.2f}"
+                f"Payment total ({format_dollars(allocated)}) does not match "
+                f"receipt total ({format_dollars(new_total_cents)}). "
+                f"Remaining: {format_dollars(new_total_cents - allocated)}"
             )
             self.payment_error_label.setVisible(True)
         else:
@@ -308,32 +321,32 @@ class AdjustmentDialog(QDialog):
 
         # Use calculate_payment_breakdown with match limit for accurate totals
         result = calculate_payment_breakdown(
-            new_total, calc_entries, match_limit=self._match_limit
+            new_total_cents, calc_entries, match_limit=self._match_limit
         )
-        new_customer_paid = result['customer_total_paid']
-        new_fam_match = result['fam_subsidy_total']
+        new_customer_paid = result['customer_total_paid']  # cents
+        new_fam_match = result['fam_subsidy_total']  # cents
 
-        # Push capped values back to each PaymentRow's display labels
+        # Push capped values back to each PaymentRow's display labels (cents)
         for row, capped_li in zip(active_rows, result['line_items']):
             row.set_display_values(
                 capped_li['match_amount'], capped_li['customer_charged']
             )
 
-        # Customer impact comparison
-        diff = round(new_customer_paid - self._original_customer_paid, 2)
+        # Customer impact comparison (all cents)
+        diff = new_customer_paid - self._original_customer_paid
 
         # Build match limit info string
         limit_note = ""
         if self._match_limit is not None:
-            limit_note = f"  (Match limit: ${self._match_limit:.2f})"
+            limit_note = f"  (Match limit: {format_dollars(self._match_limit)})"
         if result.get('match_was_capped'):
-            limit_note = f"  (Match capped at ${self._match_limit:.2f})"
+            limit_note = f"  (Match capped at {format_dollars(self._match_limit)})"
 
-        if abs(diff) < 0.01:
+        if abs(diff) < 1:
             self.customer_impact_label.setText(
                 f"No change to customer amount. "
-                f"Customer pays ${new_customer_paid:.2f}, "
-                f"FAM match ${new_fam_match:.2f}.{limit_note}"
+                f"Customer pays {format_dollars(new_customer_paid)}, "
+                f"FAM match {format_dollars(new_fam_match)}.{limit_note}"
             )
             self.customer_impact_label.setStyleSheet(f"""
                 font-size: 13px; font-weight: bold;
@@ -344,10 +357,10 @@ class AdjustmentDialog(QDialog):
         elif diff > 0:
             self.customer_impact_label.setText(
                 f"If the original payment was collected, "
-                f"collect ${diff:.2f} more from customer. "
-                f"(Was ${self._original_customer_paid:.2f}, "
-                f"now ${new_customer_paid:.2f})  "
-                f"FAM match: ${new_fam_match:.2f}{limit_note}"
+                f"collect {format_dollars(diff)} more from customer. "
+                f"(Was {format_dollars(self._original_customer_paid)}, "
+                f"now {format_dollars(new_customer_paid)})  "
+                f"FAM match: {format_dollars(new_fam_match)}{limit_note}"
             )
             self.customer_impact_label.setStyleSheet(f"""
                 font-size: 13px; font-weight: bold;
@@ -358,10 +371,10 @@ class AdjustmentDialog(QDialog):
         else:
             self.customer_impact_label.setText(
                 f"If the original payment was collected, "
-                f"refund ${abs(diff):.2f} to customer. "
-                f"(Was ${self._original_customer_paid:.2f}, "
-                f"now ${new_customer_paid:.2f})  "
-                f"FAM match: ${new_fam_match:.2f}{limit_note}"
+                f"refund {format_dollars(abs(diff))} to customer. "
+                f"(Was {format_dollars(self._original_customer_paid)}, "
+                f"now {format_dollars(new_customer_paid)})  "
+                f"FAM match: {format_dollars(new_fam_match)}{limit_note}"
             )
             self.customer_impact_label.setStyleSheet(f"""
                 font-size: 13px; font-weight: bold;
@@ -374,7 +387,10 @@ class AdjustmentDialog(QDialog):
     # ── Public getters for caller ─────────────────────────────
 
     def get_new_line_items(self):
-        """Return list of payment line item dicts with match limit applied."""
+        """Return list of payment line item dicts with match limit applied.
+
+        All monetary values are integer cents.
+        """
         from fam.utils.calculations import calculate_payment_breakdown
 
         raw_items = []
@@ -386,14 +402,14 @@ class AdjustmentDialog(QDialog):
         if not raw_items:
             return []
 
-        # Apply match limit cap via calculate_payment_breakdown
-        new_total = self.receipt_spin.value()
+        # Apply match limit cap via calculate_payment_breakdown (all cents)
+        new_total_cents = dollars_to_cents(self.receipt_spin.value())
         calc_entries = [
             {'method_amount': it['method_amount'], 'match_percent': it['match_percent']}
             for it in raw_items
         ]
         result = calculate_payment_breakdown(
-            new_total, calc_entries, match_limit=self._match_limit
+            new_total_cents, calc_entries, match_limit=self._match_limit
         )
 
         # Merge capped match_amount and customer_charged back into items
@@ -413,7 +429,7 @@ class AdjustmentDialog(QDialog):
             sorted(self._original_items, key=lambda x: x['payment_method_id'])
         ):
             if (new_it['payment_method_id'] != old_it['payment_method_id'] or
-                    abs(new_it['method_amount'] - old_it['method_amount']) > 0.001):
+                    abs(new_it['method_amount'] - old_it['method_amount']) > 0):
                 return True
         return False
 
@@ -532,7 +548,7 @@ class AdminScreen(QWidget):
             self.table.setItem(i, 1, make_item(t.get('customer_label') or ''))
             self.table.setItem(i, 2, make_item(f"{t['market_name']} - {t['market_day_date']}"))
             self.table.setItem(i, 3, make_item(t['vendor_name']))
-            self.table.setItem(i, 4, make_item(f"${t['receipt_total']:.2f}", t['receipt_total']))
+            self.table.setItem(i, 4, make_item(format_dollars(t['receipt_total']), t['receipt_total']))
             self.table.setItem(i, 5, make_item(t['status']))
             self.table.setItem(i, 6, make_item(str(t.get('created_at', ''))))
 
@@ -582,21 +598,23 @@ class AdminScreen(QWidget):
             adjusted_by = dialog.adjusted_by_input.text().strip() or "Admin"
             reason = dialog.reason_combo.currentData() or dialog.reason_combo.currentText()
             notes = dialog.notes_input.toPlainText().strip()
-            new_total = dialog.receipt_spin.value()
+            new_total_dollars = dialog.receipt_spin.value()
+            new_total_cents = dollars_to_cents(new_total_dollars)
             new_vendor = dialog.vendor_combo.currentData()
 
-            if new_total <= 0:
+            if new_total_cents <= 0:
                 QMessageBox.warning(self, "Error",
                                     "Receipt total must be greater than $0.00.")
                 return
 
             # Warn if adjusted total exceeds the configurable threshold
+            # (threshold is in dollars from app_settings)
             from fam.utils.app_settings import get_large_receipt_threshold
             threshold = get_large_receipt_threshold()
-            if new_total > threshold:
+            if new_total_dollars > threshold:
                 answer = QMessageBox.warning(
                     self, "Large Receipt",
-                    f"Adjusted receipt total ${new_total:,.2f} exceeds the "
+                    f"Adjusted receipt total ${new_total_dollars:,.2f} exceeds the "
                     f"warning threshold of ${threshold:,.2f}.\n\n"
                     f"Are you sure this amount is correct?",
                     QMessageBox.Yes | QMessageBox.No,
@@ -604,15 +622,15 @@ class AdminScreen(QWidget):
                 if answer != QMessageBox.Yes:
                     return
 
-            # Validate payment allocation if payments were edited
+            # Validate payment allocation if payments were edited (all cents)
             new_items = dialog.get_new_line_items()
             if new_items:
                 allocated = sum(it['method_amount'] for it in new_items)
-                if abs(allocated - new_total) > 0.01:
+                if abs(allocated - new_total_cents) > 1:
                     QMessageBox.warning(
                         self, "Payment Mismatch",
-                        f"Payment total (${allocated:.2f}) does not match "
-                        f"receipt total (${new_total:.2f}). "
+                        f"Payment total ({format_dollars(allocated)}) does not match "
+                        f"receipt total ({format_dollars(new_total_cents)}). "
                         f"Please fix the payment amounts."
                     )
                     return
@@ -623,13 +641,13 @@ class AdminScreen(QWidget):
             try:
                 anything_changed = False
 
-                if new_total != txn['receipt_total']:
+                if new_total_cents != txn['receipt_total']:
                     log_action('transactions', txn_id, 'ADJUST', adjusted_by,
                                 field_name='receipt_total',
                                 old_value=txn['receipt_total'],
-                                new_value=new_total,
+                                new_value=new_total_cents,
                                 reason_code=reason, notes=notes, commit=False)
-                    update_transaction(txn_id, receipt_total=new_total, commit=False)
+                    update_transaction(txn_id, receipt_total=new_total_cents, commit=False)
                     anything_changed = True
 
                 if new_vendor != txn['vendor_id']:
@@ -646,11 +664,11 @@ class AdminScreen(QWidget):
                 payments_did_change = dialog.payments_changed()
                 if payments_did_change and new_items:
                     old_summary = ", ".join(
-                        f"{it['method_name_snapshot']}=${it['method_amount']:.2f}"
+                        f"{it['method_name_snapshot']}={format_dollars(it['method_amount'])}"
                         for it in old_items
                     )
                     new_summary = ", ".join(
-                        f"{it['method_name_snapshot']}=${it['method_amount']:.2f}"
+                        f"{it['method_name_snapshot']}={format_dollars(it['method_amount'])}"
                         for it in new_items
                     )
                     log_action('payment_line_items', txn_id,
@@ -681,27 +699,27 @@ class AdminScreen(QWidget):
             if payments_did_change and new_items:
                 old_customer = sum(
                     it['customer_charged'] for it in old_items
-                )
+                )  # cents
                 new_customer = sum(
                     it['customer_charged'] for it in new_items
-                )
-                diff = round(new_customer - old_customer, 2)
-                if abs(diff) >= 0.01:
+                )  # cents
+                diff = new_customer - old_customer
+                if abs(diff) >= 1:
                     if diff > 0:
                         impact_msg = (
                             f"Adjustment saved.\n\n"
                             f"If the original payment was collected, "
-                            f"collect ${diff:.2f} more from the customer.\n"
-                            f"(Was ${old_customer:.2f}, "
-                            f"now ${new_customer:.2f})"
+                            f"collect {format_dollars(diff)} more from the customer.\n"
+                            f"(Was {format_dollars(old_customer)}, "
+                            f"now {format_dollars(new_customer)})"
                         )
                     else:
                         impact_msg = (
                             f"Adjustment saved.\n\n"
                             f"If the original payment was collected, "
-                            f"refund ${abs(diff):.2f} to the customer.\n"
-                            f"(Was ${old_customer:.2f}, "
-                            f"now ${new_customer:.2f})"
+                            f"refund {format_dollars(abs(diff))} to the customer.\n"
+                            f"(Was {format_dollars(old_customer)}, "
+                            f"now {format_dollars(new_customer)})"
                         )
                     QMessageBox.information(
                         self, "Customer Impact", impact_msg
@@ -793,38 +811,48 @@ class AdminScreen(QWidget):
                 order_txns = [txn]
 
             txns = []
-            total_receipt = 0.0
-            total_customer = 0.0
-            total_match = 0.0
+            total_receipt = 0  # cents
+            total_customer = 0  # cents
+            total_match = 0  # cents
             payment_totals: dict[str, dict] = {}
 
             for t in order_txns:
                 tid = t['id']
                 full_txn = get_transaction_by_id(tid)
-                receipt = float(full_txn['receipt_total'])
+                receipt = full_txn['receipt_total']  # integer cents
                 total_receipt += receipt
                 line_items = get_payment_line_items(tid)
 
                 txns.append({
                     'fam_id': full_txn['fam_transaction_id'],
                     'vendor': full_txn.get('vendor_name', ''),
-                    'receipt_total': receipt,
+                    'receipt_total': cents_to_dollars(receipt),
                 })
 
                 for li in line_items:
                     method = li['method_name_snapshot']
-                    amt = float(li['method_amount'])
-                    match = float(li['match_amount'])
-                    cust = float(li['customer_charged'])
+                    amt = li['method_amount']  # cents
+                    match = li['match_amount']  # cents
+                    cust = li['customer_charged']  # cents
                     total_customer += cust
                     total_match += match
                     if method not in payment_totals:
                         payment_totals[method] = {
-                            'amount': 0.0, 'match': 0.0, 'customer': 0.0,
+                            'amount': 0, 'match': 0, 'customer': 0,
                         }
                     payment_totals[method]['amount'] += amt
                     payment_totals[method]['match'] += match
                     payment_totals[method]['customer'] += cust
+
+            # Convert accumulated cents to dollars at the UI boundary
+            payment_totals_dollars = {
+                m: {
+                    'amount': cents_to_dollars(v['amount']),
+                    'match': cents_to_dollars(v['match']),
+                    'customer': cents_to_dollars(v['customer']),
+                }
+                for m, v in payment_totals.items()
+            }
 
             return {
                 'market_name': market_name,
@@ -833,10 +861,10 @@ class AdminScreen(QWidget):
                 'confirmed_by': confirmed_by,
                 'status': status,
                 'transactions': txns,
-                'payment_totals': payment_totals,
-                'total_receipt': round(total_receipt, 2),
-                'total_customer': round(total_customer, 2),
-                'total_match': round(total_match, 2),
+                'payment_totals': payment_totals_dollars,
+                'total_receipt': cents_to_dollars(total_receipt),
+                'total_customer': cents_to_dollars(total_customer),
+                'total_match': cents_to_dollars(total_match),
             }
         except Exception:
             logger.exception("Failed to build receipt data for txn %s", txn_id)

@@ -14,6 +14,7 @@ from fam.utils.app_settings import (
     get_market_code, get_device_id, derive_market_code,
     is_sync_tab_enabled,
 )
+from fam.utils.money import cents_to_dollars
 
 logger = logging.getLogger('fam.sync.data_collector')
 
@@ -183,7 +184,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
     method_by_vendor: dict[tuple, dict[str, float]] = {}
     for r in method_rows:
         key = (r['market_name'], r['vendor'])
-        method_by_vendor.setdefault(key, {})[r['method']] = r['method_total']
+        method_by_vendor.setdefault(key, {})[r['method']] = cents_to_dollars(r['method_total'])
 
     vendor_dict = {}
     for r in vendor_rows:
@@ -196,7 +197,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
             'Vendor': r['vendor'],
             'Month': month_str,
             'Date(s)': r['transaction_dates'] or '',
-            'Total Due to Vendor': r['gross_sales'],
+            'Total Due to Vendor': cents_to_dollars(r['gross_sales']),
         }
         vendor_methods = method_by_vendor.get(key, {})
         for m in all_methods:
@@ -226,8 +227,8 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
     for r in fmnp_rows:
         key = (r['market_name'], r['vendor'])
         if key in vendor_dict:
-            vendor_dict[key]['FMNP (External)'] = r['fmnp_total']
-            vendor_dict[key]['Total Due to Vendor'] += r['fmnp_total']
+            vendor_dict[key]['FMNP (External)'] = cents_to_dollars(r['fmnp_total'])
+            vendor_dict[key]['Total Due to Vendor'] += cents_to_dollars(r['fmnp_total'])
             existing = set(vendor_dict[key]['Date(s)'].split(',')) \
                 if vendor_dict[key]['Date(s)'] else set()
             new_dates = set((r['fmnp_dates'] or '').split(','))
@@ -242,11 +243,11 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
                 'Vendor': r['vendor'],
                 'Month': month_str,
                 'Date(s)': r['fmnp_dates'] or '',
-                'Total Due to Vendor': r['fmnp_total'],
+                'Total Due to Vendor': cents_to_dollars(r['fmnp_total']),
             }
             for m in all_methods:
                 row[m] = 0
-            row['FMNP (External)'] = r['fmnp_total']
+            row['FMNP (External)'] = cents_to_dollars(r['fmnp_total'])
             row['Check Payable To'] = r['check_payable_to']
             row['Address'] = _build_vendor_address(r)
             vendor_dict[key] = row
@@ -275,8 +276,8 @@ def _collect_fam_match(conn, md_id: int) -> list[dict]:
     result = [
         {'Payment Method': r['method'],
          'Date': md_date,
-         'Total Allocated': r['total_allocated'],
-         'Total FAM Match': r['total_fam_match']}
+         'Total Allocated': cents_to_dollars(r['total_allocated']),
+         'Total FAM Match': cents_to_dollars(r['total_fam_match'])}
         for r in rows
     ]
 
@@ -291,8 +292,8 @@ def _collect_fam_match(conn, md_id: int) -> list[dict]:
         result.append({
             'Payment Method': 'FMNP (External)',
             'Date': md_date,
-            'Total Allocated': fmnp_total,
-            'Total FAM Match': fmnp_total,
+            'Total Allocated': cents_to_dollars(fmnp_total),
+            'Total FAM Match': cents_to_dollars(fmnp_total),
         })
 
     return result
@@ -303,18 +304,22 @@ def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
     from fam.utils.photo_paths import parse_photo_paths
 
     rows = conn.execute("""
-        SELECT t.fam_transaction_id, v.name AS vendor,
+        SELECT t.id AS txn_id, t.fam_transaction_id, v.name AS vendor,
                t.receipt_total, t.status, t.created_at,
                COALESCE(co.customer_label, '') AS customer_id,
                COALESCE(SUM(pl.customer_charged), 0) AS customer_paid,
                COALESCE(SUM(pl.match_amount), 0) AS fam_match,
                GROUP_CONCAT(pl.method_name_snapshot || ': $' ||
-                   PRINTF('%.2f', pl.method_amount), ', ') AS methods
+                   PRINTF('%.2f', pl.method_amount / 100.0), ', ') AS methods
         FROM transactions t
         JOIN vendors v ON t.vendor_id = v.id
         LEFT JOIN customer_orders co ON t.customer_order_id = co.id
         LEFT JOIN payment_line_items pl ON pl.transaction_id = t.id
         WHERE t.market_day_id = ? AND t.status != 'Draft'
+        -- NOTE: Intentionally includes Voided transactions.  The sync
+        -- Detailed Ledger serves as an audit trail (all statuses visible).
+        -- The Reports UI filters to Confirmed+Adjusted only.  These are
+        -- different by design — see TestVoidedTransactions in test_sync.py.
         GROUP BY t.id
         ORDER BY t.fam_transaction_id
     """, [md_id]).fetchall()
@@ -342,20 +347,15 @@ def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
             'Timestamp': r['created_at'] or '',
             'Customer': r['customer_id'],
             'Vendor': r['vendor'],
-            'Receipt Total': r['receipt_total'],
-            'Customer Paid': r['customer_paid'],
-            'FAM Match': r['fam_match'],
+            'Receipt Total': cents_to_dollars(r['receipt_total']),
+            'Customer Paid': cents_to_dollars(r['customer_paid']),
+            'FAM Match': cents_to_dollars(r['fam_match']),
             'Status': r['status'],
             'Payment Methods': r['methods'] or '',
         }
         # Include payment photo URLs if any
-        # Look up transaction id for photo mapping
-        txn_row = conn.execute(
-            "SELECT id FROM transactions WHERE fam_transaction_id = ?",
-            [r['fam_transaction_id']]
-        ).fetchone()
-        if txn_row and txn_row['id'] in txn_photos:
-            row_dict['Photos'] = ' | '.join(txn_photos[txn_row['id']])
+        if r['txn_id'] in txn_photos:
+            row_dict['Photos'] = ' | '.join(txn_photos[r['txn_id']])
         result.append(row_dict)
 
     # Append external FMNP entries
@@ -376,9 +376,9 @@ def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
             'Timestamp': r['created_at'] or '',
             'Customer': '',
             'Vendor': r['vendor'],
-            'Receipt Total': r['amount'],
+            'Receipt Total': cents_to_dollars(r['amount']),
             'Customer Paid': 0,
-            'FAM Match': r['amount'],
+            'FAM Match': cents_to_dollars(r['amount']),
             'Status': 'FMNP Entry',
             'Payment Methods': check_info,
         })
@@ -455,7 +455,8 @@ def _collect_activity_log(conn, md_id: int) -> list[dict]:
          'Reason': r['reason_code'] or '',
          'Notes': r['notes'] or '',
          'Changed By': r['changed_by'] or '',
-         'App Version': r['app_version'] or ''}
+         'App Version': r['app_version'] or '',
+         'device_id': r['device_id'] or ''}
         for r in rows
     ]
 
@@ -492,8 +493,8 @@ def _collect_geolocation(conn, md_id: int) -> list[dict]:
          'Date': md_date,
          '# Customers': r['customer_count'],
          '# Receipts': r['receipt_count'],
-         'Total Spend': r['total_spend'],
-         'Total FAM Match': r['total_match']}
+         'Total Spend': cents_to_dollars(r['total_spend']),
+         'Total FAM Match': cents_to_dollars(r['total_match'])}
         for r in rows
     ]
 
@@ -527,29 +528,30 @@ def _collect_fmnp_entries(conn, md_id: int) -> list[dict]:
 
     for r in fe_rows:
         urls = parse_photo_paths(r['photo_drive_url'])
-        total_amount = r['amount']
+        total_amount_cents = r['amount']
 
         # Determine number of checks: use photo count, else check_count,
         # else derive from denomination, else 1
         num_checks = len(urls) if urls else (
             r['check_count'] if r['check_count'] and r['check_count'] > 0
-            else (int(total_amount / denomination) if denomination > 0
+            else (int(total_amount_cents / denomination) if denomination > 0
                   else 1))
         if num_checks < 1:
             num_checks = 1
 
-        check_amount = (round(total_amount / num_checks, 2)
-                        if num_checks > 1 else total_amount)
+        base_check_cents = total_amount_cents // num_checks
+        remainder_cents = total_amount_cents % num_checks
 
         for i in range(num_checks):
+            check_cents = base_check_cents + (1 if i < remainder_cents else 0)
             result.append({
                 'Entry ID': f"FE-{r['id']}-{i + 1}",
                 'Transaction ID': '',
                 'Timestamp': r['created_at'] or '',
                 'Vendor': r['vendor'],
-                'Check Amount': check_amount,
+                'Check Amount': cents_to_dollars(check_cents),
                 'Check': f"{i + 1} of {num_checks}",
-                'Total Amount': total_amount,
+                'Total Amount': cents_to_dollars(total_amount_cents),
                 'Source': 'FMNP Entry',
                 'Entered By': r['entered_by'] or '',
                 'Notes': r['notes'] or '',
@@ -571,26 +573,27 @@ def _collect_fmnp_entries(conn, md_id: int) -> list[dict]:
 
     for r in pli_rows:
         urls = parse_photo_paths(r['photo_drive_url'])
-        total_amount = r['method_amount']
+        total_amount_cents = r['method_amount']
         txn_id = r['fam_transaction_id'] or ''
 
         num_checks = len(urls) if urls else (
-            int(total_amount / denomination) if denomination > 0 else 1)
+            int(total_amount_cents / denomination) if denomination > 0 else 1)
         if num_checks < 1:
             num_checks = 1
 
-        check_amount = (round(total_amount / num_checks, 2)
-                        if num_checks > 1 else total_amount)
+        base_check_cents = total_amount_cents // num_checks
+        remainder_cents = total_amount_cents % num_checks
 
         for i in range(num_checks):
+            check_cents = base_check_cents + (1 if i < remainder_cents else 0)
             result.append({
                 'Entry ID': f"PAY-{r['id']}-{i + 1}",
                 'Transaction ID': txn_id,
                 'Timestamp': r['created_at'] or '',
                 'Vendor': r['vendor'],
-                'Check Amount': check_amount,
+                'Check Amount': cents_to_dollars(check_cents),
                 'Check': f"{i + 1} of {num_checks}",
-                'Total Amount': total_amount,
+                'Total Amount': cents_to_dollars(total_amount_cents),
                 'Source': 'Payment',
                 'Entered By': 'Payment',
                 'Notes': '',
@@ -637,9 +640,9 @@ def _collect_market_day_summary(conn, md_id: int) -> list[dict]:
         'Opened By': row['opened_by'] or '',
         'Closed By': row['closed_by'] or '',
         'Transaction Count': row['txn_count'],
-        'Total Receipts': row['total_receipts'],
-        'Total Customer Paid': row['total_customer_paid'],
-        'Total FAM Match': row['total_fam_match'],
+        'Total Receipts': cents_to_dollars(row['total_receipts']),
+        'Total Customer Paid': cents_to_dollars(row['total_customer_paid']),
+        'Total FAM Match': cents_to_dollars(row['total_fam_match']),
     }]
 
 

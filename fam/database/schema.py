@@ -9,7 +9,7 @@ from .connection import get_connection, get_db_path
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 21
+CURRENT_SCHEMA_VERSION = 22
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS markets (
     name TEXT NOT NULL UNIQUE,
     address TEXT,
     is_active BOOLEAN DEFAULT 1,
-    daily_match_limit REAL DEFAULT 100.00,
+    daily_match_limit INTEGER DEFAULT 10000,
     match_limit_active BOOLEAN DEFAULT 1
 );
 
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS payment_methods (
     match_percent REAL NOT NULL,
     is_active BOOLEAN DEFAULT 1,
     sort_order INTEGER DEFAULT 0,
-    denomination REAL DEFAULT NULL,
+    denomination INTEGER DEFAULT NULL,
     photo_required TEXT DEFAULT NULL
 );
 
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     fam_transaction_id TEXT NOT NULL UNIQUE,
     market_day_id INTEGER NOT NULL,
     vendor_id INTEGER NOT NULL,
-    receipt_total REAL NOT NULL,
+    receipt_total INTEGER NOT NULL,
     receipt_number TEXT,
     status TEXT DEFAULT 'Draft',
     snap_reference_code TEXT,
@@ -91,9 +91,9 @@ CREATE TABLE IF NOT EXISTS payment_line_items (
     payment_method_id INTEGER NOT NULL,
     method_name_snapshot TEXT NOT NULL,
     match_percent_snapshot REAL NOT NULL,
-    method_amount REAL NOT NULL,
-    match_amount REAL NOT NULL,
-    customer_charged REAL NOT NULL,
+    method_amount INTEGER NOT NULL,
+    match_amount INTEGER NOT NULL,
+    customer_charged INTEGER NOT NULL,
     photo_path TEXT DEFAULT NULL,
     photo_drive_url TEXT DEFAULT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS fmnp_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_day_id INTEGER NOT NULL,
     vendor_id INTEGER NOT NULL,
-    amount REAL NOT NULL,
+    amount INTEGER NOT NULL,
     check_count INTEGER,
     notes TEXT,
     photo_path TEXT DEFAULT NULL,
@@ -641,6 +641,47 @@ def _migrate_v20_to_v21(conn):
     logger.info("Migration v20->v21 complete: 3 additional indexes added")
 
 
+def _migrate_v21_to_v22(conn):
+    """Convert all monetary REAL columns to INTEGER cents.
+
+    All monetary values were previously stored as dollar floats
+    (e.g. 89.99). This migration converts them to integer cents
+    (e.g. 8999) for exact arithmetic and future stored-value support.
+
+    Uses ROUND() before CAST to avoid truncation errors from float
+    representation (e.g. 5.00 stored as 4.999999 would truncate to
+    499 without rounding).
+    """
+    logger.info("Running migration v21 to v22: monetary values to integer cents")
+
+    conn.executescript("""
+        -- markets: daily_match_limit
+        UPDATE markets
+           SET daily_match_limit = CAST(ROUND(daily_match_limit * 100) AS INTEGER);
+
+        -- payment_methods: denomination (skip NULLs)
+        UPDATE payment_methods
+           SET denomination = CAST(ROUND(denomination * 100) AS INTEGER)
+         WHERE denomination IS NOT NULL;
+
+        -- transactions: receipt_total
+        UPDATE transactions
+           SET receipt_total = CAST(ROUND(receipt_total * 100) AS INTEGER);
+
+        -- payment_line_items: method_amount, match_amount, customer_charged
+        UPDATE payment_line_items
+           SET method_amount    = CAST(ROUND(method_amount * 100) AS INTEGER),
+               match_amount     = CAST(ROUND(match_amount * 100) AS INTEGER),
+               customer_charged = CAST(ROUND(customer_charged * 100) AS INTEGER);
+
+        -- fmnp_entries: amount
+        UPDATE fmnp_entries
+           SET amount = CAST(ROUND(amount * 100) AS INTEGER);
+    """)
+    conn.commit()
+    logger.info("Migration v21->v22 complete: all monetary values converted to integer cents")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -772,6 +813,10 @@ def initialize_database():
     if current_version < 21:
         _migrate_v20_to_v21(conn)
         current_version = 21
+
+    if current_version < 22:
+        _migrate_v21_to_v22(conn)
+        current_version = 22
 
     # Record the final version (avoid duplicate if already at this version)
     existing = conn.execute(

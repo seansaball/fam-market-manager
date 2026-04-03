@@ -34,11 +34,11 @@ def _seed(conn):
     """Seed markets, vendors, payment methods, and assignments."""
     conn.execute(
         "INSERT INTO markets (id, name, address, daily_match_limit, match_limit_active)"
-        " VALUES (1, 'Downtown', '123 Main St', 50.00, 1)"
+        " VALUES (1, 'Downtown', '123 Main St', 5000, 1)"
     )
     conn.execute(
         "INSERT INTO markets (id, name, address, daily_match_limit, match_limit_active)"
-        " VALUES (2, 'Riverside', '456 River Rd', 100.00, 0)"
+        " VALUES (2, 'Riverside', '456 River Rd', 10000, 0)"
     )
     conn.execute("INSERT INTO vendors (id, name, contact_info) VALUES (1, 'Farm A', 'farm@a.com')")
     conn.execute("INSERT INTO vendors (id, name, contact_info) VALUES (2, 'Farm B', NULL)")
@@ -416,7 +416,7 @@ class TestApplyImport:
         assert counts['markets_added'] == 1
         row = fresh_db.execute("SELECT * FROM markets WHERE name='New Market'").fetchone()
         assert row is not None
-        assert row['daily_match_limit'] == 75.0
+        assert row['daily_match_limit'] == 7500
 
     def test_apply_skips_existing_markets(self, fresh_db):
         _seed(fresh_db)

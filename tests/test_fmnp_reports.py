@@ -81,48 +81,48 @@ def _seed(conn):
     # FAM-001: Green Valley — $30, SNAP $20 + Cash $10
     conn.execute("""INSERT INTO transactions
         (id, fam_transaction_id, market_day_id, vendor_id, customer_order_id, receipt_total, status)
-        VALUES (1, 'FAM-001', 1, 1, 1, 30.00, 'Confirmed')""")
+        VALUES (1, 'FAM-001', 1, 1, 1, 3000, 'Confirmed')""")
     conn.execute("""INSERT INTO payment_line_items
         (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
          method_amount, match_amount, customer_charged)
-        VALUES (1, 1, 'SNAP', 50.0, 20.00, 6.67, 13.33)""")
+        VALUES (1, 1, 'SNAP', 50.0, 2000, 667, 1333)""")
     conn.execute("""INSERT INTO payment_line_items
         (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
          method_amount, match_amount, customer_charged)
-        VALUES (1, 2, 'Cash', 0.0, 10.00, 0.00, 10.00)""")
+        VALUES (1, 2, 'Cash', 0.0, 1000, 0, 1000)""")
 
     # FAM-002: Sunny Acres — $40, FMNP in-app
     conn.execute("""INSERT INTO transactions
         (id, fam_transaction_id, market_day_id, vendor_id, customer_order_id, receipt_total, status)
-        VALUES (2, 'FAM-002', 1, 2, 2, 40.00, 'Confirmed')""")
+        VALUES (2, 'FAM-002', 1, 2, 2, 4000, 'Confirmed')""")
     conn.execute("""INSERT INTO payment_line_items
         (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
          method_amount, match_amount, customer_charged)
-        VALUES (2, 3, 'FMNP', 100.0, 40.00, 20.00, 20.00)""")
+        VALUES (2, 3, 'FMNP', 100.0, 4000, 2000, 2000)""")
 
     # FAM-003: Bakers Delight — $60, Food Bucks $40 + Cash $20
     conn.execute("""INSERT INTO transactions
         (id, fam_transaction_id, market_day_id, vendor_id, customer_order_id, receipt_total, status)
-        VALUES (3, 'FAM-003', 2, 4, 3, 60.00, 'Confirmed')""")
+        VALUES (3, 'FAM-003', 2, 4, 3, 6000, 'Confirmed')""")
     conn.execute("""INSERT INTO payment_line_items
         (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
          method_amount, match_amount, customer_charged)
-        VALUES (3, 4, 'Food Bucks', 100.0, 40.00, 20.00, 20.00)""")
+        VALUES (3, 4, 'Food Bucks', 100.0, 4000, 2000, 2000)""")
     conn.execute("""INSERT INTO payment_line_items
         (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
          method_amount, match_amount, customer_charged)
-        VALUES (3, 2, 'Cash', 0.0, 20.00, 0.00, 20.00)""")
+        VALUES (3, 2, 'Cash', 0.0, 2000, 0, 2000)""")
 
     # ── External FMNP Entries ──
     conn.execute("""INSERT INTO fmnp_entries
         (id, market_day_id, vendor_id, amount, check_count, entered_by, notes)
-        VALUES (1, 1, 3, 50.00, 5, 'Admin', 'Five $10 checks')""")
+        VALUES (1, 1, 3, 5000, 5, 'Admin', 'Five $10 checks')""")
     conn.execute("""INSERT INTO fmnp_entries
         (id, market_day_id, vendor_id, amount, check_count, entered_by, notes)
-        VALUES (2, 2, 4, 25.00, 2, 'Admin', 'Two checks')""")
+        VALUES (2, 2, 4, 2500, 2, 'Admin', 'Two checks')""")
     conn.execute("""INSERT INTO fmnp_entries
         (id, market_day_id, vendor_id, amount, check_count, entered_by, notes)
-        VALUES (3, 1, 4, 15.00, 1, 'Admin', 'One check')""")
+        VALUES (3, 1, 4, 1500, 1, 'Admin', 'One check')""")
 
     conn.commit()
 
@@ -284,7 +284,7 @@ def _query_ledger(conn):
                COALESCE(SUM(pl.customer_charged), 0) as customer_paid,
                COALESCE(SUM(pl.match_amount), 0) as fam_match,
                GROUP_CONCAT(pl.method_name_snapshot || ': $' ||
-                   PRINTF('%.2f', pl.method_amount), ', ') as methods
+                   PRINTF('%.2f', pl.method_amount / 100.0), ', ') as methods
         FROM transactions t
         JOIN vendors v ON t.vendor_id = v.id
         JOIN market_days md ON t.market_day_id = md.id
@@ -348,8 +348,8 @@ class TestVendorReimbursement:
         gv = next(v for v in vendors
                   if v['vendor'] == 'Green Valley Farm'
                   and v['market_name'] == 'Downtown Market')
-        assert gv['gross'] == 30.00
-        assert gv['fam_match'] == 6.67
+        assert gv['gross'] == 3000
+        assert gv['fam_match'] == 667
         assert gv['fmnp_match'] == 0
 
     def test_inapp_fmnp_vendor(self, fresh_db):
@@ -359,9 +359,9 @@ class TestVendorReimbursement:
         sa = next(v for v in vendors
                   if v['vendor'] == 'Sunny Acres Produce'
                   and v['market_name'] == 'Downtown Market')
-        assert sa['gross'] == 40.00
-        assert sa['fam_match'] == 20.00
-        assert sa['fmnp_match'] == 20.00  # in-app FMNP match
+        assert sa['gross'] == 4000
+        assert sa['fam_match'] == 2000
+        assert sa['fmnp_match'] == 2000  # in-app FMNP match
 
     def test_external_only_vendor(self, fresh_db):
         """Mountain Herb: external FMNP only, no in-app transactions."""
@@ -372,7 +372,7 @@ class TestVendorReimbursement:
                   and v['market_name'] == 'Downtown Market')
         assert mh['gross'] == 0       # no in-app receipts
         assert mh['fam_match'] == 0   # no in-app match
-        assert mh['fmnp_match'] == 50.00
+        assert mh['fmnp_match'] == 5000
         assert mh['customers'] == ''  # external = no customer
 
     def test_mixed_vendor_riverside(self, fresh_db):
@@ -382,9 +382,9 @@ class TestVendorReimbursement:
         bd_rv = next(v for v in vendors
                      if v['vendor'] == 'Bakers Delight'
                      and v['market_name'] == 'Riverside Market')
-        assert bd_rv['gross'] == 60.00
-        assert bd_rv['fam_match'] == 20.00  # Food Bucks match only
-        assert bd_rv['fmnp_match'] == 25.00  # external FMNP at Riverside
+        assert bd_rv['gross'] == 6000
+        assert bd_rv['fam_match'] == 2000  # Food Bucks match only
+        assert bd_rv['fmnp_match'] == 2500  # external FMNP at Riverside
 
     def test_mixed_vendor_downtown(self, fresh_db):
         """Bakers Delight at Downtown: FMNP $15 only (no transactions)."""
@@ -395,7 +395,7 @@ class TestVendorReimbursement:
                      and v['market_name'] == 'Downtown Market')
         assert bd_dt['gross'] == 0
         assert bd_dt['fam_match'] == 0
-        assert bd_dt['fmnp_match'] == 15.00
+        assert bd_dt['fmnp_match'] == 1500
 
     def test_all_market_vendor_pairs_present(self, fresh_db):
         """All (market, vendor) pairs appear — 5 rows total."""
@@ -417,11 +417,11 @@ class TestVendorReimbursement:
         total_fmnp = sum(v['fmnp_match'] for v in vendors)
         total_fam = sum(v['fam_match'] for v in vendors)
         # Gross = $30 + $40 + $0 + $0 + $60
-        assert total_gross == 130.00
+        assert total_gross == 13000
         # FMNP Match = $0 + $20 + $50 + $15 + $25
-        assert total_fmnp == 110.00
+        assert total_fmnp == 11000
         # FAM Match = $6.67 + $20 + $0 + $0 + $20
-        assert total_fam == 46.67
+        assert total_fam == 4667
 
     def test_external_does_not_inflate_gross(self, fresh_db):
         """External FMNP entries never add to Gross Sales."""
@@ -433,7 +433,7 @@ class TestVendorReimbursement:
         bd_rv = next(v for v in vendors
                      if v['vendor'] == 'Bakers Delight'
                      and v['market_name'] == 'Riverside Market')
-        assert bd_rv['gross'] == 60.00  # only from transaction
+        assert bd_rv['gross'] == 6000  # only from transaction
 
     def test_dates_per_market(self, fresh_db):
         """Bakers Delight dates are split by market."""
@@ -464,17 +464,17 @@ class TestFAMMatchReport:
         fmnp = next(r for r in rows if r['method'] == 'FMNP')
         fb = next(r for r in rows if r['method'] == 'Food Bucks')
 
-        assert cash['allocated'] == 30.00   # $10 + $20
-        assert cash['fam_match'] == 0.00
+        assert cash['allocated'] == 3000   # $10 + $20
+        assert cash['fam_match'] == 0
 
-        assert snap['allocated'] == 20.00
-        assert snap['fam_match'] == 6.67
+        assert snap['allocated'] == 2000
+        assert snap['fam_match'] == 667
 
-        assert fmnp['allocated'] == 40.00   # Sunny Acres in-app
-        assert fmnp['fam_match'] == 20.00
+        assert fmnp['allocated'] == 4000   # Sunny Acres in-app
+        assert fmnp['fam_match'] == 2000
 
-        assert fb['allocated'] == 40.00
-        assert fb['fam_match'] == 20.00
+        assert fb['allocated'] == 4000
+        assert fb['fam_match'] == 2000
 
     def test_external_fmnp_row_present(self, fresh_db):
         """FMNP (External) row appears with correct total."""
@@ -482,8 +482,8 @@ class TestFAMMatchReport:
         rows, _, _, _ = _query_fam_match(fresh_db)
         ext = next(r for r in rows if r['method'] == 'FMNP (External)')
         # $50 + $25 + $15 = $90
-        assert ext['allocated'] == 90.00
-        assert ext['fam_match'] == 90.00
+        assert ext['allocated'] == 9000
+        assert ext['fam_match'] == 9000
 
     def test_total_fam_match_includes_external(self, fresh_db):
         """FAM Match total includes both in-app and external FMNP."""
@@ -491,14 +491,14 @@ class TestFAMMatchReport:
         _, _, total_fam_match, _ = _query_fam_match(fresh_db)
         # In-app: $6.67 + $0 + $20 + $20 = $46.67
         # External: $90
-        assert round(total_fam_match, 2) == 136.67
+        assert total_fam_match == 13667
 
     def test_total_customer_paid(self, fresh_db):
         """Customer paid total only includes in-app payments."""
         _seed(fresh_db)
         _, total_customer, _, _ = _query_fam_match(fresh_db)
         # Cash: $30, SNAP: $13.33, FMNP: $20, Food Bucks: $20
-        assert total_customer == 83.33
+        assert total_customer == 8333
 
     def test_no_external_row_when_empty(self, fresh_db):
         """No FMNP (External) row when fmnp_entries table is empty."""
@@ -511,11 +511,11 @@ class TestFAMMatchReport:
         conn.execute("INSERT INTO customer_orders (id, market_day_id, customer_label) VALUES (1, 1, 'C-001')")
         conn.execute("""INSERT INTO transactions
             (id, fam_transaction_id, market_day_id, vendor_id, customer_order_id, receipt_total, status)
-            VALUES (1, 'FAM-001', 1, 1, 1, 10.00, 'Confirmed')""")
+            VALUES (1, 'FAM-001', 1, 1, 1, 1000, 'Confirmed')""")
         conn.execute("""INSERT INTO payment_line_items
             (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
              method_amount, match_amount, customer_charged)
-            VALUES (1, 1, 'Cash', 0.0, 10.00, 0.00, 10.00)""")
+            VALUES (1, 1, 'Cash', 0.0, 1000, 0, 1000)""")
         conn.commit()
 
         rows, _, _, fmnp_ext = _query_fam_match(conn)
@@ -530,11 +530,11 @@ class TestFAMMatchReport:
         inapp = next(r for r in rows if r['method'] == 'FMNP')
         ext = next(r for r in rows if r['method'] == 'FMNP (External)')
         # In-app: $40 allocated, $20 match (Sunny Acres)
-        assert inapp['allocated'] == 40.00
-        assert inapp['fam_match'] == 20.00
+        assert inapp['allocated'] == 4000
+        assert inapp['fam_match'] == 2000
         # External: $90 allocated = $90 match
-        assert ext['allocated'] == 90.00
-        assert ext['fam_match'] == 90.00
+        assert ext['allocated'] == 9000
+        assert ext['fam_match'] == 9000
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -558,9 +558,9 @@ class TestDetailedLedger:
 
         fam001 = next(r for r in txn_rows if r['id'] == 'FAM-001')
         assert fam001['vendor'] == 'Green Valley Farm'
-        assert fam001['receipt_total'] == 30.00
-        assert fam001['customer_paid'] == 23.33   # $13.33 + $10.00
-        assert fam001['fam_match'] == 6.67
+        assert fam001['receipt_total'] == 3000
+        assert fam001['customer_paid'] == 2333   # $13.33 + $10.00
+        assert fam001['fam_match'] == 667
 
     def test_fmnp_entry_rows(self, fresh_db):
         """External FMNP entries appear with correct layout."""
@@ -571,9 +571,9 @@ class TestDetailedLedger:
 
         e1 = next(r for r in fmnp_rows if r['id'] == 'FMNP-1')
         assert e1['vendor'] == 'Mountain Herb Co.'
-        assert e1['receipt_total'] == 50.00
+        assert e1['receipt_total'] == 5000
         assert e1['customer_paid'] == 0
-        assert e1['fam_match'] == 50.00  # amount IS the match
+        assert e1['fam_match'] == 5000  # amount IS the match
         assert '5 checks' in e1['methods']
         assert 'External' in e1['methods']
 
@@ -617,10 +617,10 @@ class TestSummaryTotals:
         total_gross = sum(v['gross'] for v in vendors)
         total_fmnp = sum(v['fmnp_match'] for v in vendors)
 
-        assert total_gross == 130.00              # Total Receipts
-        assert total_customer == 83.33            # Customer Paid
-        assert round(total_fam_match, 2) == 136.67  # FAM Match (in-app + external)
-        assert total_fmnp == 110.00               # FMNP Match
+        assert total_gross == 13000              # Total Receipts
+        assert total_customer == 8333            # Customer Paid
+        assert total_fam_match == 13667          # FAM Match (in-app + external)
+        assert total_fmnp == 11000               # FMNP Match
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -635,7 +635,7 @@ class TestNoDoubleCounting:
         vendors = _query_vendor_reimbursement(fresh_db)
         sa = next(v for v in vendors if v['vendor'] == 'Sunny Acres Produce')
         # Only $20 from in-app FMNP (no external entries for this vendor)
-        assert sa['fmnp_match'] == 20.00
+        assert sa['fmnp_match'] == 2000
 
     def test_external_fmnp_separate_from_fam_match(self, fresh_db):
         """Mountain Herb has FMNP Match but $0 FAM Match (external only)."""
@@ -643,7 +643,7 @@ class TestNoDoubleCounting:
         vendors = _query_vendor_reimbursement(fresh_db)
         mh = next(v for v in vendors if v['vendor'] == 'Mountain Herb Co.')
         assert mh['fam_match'] == 0
-        assert mh['fmnp_match'] == 50.00
+        assert mh['fmnp_match'] == 5000
 
     def test_gross_not_inflated_by_external(self, fresh_db):
         """External FMNP entries never inflate gross sales."""
@@ -651,7 +651,7 @@ class TestNoDoubleCounting:
         vendors = _query_vendor_reimbursement(fresh_db)
         total_gross = sum(v['gross'] for v in vendors)
         # Only $130 from actual transactions, not $130 + $90 external
-        assert total_gross == 130.00
+        assert total_gross == 13000
 
     def test_ledger_no_duplicate_rows(self, fresh_db):
         """Each source produces unique rows — no overlap."""
@@ -677,25 +677,25 @@ class TestFMNPCrudAndAudit:
     def test_create_entry(self, fresh_db):
         """create_fmnp_entry inserts correctly."""
         self._setup_minimal(fresh_db)
-        eid = create_fmnp_entry(1, 1, 75.00, 'TestUser', check_count=3, notes='Test')
+        eid = create_fmnp_entry(1, 1, 7500, 'TestUser', check_count=3, notes='Test')
         entry = get_fmnp_entry_by_id(eid)
-        assert entry['amount'] == 75.00
+        assert entry['amount'] == 7500
         assert entry['check_count'] == 3
         assert entry['entered_by'] == 'TestUser'
 
     def test_update_entry(self, fresh_db):
         """update_fmnp_entry modifies fields."""
         self._setup_minimal(fresh_db)
-        eid = create_fmnp_entry(1, 1, 50.00, 'Admin')
-        update_fmnp_entry(eid, amount=75.00, notes='Updated')
+        eid = create_fmnp_entry(1, 1, 5000, 'Admin')
+        update_fmnp_entry(eid, amount=7500, notes='Updated')
         entry = get_fmnp_entry_by_id(eid)
-        assert entry['amount'] == 75.00
+        assert entry['amount'] == 7500
         assert entry['notes'] == 'Updated'
 
     def test_delete_entry(self, fresh_db):
         """delete_fmnp_entry soft-deletes: row preserved with status='Deleted'."""
         self._setup_minimal(fresh_db)
-        eid = create_fmnp_entry(1, 1, 50.00, 'Admin')
+        eid = create_fmnp_entry(1, 1, 5000, 'Admin')
         delete_fmnp_entry(eid)
         # Row still exists in the database with status='Deleted'
         row = fresh_db.execute(
@@ -710,7 +710,7 @@ class TestFMNPCrudAndAudit:
     def test_create_logged(self, fresh_db):
         """INSERT audit log entry created on create."""
         self._setup_minimal(fresh_db)
-        eid = create_fmnp_entry(1, 1, 75.00, 'Alice')
+        eid = create_fmnp_entry(1, 1, 7500, 'Alice')
         log_action('fmnp_entries', eid, 'INSERT', 'Alice', notes='Created')
         row = fresh_db.execute(
             "SELECT * FROM audit_log WHERE table_name='fmnp_entries' AND action='INSERT' AND record_id=?",
@@ -722,22 +722,22 @@ class TestFMNPCrudAndAudit:
     def test_update_logged(self, fresh_db):
         """UPDATE audit log entry tracks old/new values."""
         self._setup_minimal(fresh_db)
-        eid = create_fmnp_entry(1, 1, 50.00, 'Admin')
-        update_fmnp_entry(eid, amount=99.00)
+        eid = create_fmnp_entry(1, 1, 5000, 'Admin')
+        update_fmnp_entry(eid, amount=9900)
         log_action('fmnp_entries', eid, 'UPDATE', 'Bob',
-                   field_name='amount', old_value=50.00, new_value=99.00)
+                   field_name='amount', old_value=5000, new_value=9900)
         row = fresh_db.execute(
             "SELECT * FROM audit_log WHERE table_name='fmnp_entries' AND action='UPDATE' AND record_id=?",
             (eid,)
         ).fetchone()
         assert row is not None
-        assert row['old_value'] == '50.0'
-        assert row['new_value'] == '99.0'
+        assert row['old_value'] == '5000'
+        assert row['new_value'] == '9900'
 
     def test_delete_logged(self, fresh_db):
         """DELETE audit log entry recorded for soft-delete."""
         self._setup_minimal(fresh_db)
-        eid = create_fmnp_entry(1, 1, 50.00, 'Admin')
+        eid = create_fmnp_entry(1, 1, 5000, 'Admin')
         log_action('fmnp_entries', eid, 'DELETE', 'Charlie', notes='Removed')
         delete_fmnp_entry(eid)
         row = fresh_db.execute(
@@ -752,31 +752,31 @@ class TestFMNPCrudAndAudit:
         self._setup_minimal(fresh_db)
         fresh_db.execute("INSERT INTO market_days (id, market_id, date, status) VALUES (2, 1, '2026-01-02', 'Open')")
         fresh_db.commit()
-        create_fmnp_entry(1, 1, 10.00, 'Admin')
-        create_fmnp_entry(2, 1, 20.00, 'Admin')
-        create_fmnp_entry(1, 1, 30.00, 'Admin')
+        create_fmnp_entry(1, 1, 1000, 'Admin')
+        create_fmnp_entry(2, 1, 2000, 'Admin')
+        create_fmnp_entry(1, 1, 3000, 'Admin')
 
         entries_md1 = get_fmnp_entries(market_day_id=1)
         entries_md2 = get_fmnp_entries(market_day_id=2)
         assert len(entries_md1) == 2
         assert len(entries_md2) == 1
-        assert entries_md2[0]['amount'] == 20.00
+        assert entries_md2[0]['amount'] == 2000
 
     def test_deleted_entry_excluded_from_reports(self, fresh_db):
         """Soft-deleted FMNP entries are excluded from report queries."""
         self._setup_minimal(fresh_db)
-        eid_keep = create_fmnp_entry(1, 1, 40.00, 'Admin')
-        eid_del = create_fmnp_entry(1, 1, 60.00, 'Admin')
+        eid_keep = create_fmnp_entry(1, 1, 4000, 'Admin')
+        eid_del = create_fmnp_entry(1, 1, 6000, 'Admin')
         delete_fmnp_entry(eid_del)
 
         # Vendor reimbursement query should only include the active entry
         report = _query_vendor_reimbursement(fresh_db)
         assert len(report) == 1
-        assert report[0]['fmnp_match'] == 40.00  # only the kept entry
+        assert report[0]['fmnp_match'] == 4000  # only the kept entry
 
         # FAM match query should exclude deleted
         _, _, total_match, fmnp_ext = _query_fam_match(fresh_db)
-        assert fmnp_ext == 40.00
+        assert fmnp_ext == 4000
 
         # Detailed ledger should exclude deleted
         ledger = _query_ledger(fresh_db)
@@ -811,24 +811,24 @@ class TestEdgeCases:
         conn.execute("INSERT INTO vendors (id, name, is_active) VALUES (1, 'V1', 1)")
         conn.execute("""INSERT INTO fmnp_entries
             (market_day_id, vendor_id, amount, check_count, entered_by)
-            VALUES (1, 1, 100.00, 10, 'Admin')""")
+            VALUES (1, 1, 10000, 10, 'Admin')""")
         conn.commit()
 
         vendors = _query_vendor_reimbursement(conn)
         assert len(vendors) == 1
         assert vendors[0]['vendor'] == 'V1'
         assert vendors[0]['gross'] == 0
-        assert vendors[0]['fmnp_match'] == 100.00
+        assert vendors[0]['fmnp_match'] == 10000
 
         rows, tc, tfm, fext = _query_fam_match(conn)
-        assert fext == 100.00
-        assert tfm == 100.00
+        assert fext == 10000
+        assert tfm == 10000
         assert tc == 0
 
         ledger = _query_ledger(conn)
         assert len(ledger) == 1
         assert ledger[0]['status'] == 'FMNP Entry'
-        assert ledger[0]['fam_match'] == 100.00
+        assert ledger[0]['fam_match'] == 10000
 
     def test_draft_transactions_excluded(self, fresh_db):
         """Draft transactions are excluded from reports."""
@@ -840,11 +840,11 @@ class TestEdgeCases:
         conn.execute("INSERT INTO customer_orders (id, market_day_id, customer_label) VALUES (1, 1, 'C-001')")
         conn.execute("""INSERT INTO transactions
             (id, fam_transaction_id, market_day_id, vendor_id, customer_order_id, receipt_total, status)
-            VALUES (1, 'FAM-001', 1, 1, 1, 50.00, 'Draft')""")
+            VALUES (1, 'FAM-001', 1, 1, 1, 5000, 'Draft')""")
         conn.execute("""INSERT INTO payment_line_items
             (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
              method_amount, match_amount, customer_charged)
-            VALUES (1, 1, 'Cash', 0.0, 50.00, 0.00, 50.00)""")
+            VALUES (1, 1, 'Cash', 0.0, 5000, 0, 5000)""")
         conn.commit()
 
         vendors = _query_vendor_reimbursement(conn)
@@ -858,19 +858,19 @@ class TestEdgeCases:
         conn.execute("INSERT INTO vendors (id, name, is_active) VALUES (1, 'V1', 1)")
         conn.execute("""INSERT INTO fmnp_entries
             (market_day_id, vendor_id, amount, check_count, entered_by)
-            VALUES (1, 1, 20.00, 2, 'Admin')""")
+            VALUES (1, 1, 2000, 2, 'Admin')""")
         conn.execute("""INSERT INTO fmnp_entries
             (market_day_id, vendor_id, amount, check_count, entered_by)
-            VALUES (1, 1, 30.00, 3, 'Admin')""")
+            VALUES (1, 1, 3000, 3, 'Admin')""")
         conn.execute("""INSERT INTO fmnp_entries
             (market_day_id, vendor_id, amount, check_count, entered_by)
-            VALUES (1, 1, 50.00, 5, 'Admin')""")
+            VALUES (1, 1, 5000, 5, 'Admin')""")
         conn.commit()
 
         vendors = _query_vendor_reimbursement(conn)
         assert len(vendors) == 1
-        assert vendors[0]['fmnp_match'] == 100.00  # $20 + $30 + $50
+        assert vendors[0]['fmnp_match'] == 10000  # $20 + $30 + $50
 
         _, _, tfm, fext = _query_fam_match(conn)
-        assert fext == 100.00
-        assert tfm == 100.00
+        assert fext == 10000
+        assert tfm == 10000

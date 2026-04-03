@@ -3,9 +3,9 @@
 import csv
 import logging
 import os
-from datetime import datetime
-
 import pandas as pd
+
+from fam.utils.timezone import eastern_now
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ def generate_export_filename(report_name: str, extension: str = "csv") -> str:
     (e.g. ``fam_DT_vendor_reimbursement_20260306_140530.csv``).
     """
     from fam.utils.app_settings import get_market_code
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = eastern_now().strftime("%Y%m%d_%H%M%S")
     safe_name = report_name.replace(" ", "_").lower()
     code = get_market_code()
     if code:
@@ -201,7 +201,7 @@ def _write_ledger_backup_inner():
                COALESCE(SUM(pl.match_amount), 0) AS fam_match,
                GROUP_CONCAT(
                    pl.method_name_snapshot || ': $' ||
-                   PRINTF('%.2f', pl.method_amount), ', '
+                   PRINTF('%.2f', pl.method_amount / 100.0), ', '
                ) AS methods
         FROM transactions t
         JOIN vendors v ON t.vendor_id = v.id
@@ -259,20 +259,20 @@ def _write_ledger_backup_inner():
     lines.append(f"  Database:     {os.path.basename(get_db_path())}")
     lines.append(f"  Market Code:  {_code}")
     lines.append(f"  Device ID:    {_device}")
-    lines.append(f"  Backup at:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"  Backup at:    {eastern_now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"  Markets: {len(market_names)}    "
                  f"Market Days: {total_market_days}    "
                  f"Transactions: {total_txns}    "
                  f"FMNP Entries: {total_fmnp}")
     lines.append("")
 
-    # ── Grand totals accumulators ─────────────────────────────────
-    grand_receipt = 0.0
-    grand_customer = 0.0
-    grand_match = 0.0
+    # ── Grand totals accumulators (integer cents to avoid float drift) ──
+    grand_receipt_cents = 0
+    grand_customer_cents = 0
+    grand_match_cents = 0
     grand_count = 0
     grand_voided = 0
-    grand_fmnp_total = 0.0
+    grand_fmnp_cents = 0
 
     # ── Iterate by market → date ──────────────────────────────────
     current_market = None
@@ -309,24 +309,27 @@ def _write_ledger_backup_inner():
         lines.append(_COL_HEADER)
         lines.append(_COL_RULE)
 
-        day_receipt = 0.0
-        day_customer = 0.0
-        day_match = 0.0
+        day_receipt_cents = 0
+        day_customer_cents = 0
+        day_match_cents = 0
         day_count = 0
         day_voided = 0
 
         for i, r in enumerate(txn_rows, 1):
-            receipt = float(r['receipt_total'])
-            cust_paid = float(r['customer_paid'])
-            fam_match = float(r['fam_match'])
+            receipt_cents = int(r['receipt_total'])
+            cust_cents = int(r['customer_paid'])
+            match_cents = int(r['fam_match'])
+            receipt = receipt_cents / 100.0
+            cust_paid = cust_cents / 100.0
+            fam_match = match_cents / 100.0
             is_voided = (r['status'] == 'Voided')
 
             if is_voided:
                 day_voided += 1
             else:
-                day_receipt += receipt
-                day_customer += cust_paid
-                day_match += fam_match
+                day_receipt_cents += receipt_cents
+                day_customer_cents += cust_cents
+                day_match_cents += match_cents
             day_count += 1
 
             vendor = _fmt_vendor(r['vendor'])
@@ -345,9 +348,10 @@ def _write_ledger_backup_inner():
             lines.append("  --- FMNP (External) Entries ---")
             for r in fmnp_rows:
                 day_count += 1
-                amt = float(r['amount'])
-                day_receipt += amt
-                day_match += amt
+                amt_cents = int(r['amount'])
+                amt = amt_cents / 100.0
+                day_receipt_cents += amt_cents
+                day_match_cents += amt_cents
                 check_info = (
                     f"FMNP (External) - {r['check_count']} checks"
                     if r['check_count'] else "FMNP (External)"
@@ -361,28 +365,28 @@ def _write_ledger_backup_inner():
                     f"${amt:>9.2f}  {'FMNP Entry':<12} "
                     f"{check_info}"
                 )
-                grand_fmnp_total += amt
+                grand_fmnp_cents += amt_cents
 
         # Draft note
         if draft_n:
             lines.append(f"  ({draft_n} draft transaction(s) not shown)")
 
-        # Per-day subtotals
+        # Per-day subtotals (convert cents to dollars for display)
         lines.append("")
         voided_note = f"  Voided: {day_voided}" if day_voided else ""
         lines.append(
             f"  Subtotals:  "
-            f"Receipt: ${day_receipt:,.2f}  |  "
-            f"Customer Paid: ${day_customer:,.2f}  |  "
-            f"FAM Match: ${day_match:,.2f}  |  "
+            f"Receipt: ${day_receipt_cents / 100:,.2f}  |  "
+            f"Customer Paid: ${day_customer_cents / 100:,.2f}  |  "
+            f"FAM Match: ${day_match_cents / 100:,.2f}  |  "
             f"Transactions: {day_count}{voided_note}"
         )
         lines.append("")
 
-        # Accumulate into grand totals
-        grand_receipt += day_receipt
-        grand_customer += day_customer
-        grand_match += day_match
+        # Accumulate into grand totals (integer cents)
+        grand_receipt_cents += day_receipt_cents
+        grand_customer_cents += day_customer_cents
+        grand_match_cents += day_match_cents
         grand_count += day_count
         grand_voided += day_voided
 
@@ -391,10 +395,10 @@ def _write_ledger_backup_inner():
     lines.append("  GRAND TOTALS".center(W))
     lines.append("=" * W)
     lines.append("")
-    lines.append(f"  Total Receipts:        ${grand_receipt:,.2f}")
-    lines.append(f"  Total Customer Paid:   ${grand_customer:,.2f}")
-    lines.append(f"  Total FAM Match:       ${grand_match:,.2f}")
-    lines.append(f"  Total FMNP (External): ${grand_fmnp_total:,.2f}")
+    lines.append(f"  Total Receipts:        ${grand_receipt_cents / 100:,.2f}")
+    lines.append(f"  Total Customer Paid:   ${grand_customer_cents / 100:,.2f}")
+    lines.append(f"  Total FAM Match:       ${grand_match_cents / 100:,.2f}")
+    lines.append(f"  Total FMNP (External): ${grand_fmnp_cents / 100:,.2f}")
     lines.append(f"  Transaction Count:     {grand_count}")
     if grand_voided:
         lines.append(f"  Voided (excluded):     {grand_voided}")
@@ -419,7 +423,7 @@ def _write_ledger_backup_inner():
         os.replace(tmp_path, backup_path)
     except PermissionError:
         # File may be open in Notepad — write to timestamped fallback
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        ts = eastern_now().strftime('%Y%m%d_%H%M%S')
         fallback = os.path.join(backup_dir, f"fam_ledger_backup_{ts}.txt")
         with open(fallback, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))

@@ -3,9 +3,8 @@
 import logging
 import os
 import sqlite3
-from datetime import datetime
-
 from fam.database.connection import get_db_path
+from fam.utils.timezone import eastern_now
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +56,7 @@ def _create_backup_inner(reason: str) -> str | None:
         return None
 
     backup_dir = get_backup_dir()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = eastern_now().strftime("%Y%m%d_%H%M%S")
     from fam.utils.app_settings import get_market_code
     code = get_market_code()
     if code:

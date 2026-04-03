@@ -1,8 +1,8 @@
 """Transaction and payment line item CRUD operations."""
 
 import logging
-from datetime import datetime
 from fam.database.connection import get_connection
+from fam.utils.timezone import eastern_timestamp
 from fam.models.audit import log_action
 
 logger = logging.getLogger('fam.models.transaction')
@@ -76,30 +76,42 @@ def generate_transaction_id(market_day_date: str) -> str:
 
 def create_transaction(market_day_id, vendor_id, receipt_total, receipt_number=None,
                        market_day_date=None, notes=None, customer_order_id=None):
-    """Create a new draft transaction. Returns (transaction_id, fam_transaction_id)."""
+    """Create a new draft transaction. Returns (transaction_id, fam_transaction_id).
+
+    receipt_total is in integer cents (e.g. 8999 for $89.99).
+
+    Raises ValueError if the market day does not exist or is not open.
+    """
     conn = get_connection()
 
+    row = conn.execute(
+        "SELECT date, status FROM market_days WHERE id=?", (market_day_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"Market day {market_day_id} not found")
+    if row['status'] != 'Open':
+        raise ValueError(
+            f"Market day {market_day_id} is '{row['status']}' — "
+            f"transactions can only be created on an open market day"
+        )
     if market_day_date is None:
-        row = conn.execute("SELECT date FROM market_days WHERE id=?", (market_day_id,)).fetchone()
-        if row is None:
-            raise ValueError(f"Market day {market_day_id} not found")
-        market_day_date = row[0]
+        market_day_date = row['date']
 
     fam_tid = generate_transaction_id(market_day_date)
 
     cursor = conn.execute(
         """INSERT INTO transactions (fam_transaction_id, market_day_id, vendor_id,
-           receipt_total, receipt_number, notes, customer_order_id, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'Draft')""",
+           receipt_total, receipt_number, notes, customer_order_id, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'Draft', ?)""",
         (fam_tid, market_day_id, vendor_id, receipt_total, receipt_number, notes,
-         customer_order_id)
+         customer_order_id, eastern_timestamp())
     )
     conn.commit()
     txn_id = cursor.lastrowid
 
     log_action('transactions', txn_id, 'CREATE', 'System',
-               notes=f"Created {fam_tid} total=${receipt_total:.2f} vendor={vendor_id}")
-    logger.info("Transaction created: %s id=%s total=$%.2f", fam_tid, txn_id, receipt_total)
+               notes=f"Created {fam_tid} total=${receipt_total / 100:.2f} vendor={vendor_id}")
+    logger.info("Transaction created: %s id=%s total=$%.2f", fam_tid, txn_id, receipt_total / 100)
     return txn_id, fam_tid
 
 
@@ -131,6 +143,9 @@ def get_transaction_by_fam_id(fam_transaction_id):
     return dict(row) if row else None
 
 
+# Valid status values for transactions
+VALID_TRANSACTION_STATUSES = {'Draft', 'Confirmed', 'Adjusted', 'Voided'}
+
 def update_transaction(txn_id, commit=True, **kwargs):
     """Update transaction fields. Supports: receipt_total, vendor_id, receipt_number,
     status, snap_reference_code, notes.
@@ -147,6 +162,12 @@ def update_transaction(txn_id, commit=True, **kwargs):
         if key in allowed:
             fields.append(f"{key}=?")
             values.append(value)
+    # Validate status if being updated
+    if 'status' in kwargs and kwargs['status'] not in VALID_TRANSACTION_STATUSES:
+        raise ValueError(
+            f"Invalid transaction status '{kwargs['status']}'. "
+            f"Must be one of: {', '.join(sorted(VALID_TRANSACTION_STATUSES))}"
+        )
     if not fields:
         return
     values.append(txn_id)
@@ -156,20 +177,38 @@ def update_transaction(txn_id, commit=True, **kwargs):
 
 
 def confirm_transaction(txn_id, confirmed_by="Volunteer", commit=True):
-    """Set transaction status to Confirmed."""
-    now = datetime.now().isoformat()
-    update_transaction(txn_id, commit=commit, status='Confirmed',
-                       confirmed_by=confirmed_by, confirmed_at=now)
-    log_action('transactions', txn_id, 'CONFIRM', confirmed_by,
-               notes='Payment confirmed', commit=commit)
+    """Set transaction status to Confirmed.
+
+    Both the status update and audit log entry are written atomically.
+    When *commit* is False the caller is responsible for committing.
+    """
+    conn = get_connection()
+    now = eastern_timestamp()
+    try:
+        update_transaction(txn_id, commit=False, status='Confirmed',
+                           confirmed_by=confirmed_by, confirmed_at=now)
+        log_action('transactions', txn_id, 'CONFIRM', confirmed_by,
+                   notes='Payment confirmed', commit=False)
+        if commit:
+            conn.commit()
+    except Exception:
+        if commit:
+            conn.rollback()
+        raise
     logger.info("Transaction confirmed: id=%s by=%s", txn_id, confirmed_by)
 
 
 def void_transaction(txn_id, voided_by="System"):
     """Void a transaction (soft delete)."""
-    update_transaction(txn_id, status='Voided')
-    log_action('transactions', txn_id, 'VOID', voided_by,
-               notes='Transaction voided')
+    conn = get_connection()
+    try:
+        update_transaction(txn_id, commit=False, status='Voided')
+        log_action('transactions', txn_id, 'VOID', voided_by,
+                   notes='Transaction voided', commit=False)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     logger.info("Transaction voided: id=%s by=%s", txn_id, voided_by)
 
 
@@ -226,29 +265,35 @@ def save_payment_line_items(transaction_id, line_items, commit=True):
     When *commit* is False the caller is responsible for committing.
     """
     conn = get_connection()
-    conn.execute("DELETE FROM payment_line_items WHERE transaction_id=?", (transaction_id,))
-    for item in line_items:
-        conn.execute(
-            """INSERT INTO payment_line_items
-               (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
-                method_amount, match_amount, customer_charged, photo_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                transaction_id,
-                item['payment_method_id'],
-                item['method_name_snapshot'],
-                item['match_percent_snapshot'],
-                item['method_amount'],
-                item['match_amount'],
-                item['customer_charged'],
-                item.get('photo_path'),
+    try:
+        conn.execute("DELETE FROM payment_line_items WHERE transaction_id=?", (transaction_id,))
+        for item in line_items:
+            conn.execute(
+                """INSERT INTO payment_line_items
+                   (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
+                    method_amount, match_amount, customer_charged, photo_path, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    transaction_id,
+                    item['payment_method_id'],
+                    item['method_name_snapshot'],
+                    item['match_percent_snapshot'],
+                    item['method_amount'],
+                    item['match_amount'],
+                    item['customer_charged'],
+                    item.get('photo_path'),
+                    eastern_timestamp(),
+                )
             )
-        )
-    if commit:
-        conn.commit()
+        if commit:
+            conn.commit()
+    except Exception:
+        if commit:
+            conn.rollback()
+        raise
 
     methods_summary = ", ".join(
-        f"{it['method_name_snapshot']}=${it['method_amount']:.2f}" for it in line_items
+        f"{it['method_name_snapshot']}=${it['method_amount'] / 100:.2f}" for it in line_items
     )
     log_action('payment_line_items', transaction_id, 'PAYMENT_SAVED', 'System',
                notes=methods_summary, commit=commit)

@@ -470,8 +470,11 @@ class DateRangeWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._active = False
-        self._from_date = QDate.currentDate().addMonths(-6)
-        self._to_date = QDate.currentDate()
+        from fam.utils.timezone import eastern_today
+        _today = eastern_today()
+        _qtoday = QDate(_today.year, _today.month, _today.day)
+        self._from_date = _qtoday.addMonths(-6)
+        self._to_date = _qtoday
         self._min_date = self._from_date
         self._max_date = self._to_date
 
@@ -511,9 +514,14 @@ class DateRangeWidget(QWidget):
         qmin = QDate.fromString(min_date_str, "yyyy-MM-dd")
         qmax = QDate.fromString(max_date_str, "yyyy-MM-dd")
         if not qmin.isValid():
-            qmin = QDate.currentDate().addMonths(-6)
+            from fam.utils.timezone import eastern_today
+            _t = eastern_today()
+            _qt = QDate(_t.year, _t.month, _t.day)
+            qmin = _qt.addMonths(-6)
         if not qmax.isValid():
-            qmax = QDate.currentDate()
+            from fam.utils.timezone import eastern_today
+            _t = eastern_today()
+            qmax = QDate(_t.year, _t.month, _t.day)
         self._min_date = qmin
         self._max_date = qmax
         self._from_date = qmin

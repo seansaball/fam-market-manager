@@ -54,13 +54,13 @@ class TestSchemaColumn:
         """Denomination value can be explicitly set."""
         fresh_db.execute(
             "INSERT INTO payment_methods (name, match_percent, denomination) "
-            "VALUES ('FMNP', 100, 25.0)"
+            "VALUES ('FMNP', 100, 2500)"
         )
         fresh_db.commit()
         row = fresh_db.execute(
             "SELECT denomination FROM payment_methods WHERE name='FMNP'"
         ).fetchone()
-        assert row[0] == 25.0
+        assert row[0] == 2500
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -79,7 +79,7 @@ class TestMigrationV11ToV12:
                 name TEXT NOT NULL UNIQUE,
                 address TEXT,
                 is_active BOOLEAN DEFAULT 1,
-                daily_match_limit REAL DEFAULT 100.00,
+                daily_match_limit INTEGER DEFAULT 10000,
                 match_limit_active BOOLEAN DEFAULT 1
             );
             CREATE TABLE vendors (
@@ -118,7 +118,7 @@ class TestMigrationV11ToV12:
                 fam_transaction_id TEXT NOT NULL UNIQUE,
                 market_day_id INTEGER NOT NULL,
                 vendor_id INTEGER NOT NULL,
-                receipt_total REAL NOT NULL,
+                receipt_total INTEGER NOT NULL,
                 receipt_number TEXT,
                 status TEXT DEFAULT 'Draft',
                 snap_reference_code TEXT,
@@ -136,9 +136,9 @@ class TestMigrationV11ToV12:
                 payment_method_id INTEGER NOT NULL,
                 method_name_snapshot TEXT NOT NULL,
                 match_percent_snapshot REAL NOT NULL,
-                method_amount REAL NOT NULL,
-                match_amount REAL NOT NULL,
-                customer_charged REAL NOT NULL,
+                method_amount INTEGER NOT NULL,
+                match_amount INTEGER NOT NULL,
+                customer_charged INTEGER NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (transaction_id) REFERENCES transactions(id),
                 FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id)
@@ -147,7 +147,7 @@ class TestMigrationV11ToV12:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 market_day_id INTEGER NOT NULL,
                 vendor_id INTEGER NOT NULL,
-                amount REAL NOT NULL,
+                amount INTEGER NOT NULL,
                 check_count INTEGER,
                 notes TEXT,
                 entered_by TEXT NOT NULL,
@@ -263,22 +263,22 @@ class TestModelLayer:
 
     def test_create_with_denomination(self, fresh_db):
         from fam.models.payment_method import create_payment_method, get_all_payment_methods
-        pm_id = create_payment_method('FMNP', 100.0, sort_order=1, denomination=25.0)
+        pm_id = create_payment_method('FMNP', 100.0, sort_order=1, denomination=2500)
         methods = get_all_payment_methods()
         fmnp = next(m for m in methods if m['id'] == pm_id)
-        assert fmnp['denomination'] == 25.0
+        assert fmnp['denomination'] == 2500
 
     def test_update_add_denomination(self, fresh_db):
         from fam.models.payment_method import create_payment_method, update_payment_method, get_all_payment_methods
         pm_id = create_payment_method('FMNP', 100.0, sort_order=1)
-        update_payment_method(pm_id, 'FMNP', 100.0, sort_order=1, denomination=50.0)
+        update_payment_method(pm_id, 'FMNP', 100.0, sort_order=1, denomination=5000)
         methods = get_all_payment_methods()
         fmnp = next(m for m in methods if m['id'] == pm_id)
-        assert fmnp['denomination'] == 50.0
+        assert fmnp['denomination'] == 5000
 
     def test_update_clear_denomination(self, fresh_db):
         from fam.models.payment_method import create_payment_method, update_payment_method, get_all_payment_methods
-        pm_id = create_payment_method('FMNP', 100.0, sort_order=1, denomination=25.0)
+        pm_id = create_payment_method('FMNP', 100.0, sort_order=1, denomination=2500)
         # Setting denomination to 0 clears it to NULL
         update_payment_method(pm_id, 'FMNP', 100.0, sort_order=1, denomination=0)
         methods = get_all_payment_methods()
@@ -287,11 +287,11 @@ class TestModelLayer:
 
     def test_update_change_denomination(self, fresh_db):
         from fam.models.payment_method import create_payment_method, update_payment_method, get_all_payment_methods
-        pm_id = create_payment_method('FMNP', 100.0, sort_order=1, denomination=50.0)
-        update_payment_method(pm_id, 'FMNP', 100.0, sort_order=1, denomination=25.0)
+        pm_id = create_payment_method('FMNP', 100.0, sort_order=1, denomination=5000)
+        update_payment_method(pm_id, 'FMNP', 100.0, sort_order=1, denomination=2500)
         methods = get_all_payment_methods()
         fmnp = next(m for m in methods if m['id'] == pm_id)
-        assert fmnp['denomination'] == 25.0
+        assert fmnp['denomination'] == 2500
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -301,11 +301,12 @@ def validate_denomination(charge, denomination):
     """Replicate PaymentRow.validate_denomination() math.
 
     Returns error string if invalid, None if OK.
+    charge and denomination are in cents (integers).
     """
     if denomination is None or denomination <= 0:
         return None
-    if charge > 0 and round(charge % denomination, 2) != 0:
-        return f"Must be in ${denomination:.0f} increments (entered ${charge:.2f})"
+    if charge > 0 and charge % denomination != 0:
+        return f"Must be in ${denomination // 100} increments (entered ${charge / 100:.2f})"
     return None
 
 
@@ -313,54 +314,54 @@ class TestDenominationValidation:
 
     def test_valid_exact_multiple(self):
         """$50 in $25 increments → valid."""
-        assert validate_denomination(50.0, 25.0) is None
+        assert validate_denomination(5000, 2500) is None
 
     def test_valid_single_increment(self):
         """$25 in $25 increments → valid."""
-        assert validate_denomination(25.0, 25.0) is None
+        assert validate_denomination(2500, 2500) is None
 
     def test_valid_zero_charge(self):
         """$0 charge → always valid (no charge, no check)."""
-        assert validate_denomination(0.0, 25.0) is None
+        assert validate_denomination(0, 2500) is None
 
     def test_invalid_non_multiple(self):
         """$30 in $25 increments → error."""
-        result = validate_denomination(30.0, 25.0)
+        result = validate_denomination(3000, 2500)
         assert result is not None
         assert "$25" in result
 
     def test_invalid_partial_increment(self):
         """$12.50 in $25 increments → error."""
-        result = validate_denomination(12.50, 25.0)
+        result = validate_denomination(1250, 2500)
         assert result is not None
 
     def test_null_denomination_always_valid(self):
         """No denomination set → any amount is valid."""
-        assert validate_denomination(123.45, None) is None
+        assert validate_denomination(12345, None) is None
 
     def test_large_valid_multiple(self):
         """$100 in $25 increments → valid."""
-        assert validate_denomination(100.0, 25.0) is None
+        assert validate_denomination(10000, 2500) is None
 
     def test_50_denomination(self):
         """$50 increment: $100 valid, $75 invalid."""
-        assert validate_denomination(100.0, 50.0) is None
-        assert validate_denomination(75.0, 50.0) is not None
+        assert validate_denomination(10000, 5000) is None
+        assert validate_denomination(7500, 5000) is not None
 
     def test_odd_charge_with_denomination(self):
         """$33 in $25 increments → error."""
-        result = validate_denomination(33.0, 25.0)
+        result = validate_denomination(3300, 2500)
         assert result is not None
 
-    @pytest.mark.parametrize("charge", [25, 50, 75, 100, 125, 150, 175, 200])
+    @pytest.mark.parametrize("charge", [2500, 5000, 7500, 10000, 12500, 15000, 17500, 20000])
     def test_valid_multiples_of_25(self, charge):
-        """All multiples of 25 should be valid."""
-        assert validate_denomination(float(charge), 25.0) is None
+        """All multiples of 2500 cents should be valid."""
+        assert validate_denomination(charge, 2500) is None
 
-    @pytest.mark.parametrize("charge", [1, 10, 24, 26, 49, 51, 99, 101])
+    @pytest.mark.parametrize("charge", [100, 1000, 2400, 2600, 4900, 5100, 9900, 10100])
     def test_invalid_non_multiples_of_25(self, charge):
-        """Non-multiples of 25 should be invalid."""
-        assert validate_denomination(float(charge), 25.0) is not None
+        """Non-multiples of 2500 cents should be invalid."""
+        assert validate_denomination(charge, 2500) is not None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -372,7 +373,7 @@ class TestSettingsIO:
         """Exported .fam file should include denomination column."""
         from fam.settings_io import export_settings
         from fam.models.payment_method import create_payment_method
-        create_payment_method('FMNP', 100.0, sort_order=1, denomination=25.0)
+        create_payment_method('FMNP', 100.0, sort_order=1, denomination=2500)
         create_payment_method('SNAP', 100.0, sort_order=2)
 
         filepath = str(tmp_path / "export.fam")
@@ -495,7 +496,7 @@ SNAP | 100.0 | 2 |
         row = fresh_db.execute(
             "SELECT denomination FROM payment_methods WHERE name='FMNP'"
         ).fetchone()
-        assert row[0] == 25.0
+        assert row[0] == 2500
 
         row2 = fresh_db.execute(
             "SELECT denomination FROM payment_methods WHERE name='SNAP'"
@@ -506,7 +507,7 @@ SNAP | 100.0 | 2 |
         """Export → clear → import preserves denomination."""
         from fam.settings_io import export_settings, parse_settings_file, apply_import
         from fam.models.payment_method import create_payment_method
-        create_payment_method('FMNP', 100.0, sort_order=1, denomination=25.0)
+        create_payment_method('FMNP', 100.0, sort_order=1, denomination=2500)
         create_payment_method('Cash', 0.0, sort_order=2)
 
         filepath = str(tmp_path / "rt_denom.fam")
@@ -524,7 +525,7 @@ SNAP | 100.0 | 2 |
         fmnp = fresh_db.execute(
             "SELECT denomination FROM payment_methods WHERE name='FMNP'"
         ).fetchone()
-        assert fmnp[0] == 25.0
+        assert fmnp[0] == 2500
 
         cash = fresh_db.execute(
             "SELECT denomination FROM payment_methods WHERE name='Cash'"

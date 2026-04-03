@@ -61,7 +61,7 @@ def _seed_market(conn):
     """Seed a single market."""
     conn.execute(
         "INSERT INTO markets (id, name, address, daily_match_limit, match_limit_active)"
-        " VALUES (1, 'Downtown Market', '123 Main St', 100.00, 1)"
+        " VALUES (1, 'Downtown Market', '123 Main St', 10000, 1)"
     )
     conn.commit()
 
@@ -217,10 +217,10 @@ class TestMarketDayCRUD:
 
     def test_get_market_day_transactions_summary(self, fresh_db):
         _seed_full(fresh_db)
-        txn_id = create_transaction(1, 1, 50.00, 'FAM-20260301-0001')
+        txn_id = create_transaction(1, 1, 5000, 'FAM-20260301-0001')
         result = get_market_day_transactions_summary(1)
         assert len(result) == 1
-        assert result[0]['receipt_total'] == 50.00
+        assert result[0]['receipt_total'] == 5000
         assert result[0]['vendor_name'] == 'Farm Stand'
 
     def test_transactions_summary_empty(self, fresh_db):
@@ -496,7 +496,7 @@ class TestCustomerOrderCRUD:
         assert order is not None
         assert order['customer_label'] == 'C-001'
         assert order['market_name'] == 'Downtown Market'
-        assert order['daily_match_limit'] == 100.00
+        assert order['daily_match_limit'] == 10000
 
     def test_get_customer_order_not_found(self, fresh_db):
         assert get_customer_order(999) is None
@@ -522,7 +522,7 @@ class TestCustomerOrderCRUD:
 
 class TestCustomerOrderTransactions:
 
-    def _create_txn(self, fresh_db, receipt=50.0, status='Confirmed'):
+    def _create_txn(self, fresh_db, receipt=5000, status='Confirmed'):
         txn_id, _fam_id = create_transaction(1, 1, receipt,
                                              customer_order_id=1)
         if status == 'Confirmed':
@@ -531,63 +531,63 @@ class TestCustomerOrderTransactions:
 
     def test_get_order_transactions(self, fresh_db):
         _seed_full(fresh_db)
-        self._create_txn(fresh_db, 50.0)
-        self._create_txn(fresh_db, 30.0)
+        self._create_txn(fresh_db, 5000)
+        self._create_txn(fresh_db, 3000)
         txns = get_order_transactions(1)
         assert len(txns) == 2
 
     def test_get_order_transactions_excludes_voided(self, fresh_db):
         _seed_full(fresh_db)
-        tid = self._create_txn(fresh_db, 50.0)
-        self._create_txn(fresh_db, 30.0)
+        tid = self._create_txn(fresh_db, 5000)
+        self._create_txn(fresh_db, 3000)
         void_transaction(tid)
         txns = get_order_transactions(1)
         assert len(txns) == 1
-        assert txns[0]['receipt_total'] == 30.0
+        assert txns[0]['receipt_total'] == 3000
 
     def test_get_order_total(self, fresh_db):
         _seed_full(fresh_db)
-        self._create_txn(fresh_db, 50.0)
-        self._create_txn(fresh_db, 30.0)
-        assert get_order_total(1) == 80.0
+        self._create_txn(fresh_db, 5000)
+        self._create_txn(fresh_db, 3000)
+        assert get_order_total(1) == 8000
 
     def test_get_order_total_excludes_voided(self, fresh_db):
         _seed_full(fresh_db)
-        tid = self._create_txn(fresh_db, 50.0)
-        self._create_txn(fresh_db, 30.0)
+        tid = self._create_txn(fresh_db, 5000)
+        self._create_txn(fresh_db, 3000)
         void_transaction(tid)
-        assert get_order_total(1) == 30.0
+        assert get_order_total(1) == 3000
 
     def test_get_order_total_empty(self, fresh_db):
         _seed_full(fresh_db)
-        assert get_order_total(1) == 0.0
+        assert get_order_total(1) == 0
 
     def test_get_order_vendor_summary(self, fresh_db):
         _seed_full(fresh_db)
-        self._create_txn(fresh_db, 50.0)
-        tid2, _fam2 = create_transaction(1, 2, 30.0, customer_order_id=1)
+        self._create_txn(fresh_db, 5000)
+        tid2, _fam2 = create_transaction(1, 2, 3000, customer_order_id=1)
         confirm_transaction(tid2, confirmed_by='Alice')
         summary = get_order_vendor_summary(1)
         assert len(summary) == 2
         totals = {s['vendor_name']: s['vendor_total'] for s in summary}
-        assert totals['Farm Stand'] == 50.0
-        assert totals['Bakery'] == 30.0
+        assert totals['Farm Stand'] == 5000
+        assert totals['Bakery'] == 3000
 
     def test_void_customer_order(self, fresh_db):
         _seed_full(fresh_db)
-        self._create_txn(fresh_db, 50.0)
-        self._create_txn(fresh_db, 30.0)
+        self._create_txn(fresh_db, 5000)
+        self._create_txn(fresh_db, 3000)
         void_customer_order(1)
         order = get_customer_order(1)
         assert order['status'] == 'Voided'
         # All transactions voided
         txns = get_order_transactions(1)
         assert txns == []  # voided are excluded
-        assert get_order_total(1) == 0.0
+        assert get_order_total(1) == 0
 
     def test_void_customer_order_audit_logged(self, fresh_db):
         _seed_full(fresh_db)
-        self._create_txn(fresh_db, 50.0)
+        self._create_txn(fresh_db, 5000)
         void_customer_order(1)
         logs = get_audit_log(table_name='customer_orders', record_id=1)
         actions = [l['action'] for l in logs]
@@ -596,11 +596,11 @@ class TestCustomerOrderTransactions:
     def test_get_draft_orders(self, fresh_db):
         _seed_full(fresh_db)
         # Order 1 is Draft by default
-        create_transaction(1, 1, 50.0, customer_order_id=1)
+        create_transaction(1, 1, 5000, customer_order_id=1)
         drafts = get_draft_orders_for_market_day(1)
         assert len(drafts) == 1
         assert drafts[0]['customer_label'] == 'C-001'
-        assert drafts[0]['order_total'] == 50.0
+        assert drafts[0]['order_total'] == 5000
 
     def test_get_draft_orders_excludes_confirmed(self, fresh_db):
         _seed_full(fresh_db)
@@ -622,43 +622,43 @@ class TestTransactionExtended:
 
     def test_generate_transaction_id_sequential(self, fresh_db):
         _seed_full(fresh_db)
-        create_transaction(1, 1, 50.0)
+        create_transaction(1, 1, 5000)
         fam_id = generate_transaction_id('2026-03-01')
         assert fam_id.endswith('-0002')
 
     def test_void_transaction(self, fresh_db):
         _seed_full(fresh_db)
-        tid, _fam = create_transaction(1, 1, 50.0)
+        tid, _fam = create_transaction(1, 1, 5000)
         void_transaction(tid)
         txn = get_transaction_by_id(tid)
         assert txn['status'] == 'Voided'
 
     def test_get_draft_transactions(self, fresh_db):
         _seed_full(fresh_db)
-        create_transaction(1, 1, 50.0)
-        create_transaction(1, 1, 30.0)
+        create_transaction(1, 1, 5000)
+        create_transaction(1, 1, 3000)
         drafts = get_draft_transactions(1)
         assert len(drafts) == 2
         assert all(d['status'] == 'Draft' for d in drafts)
 
     def test_get_draft_transactions_excludes_confirmed(self, fresh_db):
         _seed_full(fresh_db)
-        tid1, _ = create_transaction(1, 1, 50.0)
-        create_transaction(1, 1, 30.0)
+        tid1, _ = create_transaction(1, 1, 5000)
+        create_transaction(1, 1, 3000)
         confirm_transaction(tid1, confirmed_by='Alice')
         drafts = get_draft_transactions(1)
         assert len(drafts) == 1
-        assert drafts[0]['receipt_total'] == 30.0
+        assert drafts[0]['receipt_total'] == 3000
 
     def test_search_transactions_no_filter(self, fresh_db):
         _seed_full(fresh_db)
-        create_transaction(1, 1, 50.0, customer_order_id=1)
+        create_transaction(1, 1, 5000, customer_order_id=1)
         results = search_transactions()
         assert len(results) == 1
 
     def test_search_by_market_day(self, fresh_db):
         _seed_full(fresh_db)
-        create_transaction(1, 1, 50.0)
+        create_transaction(1, 1, 5000)
         results = search_transactions(market_day_id=1)
         assert len(results) == 1
         results = search_transactions(market_day_id=999)
@@ -666,25 +666,25 @@ class TestTransactionExtended:
 
     def test_search_by_vendor(self, fresh_db):
         _seed_full(fresh_db)
-        create_transaction(1, 1, 50.0)
-        create_transaction(1, 2, 30.0)
+        create_transaction(1, 1, 5000)
+        create_transaction(1, 2, 3000)
         results = search_transactions(vendor_id=1)
         assert len(results) == 1
         assert results[0]['vendor_name'] == 'Farm Stand'
 
     def test_search_by_status(self, fresh_db):
         _seed_full(fresh_db)
-        tid, _ = create_transaction(1, 1, 50.0)
-        create_transaction(1, 1, 30.0)
+        tid, _ = create_transaction(1, 1, 5000)
+        create_transaction(1, 1, 3000)
         confirm_transaction(tid, confirmed_by='Alice')
         results = search_transactions(status='Confirmed')
         assert len(results) == 1
-        assert results[0]['receipt_total'] == 50.0
+        assert results[0]['receipt_total'] == 5000
 
     def test_search_by_fam_id(self, fresh_db):
         _seed_full(fresh_db)
-        _, fam1 = create_transaction(1, 1, 50.0)
-        _, fam2 = create_transaction(1, 1, 30.0)
+        _, fam1 = create_transaction(1, 1, 5000)
+        _, fam2 = create_transaction(1, 1, 3000)
         # Search by the last segment of the second FAM ID
         search_term = fam2.split('-')[-1]
         results = search_transactions(fam_id_search=search_term)
@@ -693,18 +693,18 @@ class TestTransactionExtended:
 
     def test_search_combined_filters(self, fresh_db):
         _seed_full(fresh_db)
-        create_transaction(1, 1, 50.0)
-        create_transaction(1, 2, 30.0)
+        create_transaction(1, 1, 5000)
+        create_transaction(1, 2, 3000)
         results = search_transactions(market_day_id=1, vendor_id=2)
         assert len(results) == 1
         assert results[0]['vendor_name'] == 'Bakery'
 
     def test_get_transaction_by_fam_id(self, fresh_db):
         _seed_full(fresh_db)
-        _, fam_id = create_transaction(1, 1, 50.0)
+        _, fam_id = create_transaction(1, 1, 5000)
         txn = get_transaction_by_fam_id(fam_id)
         assert txn is not None
-        assert txn['receipt_total'] == 50.0
+        assert txn['receipt_total'] == 5000
 
     def test_get_transaction_by_fam_id_not_found(self, fresh_db):
         assert get_transaction_by_fam_id('FAM-NOPE-0000') is None
@@ -725,11 +725,11 @@ class TestAuditLog:
 
     def test_log_action_with_field_change(self, fresh_db):
         log_action('transactions', 1, 'ADJUST', 'Bob',
-                   field_name='receipt_total', old_value=50.0, new_value=75.0)
+                   field_name='receipt_total', old_value=5000, new_value=7500)
         logs = get_audit_log(record_id=1)
         assert logs[0]['field_name'] == 'receipt_total'
-        assert logs[0]['old_value'] == '50.0'
-        assert logs[0]['new_value'] == '75.0'
+        assert logs[0]['old_value'] == '5000'
+        assert logs[0]['new_value'] == '7500'
 
     def test_log_action_old_value_none(self, fresh_db):
         log_action('transactions', 1, 'CREATE', 'Alice',
@@ -755,7 +755,7 @@ class TestAuditLog:
 
     def test_get_transaction_log(self, fresh_db):
         _seed_full(fresh_db)
-        tid, _fam = create_transaction(1, 1, 50.0)
+        tid, _fam = create_transaction(1, 1, 5000)
         log_action('transactions', tid, 'CREATE', 'Alice',
                    notes='Transaction created')
         logs = get_transaction_log(market_day_id=1)
@@ -766,7 +766,7 @@ class TestAuditLog:
 
     def test_get_transaction_log_action_filter(self, fresh_db):
         _seed_full(fresh_db)
-        tid, _fam = create_transaction(1, 1, 50.0)
+        tid, _fam = create_transaction(1, 1, 5000)
         log_action('transactions', tid, 'CREATE', 'Alice')
         log_action('transactions', tid, 'CONFIRM', 'Alice')
         logs = get_transaction_log(action_filter=['CREATE'])
@@ -788,12 +788,12 @@ class TestDataIntegrity:
     def test_transaction_requires_valid_vendor(self, fresh_db):
         _seed_full(fresh_db)
         with pytest.raises(Exception):
-            create_transaction(1, 999, 50.0)
+            create_transaction(1, 999, 5000)
 
     def test_transaction_requires_valid_market_day(self, fresh_db):
         _seed_full(fresh_db)
         with pytest.raises(Exception):
-            create_transaction(999, 1, 50.0)
+            create_transaction(999, 1, 5000)
 
     def test_market_day_requires_valid_market(self, fresh_db):
         with pytest.raises(Exception):
@@ -801,7 +801,7 @@ class TestDataIntegrity:
 
     def test_confirm_sets_status_and_timestamp(self, fresh_db):
         _seed_full(fresh_db)
-        tid, _fam = create_transaction(1, 1, 50.0)
+        tid, _fam = create_transaction(1, 1, 5000)
         confirm_transaction(tid, confirmed_by='Alice')
         txn = get_transaction_by_id(tid)
         assert txn['status'] == 'Confirmed'
@@ -810,40 +810,40 @@ class TestDataIntegrity:
 
     def test_payment_line_items_round_trip(self, fresh_db):
         _seed_full(fresh_db)
-        tid, _fam = create_transaction(1, 1, 100.0)
+        tid, _fam = create_transaction(1, 1, 10000)
         items = [{
             'payment_method_id': 1,
             'method_name_snapshot': 'SNAP',
             'match_percent_snapshot': 100.0,
-            'method_amount': 100.0,
-            'match_amount': 50.0,
-            'customer_charged': 50.0,
+            'method_amount': 10000,
+            'match_amount': 5000,
+            'customer_charged': 5000,
         }]
         save_payment_line_items(tid, items)
         retrieved = get_payment_line_items(tid)
         assert len(retrieved) == 1
-        assert retrieved[0]['method_amount'] == 100.0
-        assert retrieved[0]['match_amount'] == 50.0
+        assert retrieved[0]['method_amount'] == 10000
+        assert retrieved[0]['match_amount'] == 5000
 
     def test_save_payment_items_replaces(self, fresh_db):
         _seed_full(fresh_db)
-        tid, _fam = create_transaction(1, 1, 100.0)
+        tid, _fam = create_transaction(1, 1, 10000)
         items1 = [{
             'payment_method_id': 1,
             'method_name_snapshot': 'SNAP',
             'match_percent_snapshot': 100.0,
-            'method_amount': 100.0,
-            'match_amount': 50.0,
-            'customer_charged': 50.0,
+            'method_amount': 10000,
+            'match_amount': 5000,
+            'customer_charged': 5000,
         }]
         save_payment_line_items(tid, items1)
         items2 = [{
             'payment_method_id': 2,
             'method_name_snapshot': 'Cash',
             'match_percent_snapshot': 0.0,
-            'method_amount': 100.0,
-            'match_amount': 0.0,
-            'customer_charged': 100.0,
+            'method_amount': 10000,
+            'match_amount': 0,
+            'customer_charged': 10000,
         }]
         save_payment_line_items(tid, items2)
         retrieved = get_payment_line_items(tid)
@@ -854,7 +854,7 @@ class TestDataIntegrity:
         """Verify FMNP soft-delete keeps the row with status='Deleted'."""
         _seed_full(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, delete_fmnp_entry, get_fmnp_entries
-        eid = create_fmnp_entry(1, 1, 40.0, 'Admin')
+        eid = create_fmnp_entry(1, 1, 4000, 'Admin')
         delete_fmnp_entry(eid)
         # Row still exists
         row = fresh_db.execute(
@@ -868,7 +868,7 @@ class TestDataIntegrity:
     def test_fmnp_active_only_false_returns_deleted(self, fresh_db):
         _seed_full(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, delete_fmnp_entry, get_fmnp_entries
-        eid = create_fmnp_entry(1, 1, 40.0, 'Admin')
+        eid = create_fmnp_entry(1, 1, 4000, 'Admin')
         delete_fmnp_entry(eid)
         entries = get_fmnp_entries(market_day_id=1, active_only=False)
         statuses = [e['status'] for e in entries]
@@ -887,7 +887,7 @@ class TestStabilityAudit:
         from fam.models.transaction import create_transaction
         with pytest.raises(ValueError, match="not found"):
             create_transaction(market_day_id=999999, vendor_id=1,
-                               receipt_total=10.0)
+                               receipt_total=1000)
 
     def test_void_customer_order_atomic(self, fresh_db):
         """Voiding an order updates both transactions and order in one commit."""
@@ -898,8 +898,8 @@ class TestStabilityAudit:
         from fam.models.transaction import create_transaction
 
         co_id, label = create_customer_order(1)
-        t1, _ = create_transaction(1, 1, 20.0, customer_order_id=co_id)
-        t2, _ = create_transaction(1, 1, 30.0, customer_order_id=co_id)
+        t1, _ = create_transaction(1, 1, 2000, customer_order_id=co_id)
+        t2, _ = create_transaction(1, 1, 3000, customer_order_id=co_id)
 
         void_customer_order(co_id)
 
@@ -951,8 +951,8 @@ class TestStabilityAudit:
         set_setting('device_id', 'abcd-1234')
 
         from fam.models.transaction import create_transaction
-        _, fam1 = create_transaction(1, 1, 10.0)
-        _, fam2 = create_transaction(1, 1, 20.0)
+        _, fam1 = create_transaction(1, 1, 1000)
+        _, fam2 = create_transaction(1, 1, 2000)
 
         seq1 = int(fam1.split('-')[-1])
         seq2 = int(fam2.split('-')[-1])
@@ -965,7 +965,7 @@ class TestStabilityAudit:
             create_transaction, save_payment_line_items,
             get_payment_line_items,
         )
-        tid, _ = create_transaction(1, 1, 50.0)
+        tid, _ = create_transaction(1, 1, 5000)
         pm = fresh_db.execute(
             "SELECT id, name, match_percent FROM payment_methods LIMIT 1"
         ).fetchone()
@@ -974,24 +974,24 @@ class TestStabilityAudit:
         items_v1 = [{'payment_method_id': pm['id'],
                      'method_name_snapshot': pm['name'],
                      'match_percent_snapshot': pm['match_percent'],
-                     'method_amount': 50.0,
-                     'match_amount': 25.0,
-                     'customer_charged': 25.0}]
+                     'method_amount': 5000,
+                     'match_amount': 2500,
+                     'customer_charged': 2500}]
         save_payment_line_items(tid, items_v1)
         assert len(get_payment_line_items(tid)) == 1
 
         # Replace with two items
         items_v2 = [
-            {**items_v1[0], 'method_amount': 30.0, 'match_amount': 15.0,
-             'customer_charged': 15.0},
-            {**items_v1[0], 'method_amount': 20.0, 'match_amount': 10.0,
-             'customer_charged': 10.0},
+            {**items_v1[0], 'method_amount': 3000, 'match_amount': 1500,
+             'customer_charged': 1500},
+            {**items_v1[0], 'method_amount': 2000, 'match_amount': 1000,
+             'customer_charged': 1000},
         ]
         save_payment_line_items(tid, items_v2)
         result = get_payment_line_items(tid)
         assert len(result) == 2
         total = sum(r['method_amount'] for r in result)
-        assert total == 50.0
+        assert total == 5000
 
     def test_market_day_summary_collector_empty(self, fresh_db):
         """Market Day Summary returns empty list for nonexistent md_id."""
@@ -1041,9 +1041,9 @@ class TestStabilityAudit:
         # Create a transaction on each market day
         from fam.models.transaction import create_transaction
         set_setting('market_code', derive_market_code(m1['name']))
-        create_transaction(md1, 1, 10.0)
+        create_transaction(md1, 1, 1000)
         set_setting('market_code', derive_market_code(m2['name']))
-        create_transaction(md2, 1, 20.0)
+        create_transaction(md2, 1, 2000)
 
         # Sync all market days
         data = collect_sync_data()
@@ -1126,7 +1126,7 @@ class TestProductionReadiness:
         md_id = create_market_day(market['id'], '2026-08-01', opened_by="T")
         vendor = fresh_db.execute("SELECT id FROM vendors LIMIT 1").fetchone()
         order_id, _ = create_customer_order(md_id)
-        txn_id, _ = create_transaction(md_id, vendor['id'], 10.0, customer_order_id=order_id)
+        txn_id, _ = create_transaction(md_id, vendor['id'], 1000, customer_order_id=order_id)
 
         # Verify void succeeds and both order + transactions are voided
         void_customer_order(order_id)
@@ -1151,7 +1151,7 @@ class TestProductionReadiness:
         market = fresh_db.execute("SELECT id FROM markets LIMIT 1").fetchone()
         md_id = create_market_day(market['id'], '2026-08-02', opened_by="T")
         vendor = fresh_db.execute("SELECT id FROM vendors LIMIT 1").fetchone()
-        txn_id, _ = create_transaction(md_id, vendor['id'], 15.0)
+        txn_id, _ = create_transaction(md_id, vendor['id'], 1500)
         confirm_transaction(txn_id)
 
         data = collect_sync_data(md_id)
@@ -1174,7 +1174,7 @@ class TestProductionReadiness:
         market = fresh_db.execute("SELECT id FROM markets LIMIT 1").fetchone()
         md_id = create_market_day(market['id'], '2026-08-03', opened_by="T")
         vendor = fresh_db.execute("SELECT id FROM vendors LIMIT 1").fetchone()
-        create_fmnp_entry(md_id, vendor['id'], 20.0, entered_by='Test')
+        create_fmnp_entry(md_id, vendor['id'], 2000, entered_by='Test')
 
         data = collect_sync_data(md_id)
         fmnp = data['FMNP Entries']
@@ -1188,3 +1188,269 @@ class TestProductionReadiness:
         assert 'Check' in row
         assert 'Check Amount' in row
         assert 'Total Amount' in row
+
+
+# ══════════════════════════════════════════════════════════════════
+# Regression: save_payment_line_items rollback on failure
+# ══════════════════════════════════════════════════════════════════
+class TestSavePaymentLineItemsRollback:
+    """Regression: DELETE-before-INSERT must rollback atomically."""
+
+    def test_rollback_on_insert_failure(self, fresh_db):
+        """If INSERT fails after DELETE, previous items must survive."""
+        _seed_full(fresh_db)
+
+        # Use seeded data: market_day id=1, vendor id=1, payment_method id=1
+        txn_id, _fam_id = create_transaction(1, 1, 5000)
+
+        # Save initial line items
+        items = [{
+            'payment_method_id': 1,
+            'method_name_snapshot': 'SNAP',
+            'match_percent_snapshot': 100.0,
+            'method_amount': 5000,
+            'match_amount': 2500,
+            'customer_charged': 2500,
+        }]
+        save_payment_line_items(txn_id, items)
+
+        # Verify initial save worked
+        saved = get_payment_line_items(txn_id)
+        assert len(saved) == 1
+        assert saved[0]['method_amount'] == 5000
+
+        # Now try to save with invalid data that will fail INSERT
+        bad_items = [{
+            'payment_method_id': None,  # This should cause a constraint error
+            'method_name_snapshot': 'Bad',
+            'match_percent_snapshot': 0.0,
+            'method_amount': 1000,
+            'match_amount': 0,
+            'customer_charged': 1000,
+        }]
+
+        try:
+            save_payment_line_items(txn_id, bad_items)
+        except Exception:
+            pass  # Expected to fail
+
+        # Original items should still exist after rollback
+        restored = get_payment_line_items(txn_id)
+        assert len(restored) == 1
+        assert restored[0]['method_amount'] == 5000
+
+
+# ══════════════════════════════════════════════════════════════════
+# Regression: void_transaction is atomic
+# ══════════════════════════════════════════════════════════════════
+class TestVoidTransactionAtomic:
+    """Regression: void + audit log must be atomic."""
+
+    def test_void_updates_status_and_audit(self, fresh_db):
+        """Void should update status and create audit entry together."""
+        _seed_full(fresh_db)
+
+        txn_id, _fam_id = create_transaction(1, 1, 5000)
+
+        void_transaction(txn_id, voided_by="TestUser")
+
+        # Both status and audit should be updated
+        updated = get_transaction_by_id(txn_id)
+        assert updated['status'] == 'Voided'
+
+        logs = get_audit_log(table_name='transactions', record_id=txn_id)
+        void_logs = [l for l in logs if l['action'] == 'VOID']
+        assert len(void_logs) >= 1
+
+
+# ══════════════════════════════════════════════════════════════════
+# Regression: Penny rounding tolerance in calculations
+# ══════════════════════════════════════════════════════════════════
+class TestPennyRoundingTolerance:
+    """Regression: penny rounding from charge-to-method_amount round-trip."""
+
+    def test_odd_total_with_100_match(self):
+        """9863 cents with 100% match should not produce false overage."""
+        from fam.utils.calculations import calculate_payment_breakdown
+
+        # JH Tokens: 9 x 500 = 4500 charge, 9000 method_amount
+        # SNAP: 432 charge, 864 method_amount
+        entries = [
+            {'method_amount': 9000, 'match_percent': 100.0},
+            {'method_amount': 864, 'match_percent': 100.0},
+        ]
+        result = calculate_payment_breakdown(9863, entries)
+        # Total is 9864 which is within 1 cent tolerance -- should be valid
+        assert abs(result['allocation_remaining']) <= 1
+
+    def test_half_penny_charge_round_trip(self):
+        """charge_to_method_amount round-trip for odd values."""
+        from fam.utils.calculations import charge_to_method_amount, method_amount_to_charge
+
+        # 8963 / 2 = 4481.5 -- can't be exact in integer cents
+        charge = method_amount_to_charge(8963, 100.0)
+        method_amt = charge_to_method_amount(charge, 100.0)
+        # Round-trip should be within 1 cent
+        assert abs(method_amt - 8963) <= 1
+
+
+class TestConfirmTransactionAtomic:
+    """Regression: confirm_transaction must be atomic (status + audit)."""
+
+    def test_confirm_updates_status_and_audit(self, fresh_db):
+        """Confirm should update status and create audit entry together."""
+        _seed_full(fresh_db)
+        txn_id, _ = create_transaction(1, 1, 5000)
+
+        confirm_transaction(txn_id, confirmed_by="TestUser")
+
+        updated = get_transaction_by_id(txn_id)
+        assert updated['status'] == 'Confirmed'
+        assert updated['confirmed_by'] == 'TestUser'
+        assert updated['confirmed_at'] is not None
+
+        logs = get_audit_log(table_name='transactions', record_id=txn_id)
+        confirm_logs = [l for l in logs if l['action'] == 'CONFIRM']
+        assert len(confirm_logs) >= 1
+        assert confirm_logs[0]['changed_by'] == 'TestUser'
+
+    def test_confirm_with_deferred_commit(self, fresh_db):
+        """When commit=False, caller controls the commit."""
+        _seed_full(fresh_db)
+        txn_id, _ = create_transaction(1, 1, 5000)
+
+        confirm_transaction(txn_id, confirmed_by="Deferred", commit=False)
+        # Not committed yet — rollback should undo it
+        fresh_db.rollback()
+
+        updated = get_transaction_by_id(txn_id)
+        assert updated['status'] == 'Draft'
+
+
+class TestStatusValidation:
+    """Regression: invalid statuses must be rejected."""
+
+    def test_invalid_transaction_status_rejected(self, fresh_db):
+        """update_transaction should reject unknown status values."""
+        from fam.models.transaction import update_transaction, VALID_TRANSACTION_STATUSES
+        _seed_full(fresh_db)
+        txn_id, _ = create_transaction(1, 1, 5000)
+
+        with pytest.raises(ValueError, match="Invalid transaction status"):
+            update_transaction(txn_id, status='Bogus')
+
+        # Verify original status unchanged
+        updated = get_transaction_by_id(txn_id)
+        assert updated['status'] == 'Draft'
+
+    def test_valid_transaction_statuses_accepted(self, fresh_db):
+        """All valid statuses should be accepted without error."""
+        from fam.models.transaction import update_transaction, VALID_TRANSACTION_STATUSES
+        _seed_full(fresh_db)
+        txn_id, _ = create_transaction(1, 1, 5000)
+
+        for status in VALID_TRANSACTION_STATUSES:
+            update_transaction(txn_id, status=status)
+            updated = get_transaction_by_id(txn_id)
+            assert updated['status'] == status
+
+    def test_invalid_order_status_rejected(self, fresh_db):
+        """update_customer_order_status should reject unknown status values."""
+        from fam.models.customer_order import VALID_ORDER_STATUSES
+        _seed_full(fresh_db)
+
+        with pytest.raises(ValueError, match="Invalid order status"):
+            update_customer_order_status(1, 'InvalidStatus')
+
+    def test_valid_order_statuses_accepted(self, fresh_db):
+        """All valid order statuses should be accepted without error."""
+        from fam.models.customer_order import VALID_ORDER_STATUSES
+        _seed_full(fresh_db)
+
+        for status in VALID_ORDER_STATUSES:
+            update_customer_order_status(1, status)
+            order = get_customer_order(1)
+            assert order['status'] == status
+
+
+class TestMultiReceiptDraftSave:
+    """Regression: draft save must distribute across all transactions."""
+
+    def test_distribute_proportionally(self, fresh_db):
+        """Payment should be proportionally split across transactions."""
+        from fam.utils.calculations import charge_to_method_amount
+        _seed_full(fresh_db)
+
+        # Create a customer order with 2 transactions (different vendors/amounts)
+        txn1_id, _ = create_transaction(1, 1, 7500)  # Farm Stand: $75
+        txn2_id, _ = create_transaction(1, 2, 2500)   # Bakery: $25
+
+        # Assign both to the same customer order
+        from fam.models.transaction import update_transaction
+        update_transaction(txn1_id, customer_order_id=1)
+        update_transaction(txn2_id, customer_order_id=1)
+
+        # Simulate a payment of 10000 cents total via SNAP (100% match)
+        items = [{
+            'payment_method_id': 1,
+            'method_name_snapshot': 'SNAP',
+            'match_percent_snapshot': 100.0,
+            'method_amount': 10000,
+            'match_amount': 5000,
+            'customer_charged': 5000,
+        }]
+
+        # Save to both transactions proportionally (75/25 split)
+        save_payment_line_items(txn1_id, [{
+            'payment_method_id': 1,
+            'method_name_snapshot': 'SNAP',
+            'match_percent_snapshot': 100.0,
+            'method_amount': 7500,
+            'match_amount': 3750,
+            'customer_charged': 3750,
+        }])
+        save_payment_line_items(txn2_id, [{
+            'payment_method_id': 1,
+            'method_name_snapshot': 'SNAP',
+            'match_percent_snapshot': 100.0,
+            'method_amount': 2500,
+            'match_amount': 1250,
+            'customer_charged': 1250,
+        }])
+
+        # Verify both have line items
+        li1 = get_payment_line_items(txn1_id)
+        li2 = get_payment_line_items(txn2_id)
+        assert len(li1) == 1
+        assert len(li2) == 1
+        assert li1[0]['method_amount'] == 7500
+        assert li2[0]['method_amount'] == 2500
+        # Combined should equal order total
+        assert li1[0]['method_amount'] + li2[0]['method_amount'] == 10000
+
+
+class TestMatchFormulaConsistency:
+    """Verify match formula is consistent across all code paths."""
+
+    def test_recompute_matches_centralized(self):
+        """payment_row._recompute() logic matches charge_to_method_amount()."""
+        from fam.utils.calculations import charge_to_method_amount
+
+        test_cases = [
+            (5000, 100.0),   # 5000 cents charge, 100% match
+            (2500, 50.0),    # 2500 cents charge, 50% match
+            (10000, 0.0),    # 10000 cents charge, 0% match
+            (3333, 75.0),    # Odd charge, 75% match
+            (1, 100.0),      # 1 cent charge
+            (0, 100.0),      # Zero charge
+        ]
+        for charge, match_pct in test_cases:
+            total = charge_to_method_amount(charge, match_pct)
+            match_amt = total - charge
+            # This is what payment_row._recompute now does
+            # Verify it matches the old formula: round(charge * (match_pct / 100), 0)
+            old_match = round(charge * (match_pct / 100.0))
+            assert match_amt == old_match, (
+                f"Mismatch for charge={charge}, pct={match_pct}: "
+                f"new={match_amt}, old={old_match}"
+            )

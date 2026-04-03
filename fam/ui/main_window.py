@@ -578,9 +578,12 @@ class MainWindow(QMainWindow):
             last = get_last_update_check()
             if last:
                 from datetime import datetime, timedelta
+                from fam.utils.timezone import eastern_now, EASTERN
                 try:
                     last_dt = datetime.fromisoformat(last)
-                    if datetime.now() - last_dt < timedelta(hours=24):
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=EASTERN)
+                    if eastern_now() - last_dt < timedelta(hours=24):
                         return
                 except (ValueError, TypeError):
                     pass
@@ -624,12 +627,12 @@ class MainWindow(QMainWindow):
 
     def _on_auto_update_check_finished(self, result: dict):
         """Handle the background update check result."""
-        from datetime import datetime
+        from fam.utils.timezone import eastern_timestamp
         from fam.utils.app_settings import (
             set_last_update_check, set_setting, get_setting,
         )
 
-        set_last_update_check(datetime.now().isoformat())
+        set_last_update_check(eastern_timestamp())
 
         if not result or not result.get('update_available'):
             return

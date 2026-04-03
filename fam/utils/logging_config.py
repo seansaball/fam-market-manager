@@ -39,6 +39,9 @@ def setup_logging(data_dir: str | None = None):
         '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
     )
+    # Force log timestamps to US Eastern regardless of system timezone
+    from fam.utils.timezone import eastern_now
+    formatter.converter = lambda *_args: eastern_now().timetuple()
     handler.setFormatter(formatter)
 
     root = logging.getLogger('fam')

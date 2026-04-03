@@ -6,8 +6,8 @@ Extension: .fam
 
 import logging
 import re
-from datetime import datetime
 from dataclasses import dataclass, field
+from fam.utils.timezone import eastern_now
 
 from fam.database.connection import get_connection
 
@@ -162,7 +162,7 @@ def export_settings(filepath: str) -> str:
 
     lines = []
     lines.append("# FAM Market Manager - Settings Export")
-    lines.append(f"# Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"# Exported: {eastern_now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"# Version: {FILE_VERSION}")
     lines.append(f"# Market Code: {_code}")
     lines.append(f"# Device ID: {_device}")
@@ -177,9 +177,10 @@ def export_settings(filepath: str) -> str:
     lines.append("Name | Address | Daily Match Limit | Limit Active")
     for m in markets:
         addr = m.get('address') or ''
-        limit = m.get('daily_match_limit') or 100.00
+        limit_cents = m.get('daily_match_limit') or 10000
+        limit_dollars = limit_cents / 100.0
         active = "Yes" if m.get('match_limit_active', 1) else "No"
-        lines.append(f"{m['name']} | {addr} | {limit:.2f} | {active}")
+        lines.append(f"{m['name']} | {addr} | {limit_dollars:.2f} | {active}")
     lines.append("")
 
     # Vendors
@@ -200,8 +201,8 @@ def export_settings(filepath: str) -> str:
     lines.append("=== Payment Methods ===")
     lines.append("Name | Match % | Sort Order | Denomination")
     for pm in methods:
-        denom = pm.get('denomination')
-        denom_str = str(denom) if denom else ''
+        denom_cents = pm.get('denomination')
+        denom_str = str(denom_cents / 100.0) if denom_cents else ''
         lines.append(f"{pm['name']} | {pm['match_percent']} | {pm['sort_order']} | {denom_str}")
     lines.append("")
 
@@ -444,10 +445,11 @@ def apply_import(result: ImportResult) -> dict:
     # Insert new markets
     for m in result.new_markets:
         try:
+            limit_cents = int(round(m.daily_match_limit * 100))
             conn.execute(
                 "INSERT INTO markets (name, address, daily_match_limit, match_limit_active) "
                 "VALUES (?, ?, ?, ?)",
-                (m.name, m.address or None, m.daily_match_limit, int(m.limit_active))
+                (m.name, m.address or None, limit_cents, int(m.limit_active))
             )
             counts['markets_added'] += 1
         except Exception as e:
@@ -473,10 +475,11 @@ def apply_import(result: ImportResult) -> dict:
     # Insert new payment methods
     for pm in result.new_payment_methods:
         try:
+            denom_cents = int(round(pm.denomination * 100)) if pm.denomination else None
             conn.execute(
                 "INSERT INTO payment_methods (name, match_percent, sort_order, denomination)"
                 " VALUES (?, ?, ?, ?)",
-                (pm.name, pm.match_percent, pm.sort_order, pm.denomination)
+                (pm.name, pm.match_percent, pm.sort_order, denom_cents)
             )
             counts['payment_methods_added'] += 1
         except Exception as e:

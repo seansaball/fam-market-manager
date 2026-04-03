@@ -1,7 +1,7 @@
 # FAM Market Manager — User Guide
 
 > **For volunteers, coordinators, and market day staff**
-> Version 1.8.5
+> Version 1.9.2
 
 ---
 
@@ -80,6 +80,7 @@ The screen will update to show the active market day with an **Open** status. Th
 - If a market day already exists for today's date, the app will offer to reopen it instead of creating a duplicate
 - A market code is automatically derived from the market name (e.g., "Bethel Park Farmers Market" → `BPFM`)
 - Automatic database backups run every 5 minutes while a market day is open
+- **You must have an open market day to record transactions.** If the market day is closed, the app will block new receipts and payments until you reopen it or open a new one
 
 ---
 
@@ -151,6 +152,8 @@ At the top of the screen you will see:
 You can add multiple payment methods if the customer is splitting their payment.
 
 **Denomination validation:** For payment methods that use fixed denominations (such as FMNP checks), the app validates that the amount you enter is a valid multiple of the denomination. If you enter an amount that does not divide evenly, a warning appears and the entry is blocked until corrected.
+
+**Automatic balance clamping:** As you enter payment amounts, the app automatically limits each payment method's maximum to the remaining order balance. The stepper's + button disables when one more unit would exceed the remaining amount, and free-text entry fields cap at the remaining balance. This prevents over-allocation before it happens.
 
 ### Attaching a receipt photo
 

@@ -194,10 +194,26 @@ def run():
         )
         sys.exit(1)
 
+    # Tell Windows this is its own application (not Python) so the
+    # taskbar shows our icon instead of the default Python icon.
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "FoodAssistanceMatch.FAMManager"
+        )
+    except Exception:
+        pass  # non-Windows or missing API — harmless
+
     # Create Qt application
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("FAM Market Day Transaction Manager")
     app.setOrganizationName("Food Assistance Match")
+
+    # Set app-level icon so the taskbar picks it up
+    from fam.ui.main_window import _resolve_asset
+    _icon_path = _resolve_asset("fam_icon.ico")
+    if os.path.exists(_icon_path):
+        from PySide6.QtGui import QIcon
+        app.setWindowIcon(QIcon(_icon_path))
 
     # Set global stylesheet
     app.setStyleSheet(GLOBAL_STYLESHEET)

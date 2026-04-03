@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
 
 from fam.database.connection import get_connection
+from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
 
 logger = logging.getLogger('fam.ui.settings_screen')
 from fam.models.vendor import (
@@ -208,11 +209,11 @@ class EditPaymentMethodDialog(QDialog):
         denom_row.addWidget(self.denom_spin)
         layout.addRow("", denom_row)
 
-        # Initialize from existing data
+        # Initialize from existing data (DB stores denomination in cents)
         existing_denom = method.get('denomination')
         if existing_denom and existing_denom > 0:
             self.denom_check.setChecked(True)
-            self.denom_spin.setValue(existing_denom)
+            self.denom_spin.setValue(cents_to_dollars(existing_denom))
         else:
             self.denom_check.setChecked(False)
 
@@ -233,9 +234,9 @@ class EditPaymentMethodDialog(QDialog):
         self.denom_spin.setEnabled(checked)
 
     def get_denomination(self):
-        """Return denomination value if active, else None."""
+        """Return denomination value in cents if active, else None."""
         if self.denom_check.isChecked():
-            return self.denom_spin.value()
+            return dollars_to_cents(self.denom_spin.value())
         return None
 
     def show_photo_required(self):
@@ -279,7 +280,8 @@ class MatchLimitDialog(QDialog):
         self.limit_spin.setRange(0.01, 99999.99)
         self.limit_spin.setDecimals(2)
         self.limit_spin.setPrefix("$")
-        self.limit_spin.setValue(market.get('daily_match_limit') or 100.00)
+        limit_cents = market.get('daily_match_limit') or 10000
+        self.limit_spin.setValue(cents_to_dollars(limit_cents))
         layout.addRow("Daily Match Limit:", self.limit_spin)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1761,7 +1763,10 @@ class SettingsScreen(QWidget):
         if last_check:
             try:
                 from datetime import datetime
+                from fam.utils.timezone import EASTERN
                 dt = datetime.fromisoformat(last_check)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=EASTERN)
                 check_text = dt.strftime("%b %d, %Y at %I:%M %p")
             except (ValueError, TypeError):
                 check_text = last_check
@@ -2018,16 +2023,15 @@ class SettingsScreen(QWidget):
 
     def _on_update_check_finished(self, result: dict):
         """Handle update check result."""
-        from datetime import datetime
+        from fam.utils.timezone import eastern_now, eastern_timestamp
         from fam.utils.app_settings import set_setting, set_last_update_check
 
         self._update_check_btn.setEnabled(True)
         self._update_check_btn.setText("Check for Updates")
 
-        now = datetime.now()
-        set_last_update_check(now.isoformat())
+        set_last_update_check(eastern_timestamp())
         self._update_last_check_lbl.setText(
-            now.strftime("%b %d, %Y at %I:%M %p"))
+            eastern_now().strftime("%b %d, %Y at %I:%M %p"))
 
         if not result:
             self._update_status_lbl.setText(
@@ -2298,9 +2302,10 @@ class SettingsScreen(QWidget):
 
             # Match Limit column — green when on, red when off
             limit_active = r['match_limit_active']
-            limit_val = r['daily_match_limit'] or 100.00
+            limit_cents = r['daily_match_limit'] or 10000
+            limit_dollars = cents_to_dollars(limit_cents)
             if limit_active:
-                limit_item = make_item(f"${limit_val:.2f}", limit_val)
+                limit_item = make_item(f"${limit_dollars:.2f}", limit_dollars)
                 limit_item.setForeground(QBrush(QColor(ACCENT_GREEN)))
             else:
                 limit_item = make_item("Off")
@@ -2408,9 +2413,14 @@ class SettingsScreen(QWidget):
             self.pm_table.setItem(i, 1, make_item(m['name']))
             self.pm_table.setItem(i, 2, make_item(f"{m['match_percent']}%", m['match_percent']))
 
-            denom = m.get('denomination')
-            denom_text = f"${denom:.2f}" if denom else "Any"
-            self.pm_table.setItem(i, 3, make_item(denom_text, denom or 0))
+            denom_cents = m.get('denomination')
+            if denom_cents:
+                denom_dollars = cents_to_dollars(denom_cents)
+                denom_text = f"${denom_dollars:.2f}"
+            else:
+                denom_dollars = 0
+                denom_text = "Any"
+            self.pm_table.setItem(i, 3, make_item(denom_text, denom_dollars))
 
             active_item = make_item("Yes" if m['is_active'] else "No")
             active_item.setForeground(QBrush(QColor(ACCENT_GREEN if m['is_active'] else ERROR_COLOR)))
@@ -2519,12 +2529,12 @@ class SettingsScreen(QWidget):
 
         dialog = MatchLimitDialog(market, self)
         if dialog.exec() == QDialog.Accepted:
-            new_limit = dialog.limit_spin.value()
+            new_limit_cents = dollars_to_cents(dialog.limit_spin.value())
             try:
                 conn = get_connection()
                 conn.execute(
                     "UPDATE markets SET daily_match_limit=? WHERE id=?",
-                    (new_limit, market_id)
+                    (new_limit_cents, market_id)
                 )
                 conn.commit()
                 self._load_markets()
@@ -2661,7 +2671,7 @@ class SettingsScreen(QWidget):
     def _add_payment_method(self):
         name = self.pm_name_input.text().strip()
         match_pct = self.pm_match_spin.value()
-        denom_val = self.pm_denom_spin.value() if self.pm_denom_check.isChecked() else None
+        denom_val = dollars_to_cents(self.pm_denom_spin.value()) if self.pm_denom_check.isChecked() else None
         if not name:
             QMessageBox.warning(self, "Error", "Payment method name is required.")
             return

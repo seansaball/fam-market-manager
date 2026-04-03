@@ -5,8 +5,8 @@ Two tables:
   local_photo_hashes — content_hash → local path  (UI attachment dedup)
 """
 
-from datetime import datetime
 from typing import Optional
+from fam.utils.timezone import eastern_timestamp
 
 from fam.database.connection import get_connection
 
@@ -32,7 +32,7 @@ def store_photo_hash(content_hash: str, drive_url: str) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO photo_hashes (content_hash, drive_url, created_at) "
         "VALUES (?, ?, ?)",
-        (content_hash, drive_url, datetime.now().isoformat())
+        (content_hash, drive_url, eastern_timestamp())
     )
     conn.commit()
 
@@ -77,7 +77,7 @@ def store_local_photo_hash(content_hash: str, relative_path: str) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO local_photo_hashes "
         "(content_hash, relative_path, created_at) VALUES (?, ?, ?)",
-        (content_hash, relative_path, datetime.now().isoformat())
+        (content_hash, relative_path, eastern_timestamp())
     )
     conn.commit()
 

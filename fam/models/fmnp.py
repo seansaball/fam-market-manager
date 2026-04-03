@@ -1,7 +1,7 @@
 """FMNP entry CRUD operations."""
 
-from datetime import datetime
 from fam.database.connection import get_connection
+from fam.utils.timezone import eastern_timestamp
 
 # Sentinel to distinguish "not provided" from None (which means "clear the photo")
 _UNSET = object()
@@ -52,9 +52,10 @@ def create_fmnp_entry(market_day_id, vendor_id, amount, entered_by,
     conn = get_connection()
     cursor = conn.execute(
         """INSERT INTO fmnp_entries
-           (market_day_id, vendor_id, amount, check_count, notes, entered_by, photo_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (market_day_id, vendor_id, amount, check_count, notes, entered_by, photo_path)
+           (market_day_id, vendor_id, amount, check_count, notes, entered_by, photo_path, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (market_day_id, vendor_id, amount, check_count, notes, entered_by, photo_path,
+         eastern_timestamp())
     )
     conn.commit()
     return cursor.lastrowid
@@ -81,7 +82,7 @@ def update_fmnp_entry(entry_id, amount=None, vendor_id=None,
         fields.append("photo_path=?")
         values.append(photo_path)
     fields.append("updated_at=?")
-    values.append(datetime.now().isoformat())
+    values.append(eastern_timestamp())
     values.append(entry_id)
     conn.execute(f"UPDATE fmnp_entries SET {', '.join(fields)} WHERE id=?", values)
     conn.commit()
@@ -92,7 +93,7 @@ def delete_fmnp_entry(entry_id):
     conn = get_connection()
     conn.execute(
         "UPDATE fmnp_entries SET status = 'Deleted', updated_at = ? WHERE id = ?",
-        (datetime.now().isoformat(), entry_id),
+        (eastern_timestamp(), entry_id),
     )
     conn.commit()
 
@@ -106,7 +107,7 @@ def update_fmnp_photo_drive_url(entry_id, drive_url):
     conn = get_connection()
     conn.execute(
         "UPDATE fmnp_entries SET photo_drive_url=?, updated_at=? WHERE id=?",
-        (drive_url, datetime.now().isoformat(), entry_id)
+        (drive_url, eastern_timestamp(), entry_id)
     )
     conn.commit()
 

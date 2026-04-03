@@ -1,8 +1,8 @@
 """Market day CRUD operations."""
 
 import logging
-from datetime import datetime
 from fam.database.connection import get_connection
+from fam.utils.timezone import eastern_timestamp
 from fam.models.audit import log_action
 
 logger = logging.getLogger('fam.models.market_day')
@@ -65,8 +65,8 @@ def find_market_day(market_id, date_str):
 def create_market_day(market_id, date_str, opened_by="System"):
     conn = get_connection()
     cursor = conn.execute(
-        "INSERT INTO market_days (market_id, date, status, opened_by) VALUES (?, ?, 'Open', ?)",
-        (market_id, date_str, opened_by)
+        "INSERT INTO market_days (market_id, date, status, opened_by, created_at) VALUES (?, ?, 'Open', ?, ?)",
+        (market_id, date_str, opened_by, eastern_timestamp())
     )
     conn.commit()
     md_id = cursor.lastrowid
@@ -80,7 +80,7 @@ def create_market_day(market_id, date_str, opened_by="System"):
 
 def close_market_day(market_day_id, closed_by="System"):
     conn = get_connection()
-    now = datetime.now().isoformat()
+    now = eastern_timestamp()
     conn.execute(
         "UPDATE market_days SET status='Closed', closed_by=?, closed_at=? WHERE id=?",
         (closed_by, now, market_day_id)

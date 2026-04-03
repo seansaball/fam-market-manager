@@ -50,7 +50,7 @@ def _seed_fmnp(conn):
     )
     conn.execute(
         "INSERT INTO payment_methods (id, name, match_percent, denomination, photo_required)"
-        " VALUES (1, 'FMNP', 100.0, 25.0, 'Mandatory')"
+        " VALUES (1, 'FMNP', 100.0, 2500, 'Mandatory')"
     )
     conn.commit()
 
@@ -303,14 +303,14 @@ class TestPendingPhotoUploads:
         """Entries with no photo_path should not be pending."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, get_pending_photo_uploads
-        create_fmnp_entry(1, 1, 25.0, 'Alice')  # no photo_path
+        create_fmnp_entry(1, 1, 2500, 'Alice')  # no photo_path
         assert get_pending_photo_uploads() == []
 
     def test_single_photo_no_url_is_pending(self, fresh_db):
         """Entry with photo_path but no drive_url should be pending."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, get_pending_photo_uploads
-        create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         pending = get_pending_photo_uploads()
         assert len(pending) == 1
         assert pending[0]['photo_path'] == 'photos/a.jpg'
@@ -319,7 +319,7 @@ class TestPendingPhotoUploads:
         """Entry with both photo_path and drive_url should not be pending."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url, get_pending_photo_uploads
-        entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        entry_id = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(entry_id, 'https://drive.google.com/file/d/abc/view')
         assert get_pending_photo_uploads() == []
 
@@ -328,7 +328,7 @@ class TestPendingPhotoUploads:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url, get_pending_photo_uploads
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg', 'photos/c.jpg'])
-        entry_id = create_fmnp_entry(1, 1, 75.0, 'Alice', photo_path=paths)
+        entry_id = create_fmnp_entry(1, 1, 7500, 'Alice', photo_path=paths)
         urls = encode_photo_paths([
             'https://drive.google.com/file/d/1/view',
             'https://drive.google.com/file/d/2/view',
@@ -342,7 +342,7 @@ class TestPendingPhotoUploads:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url, get_pending_photo_uploads
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg', 'photos/c.jpg'])
-        entry_id = create_fmnp_entry(1, 1, 75.0, 'Alice', photo_path=paths)
+        entry_id = create_fmnp_entry(1, 1, 7500, 'Alice', photo_path=paths)
         urls = encode_photo_paths([
             'https://drive.google.com/file/d/1/view',
             'https://drive.google.com/file/d/2/view',
@@ -356,7 +356,7 @@ class TestPendingPhotoUploads:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, get_pending_photo_uploads
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg', 'photos/c.jpg'])
-        create_fmnp_entry(1, 1, 75.0, 'Alice', photo_path=paths)
+        create_fmnp_entry(1, 1, 7500, 'Alice', photo_path=paths)
         pending = get_pending_photo_uploads()
         assert len(pending) == 1
 
@@ -365,7 +365,7 @@ class TestPendingPhotoUploads:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, get_pending_photo_uploads
         # Old-style single path (not JSON encoded)
-        create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/fmnp_1_old.jpg')
+        create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/fmnp_1_old.jpg')
         pending = get_pending_photo_uploads()
         assert len(pending) == 1
 
@@ -373,7 +373,7 @@ class TestPendingPhotoUploads:
         """Deleted FMNP entries should not appear in pending uploads."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, delete_fmnp_entry, get_pending_photo_uploads
-        entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        entry_id = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         delete_fmnp_entry(entry_id)
         assert get_pending_photo_uploads() == []
 
@@ -384,15 +384,15 @@ class TestPendingPhotoUploads:
             create_fmnp_entry, update_fmnp_photo_drive_url, get_pending_photo_uploads
         )
         # Entry 1: complete (1 photo, 1 URL)
-        e1 = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(e1, 'https://drive/1')
 
         # Entry 2: pending (2 photos, 0 URLs)
         paths2 = encode_photo_paths(['photos/b1.jpg', 'photos/b2.jpg'])
-        create_fmnp_entry(1, 1, 50.0, 'Bob', photo_path=paths2)
+        create_fmnp_entry(1, 1, 5000, 'Bob', photo_path=paths2)
 
         # Entry 3: no photo
-        create_fmnp_entry(1, 1, 25.0, 'Carol')
+        create_fmnp_entry(1, 1, 2500, 'Carol')
 
         pending = get_pending_photo_uploads()
         assert len(pending) == 1
@@ -460,7 +460,7 @@ class TestDriveUploadMultiPhoto:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, get_fmnp_entry_by_id
 
-        entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        entry_id = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
 
         patches = self._drive_patches(upload_return='https://drive/url_a')
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
@@ -482,7 +482,7 @@ class TestDriveUploadMultiPhoto:
         from fam.models.fmnp import create_fmnp_entry, get_fmnp_entry_by_id
 
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg', 'photos/c.jpg'])
-        entry_id = create_fmnp_entry(1, 1, 75.0, 'Alice', photo_path=paths)
+        entry_id = create_fmnp_entry(1, 1, 7500, 'Alice', photo_path=paths)
 
         upload_results = iter([
             'https://drive/url_a',
@@ -511,7 +511,7 @@ class TestDriveUploadMultiPhoto:
         from fam.models.fmnp import create_fmnp_entry, get_fmnp_entry_by_id
 
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg', 'photos/c.jpg'])
-        entry_id = create_fmnp_entry(1, 1, 75.0, 'Alice', photo_path=paths)
+        entry_id = create_fmnp_entry(1, 1, 7500, 'Alice', photo_path=paths)
 
         upload_results = iter([
             'https://drive/url_a',
@@ -539,7 +539,7 @@ class TestDriveUploadMultiPhoto:
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url, get_fmnp_entry_by_id
 
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg', 'photos/c.jpg'])
-        entry_id = create_fmnp_entry(1, 1, 75.0, 'Alice', photo_path=paths)
+        entry_id = create_fmnp_entry(1, 1, 7500, 'Alice', photo_path=paths)
 
         partial_urls = encode_photo_paths(['https://drive/url_a', 'https://drive/url_b'])
         update_fmnp_photo_drive_url(entry_id, partial_urls)
@@ -564,7 +564,7 @@ class TestDriveUploadMultiPhoto:
         from fam.models.fmnp import create_fmnp_entry, get_fmnp_entry_by_id
 
         paths = encode_photo_paths(['photos/a.jpg', 'photos/missing.jpg', 'photos/c.jpg'])
-        entry_id = create_fmnp_entry(1, 1, 75.0, 'Alice', photo_path=paths)
+        entry_id = create_fmnp_entry(1, 1, 7500, 'Alice', photo_path=paths)
 
         upload_results = iter([
             'https://drive/url_a',
@@ -591,7 +591,7 @@ class TestDriveUploadMultiPhoto:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, get_fmnp_entry_by_id
 
-        entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/old_single.jpg')
+        entry_id = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/old_single.jpg')
 
         patches = self._drive_patches(upload_return='https://drive/url_old')
         with patches[0], patches[1], patches[2], patches[3], patches[4], \
@@ -618,7 +618,7 @@ class TestDataCollectorMultiPhoto:
         """Entry with no photo → 1 row with empty Photo field."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry
-        create_fmnp_entry(1, 1, 25.0, 'Alice')
+        create_fmnp_entry(1, 1, 2500, 'Alice')
 
         from fam.sync.data_collector import _collect_fmnp_entries
         result = _collect_fmnp_entries(fresh_db, 1)
@@ -632,7 +632,7 @@ class TestDataCollectorMultiPhoto:
         """Single photo → 1 row with that URL."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url
-        entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        entry_id = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(entry_id, 'https://drive.google.com/file/d/1/view')
 
         from fam.sync.data_collector import _collect_fmnp_entries
@@ -646,7 +646,7 @@ class TestDataCollectorMultiPhoto:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg'])
-        entry_id = create_fmnp_entry(1, 1, 50.0, 'Alice', photo_path=paths)
+        entry_id = create_fmnp_entry(1, 1, 5000, 'Alice', photo_path=paths)
         urls = encode_photo_paths([
             'https://drive/1',
             'https://drive/2',
@@ -667,7 +667,7 @@ class TestDataCollectorMultiPhoto:
         """Legacy single URL string (non-JSON) → 1 row."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url
-        entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        entry_id = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(entry_id, 'https://drive.google.com/file/d/old/view')
 
         from fam.sync.data_collector import _collect_fmnp_entries
@@ -733,7 +733,7 @@ class TestTransactionPhotoPath:
         conn.execute(
             "INSERT INTO transactions (id, market_day_id, vendor_id, receipt_total,"
             " fam_transaction_id, customer_order_id, status)"
-            " VALUES (1, 1, 1, 50.0, 'FAM-001', 1, 'Draft')"
+            " VALUES (1, 1, 1, 5000, 'FAM-001', 1, 'Draft')"
         )
         conn.commit()
         return 1  # transaction_id
@@ -747,9 +747,9 @@ class TestTransactionPhotoPath:
             'payment_method_id': 1,
             'method_name_snapshot': 'FMNP',
             'match_percent_snapshot': 100.0,
-            'method_amount': 50.0,
-            'match_amount': 25.0,
-            'customer_charged': 25.0,
+            'method_amount': 5000,
+            'match_amount': 2500,
+            'customer_charged': 2500,
             'photo_path': 'photos/pay_1_123.jpg',
         }]
         save_payment_line_items(txn_id, items)
@@ -772,9 +772,9 @@ class TestTransactionPhotoPath:
             'payment_method_id': 1,
             'method_name_snapshot': 'FMNP',
             'match_percent_snapshot': 100.0,
-            'method_amount': 50.0,
-            'match_amount': 25.0,
-            'customer_charged': 25.0,
+            'method_amount': 5000,
+            'match_amount': 2500,
+            'customer_charged': 2500,
             'photo_path': photo_json,
         }]
         save_payment_line_items(txn_id, items)
@@ -889,7 +889,7 @@ class TestFMNPMultiPhotoIntegration:
             'photos/fmnp_1_101.jpg',
             'photos/fmnp_1_102.jpg',
         ])
-        entry_id = create_fmnp_entry(1, 1, 75.0, 'Alice', check_count=3,
+        entry_id = create_fmnp_entry(1, 1, 7500, 'Alice', check_count=3,
                                       photo_path=photo_path)
         entry = get_fmnp_entry_by_id(entry_id)
         paths = parse_photo_paths(entry['photo_path'])
@@ -900,7 +900,7 @@ class TestFMNPMultiPhotoIntegration:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_entry, get_fmnp_entry_by_id
 
-        entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice')
+        entry_id = create_fmnp_entry(1, 1, 2500, 'Alice')
         # Initially no photos
         entry = get_fmnp_entry_by_id(entry_id)
         assert entry['photo_path'] is None
@@ -918,7 +918,7 @@ class TestFMNPMultiPhotoIntegration:
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_entry, get_fmnp_entry_by_id
 
         photo_path = encode_photo_paths(['photos/fmnp_1_100.jpg'])
-        entry_id = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path=photo_path)
+        entry_id = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path=photo_path)
 
         # Clear photos by setting to None
         update_fmnp_entry(entry_id, photo_path=None)
@@ -931,13 +931,13 @@ class TestFMNPMultiPhotoIntegration:
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_entry, get_fmnp_entry_by_id
 
         photo_path = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg'])
-        entry_id = create_fmnp_entry(1, 1, 50.0, 'Alice', photo_path=photo_path)
+        entry_id = create_fmnp_entry(1, 1, 5000, 'Alice', photo_path=photo_path)
 
         # Update amount only (photo_path is _UNSET by default)
-        update_fmnp_entry(entry_id, amount=75.0)
+        update_fmnp_entry(entry_id, amount=7500)
 
         entry = get_fmnp_entry_by_id(entry_id)
-        assert entry['amount'] == 75.0
+        assert entry['amount'] == 7500
         paths = parse_photo_paths(entry['photo_path'])
         assert len(paths) == 2  # Photos preserved
 
@@ -1118,11 +1118,11 @@ class TestDriveModelQueries:
                                       get_fmnp_entries_with_drive_urls)
 
         # Entry with drive URL
-        e1 = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(e1, 'https://drive.google.com/file/d/1/view')
 
         # Entry without drive URL (pending)
-        create_fmnp_entry(1, 1, 50.0, 'Bob', photo_path='photos/b.jpg')
+        create_fmnp_entry(1, 1, 5000, 'Bob', photo_path='photos/b.jpg')
 
         results = get_fmnp_entries_with_drive_urls()
         assert len(results) == 1
@@ -1133,12 +1133,12 @@ class TestDriveModelQueries:
         from fam.models.fmnp import (create_fmnp_entry, update_fmnp_photo_drive_url,
                                       delete_fmnp_entry, get_deleted_fmnp_with_photos)
 
-        e1 = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(e1, 'https://drive.google.com/file/d/1/view')
         delete_fmnp_entry(e1)
 
         # Active entry with URL — should NOT appear
-        e2 = create_fmnp_entry(1, 1, 50.0, 'Bob', photo_path='photos/b.jpg')
+        e2 = create_fmnp_entry(1, 1, 5000, 'Bob', photo_path='photos/b.jpg')
         update_fmnp_photo_drive_url(e2, 'https://drive.google.com/file/d/2/view')
 
         results = get_deleted_fmnp_with_photos()
@@ -1156,7 +1156,7 @@ class TestDriveModelQueries:
         fresh_db.execute(
             "INSERT INTO transactions (id, market_day_id, vendor_id, receipt_total,"
             " fam_transaction_id, customer_order_id, status)"
-            " VALUES (1, 1, 1, 50.0, 'FAM-001', 1, 'Confirmed')")
+            " VALUES (1, 1, 1, 5000, 'FAM-001', 1, 'Confirmed')")
         fresh_db.commit()
 
         from fam.models.transaction import (save_payment_line_items,
@@ -1164,8 +1164,8 @@ class TestDriveModelQueries:
                                              update_payment_photo_drive_url)
         items = [{
             'payment_method_id': 1, 'method_name_snapshot': 'FMNP',
-            'match_percent_snapshot': 100.0, 'method_amount': 50.0,
-            'match_amount': 25.0, 'customer_charged': 25.0,
+            'match_percent_snapshot': 100.0, 'method_amount': 5000,
+            'match_amount': 2500, 'customer_charged': 2500,
             'photo_path': 'photos/p.jpg',
         }]
         save_payment_line_items(1, items)
@@ -1187,7 +1187,7 @@ class TestDriveModelQueries:
         fresh_db.execute(
             "INSERT INTO transactions (id, market_day_id, vendor_id, receipt_total,"
             " fam_transaction_id, customer_order_id, status)"
-            " VALUES (1, 1, 1, 50.0, 'FAM-001', 1, 'Voided')")
+            " VALUES (1, 1, 1, 5000, 'FAM-001', 1, 'Voided')")
         fresh_db.commit()
 
         from fam.models.transaction import (save_payment_line_items,
@@ -1195,8 +1195,8 @@ class TestDriveModelQueries:
                                              update_payment_photo_drive_url)
         items = [{
             'payment_method_id': 1, 'method_name_snapshot': 'FMNP',
-            'match_percent_snapshot': 100.0, 'method_amount': 50.0,
-            'match_amount': 25.0, 'customer_charged': 25.0,
+            'match_percent_snapshot': 100.0, 'method_amount': 5000,
+            'match_amount': 2500, 'customer_charged': 2500,
             'photo_path': 'photos/p.jpg',
         }]
         save_payment_line_items(1, items)
@@ -1218,7 +1218,7 @@ class TestDriveModelQueries:
         fresh_db.execute(
             "INSERT INTO transactions (id, market_day_id, vendor_id, receipt_total,"
             " fam_transaction_id, customer_order_id, status)"
-            " VALUES (1, 1, 1, 50.0, 'FAM-001', 1, 'Voided')")
+            " VALUES (1, 1, 1, 5000, 'FAM-001', 1, 'Voided')")
         fresh_db.commit()
 
         from fam.models.transaction import (save_payment_line_items,
@@ -1226,8 +1226,8 @@ class TestDriveModelQueries:
                                              update_payment_photo_drive_url)
         items = [{
             'payment_method_id': 1, 'method_name_snapshot': 'FMNP',
-            'match_percent_snapshot': 100.0, 'method_amount': 50.0,
-            'match_amount': 25.0, 'customer_charged': 25.0,
+            'match_percent_snapshot': 100.0, 'method_amount': 5000,
+            'match_amount': 2500, 'customer_charged': 2500,
             'photo_path': 'photos/p.jpg',
         }]
         save_payment_line_items(1, items)
@@ -1252,7 +1252,7 @@ class TestVerifyAndClearDeadUrls:
                                       get_fmnp_entry_by_id)
         from fam.sync.drive import _verify_and_clear_dead_urls
 
-        e1 = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(e1, 'https://drive.google.com/file/d/DEAD/view')
 
         with patch('fam.sync.drive._verify_file_in_drive', return_value=False):
@@ -1269,7 +1269,7 @@ class TestVerifyAndClearDeadUrls:
                                       get_fmnp_entry_by_id)
         from fam.sync.drive import _verify_and_clear_dead_urls
 
-        e1 = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         url = 'https://drive.google.com/file/d/LIVE/view'
         update_fmnp_photo_drive_url(e1, url)
 
@@ -1288,7 +1288,7 @@ class TestVerifyAndClearDeadUrls:
         from fam.sync.drive import _verify_and_clear_dead_urls
 
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg'])
-        e1 = create_fmnp_entry(1, 1, 50.0, 'Alice', photo_path=paths)
+        e1 = create_fmnp_entry(1, 1, 5000, 'Alice', photo_path=paths)
         urls = encode_photo_paths([
             'https://drive.google.com/file/d/LIVE1/view',
             'https://drive.google.com/file/d/DEAD1/view',
@@ -1321,7 +1321,7 @@ class TestProcessVoidedPhotos:
                                       delete_fmnp_entry)
         from fam.sync.drive import _process_voided_photos
 
-        e1 = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(e1, 'https://drive.google.com/file/d/F1/view')
         delete_fmnp_entry(e1)
 
@@ -1339,7 +1339,7 @@ class TestProcessVoidedPhotos:
                                       delete_fmnp_entry)
         from fam.sync.drive import _process_voided_photos
 
-        e1 = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(e1, 'https://drive.google.com/file/d/F1/view')
         delete_fmnp_entry(e1)
 
@@ -1362,7 +1362,7 @@ class TestProcessVoidedPhotos:
         fresh_db.execute(
             "INSERT INTO transactions (id, market_day_id, vendor_id, receipt_total,"
             " fam_transaction_id, customer_order_id, status)"
-            " VALUES (1, 1, 1, 50.0, 'FAM-001', 1, 'Voided')")
+            " VALUES (1, 1, 1, 5000, 'FAM-001', 1, 'Voided')")
         fresh_db.commit()
 
         from fam.models.transaction import (save_payment_line_items,
@@ -1371,8 +1371,8 @@ class TestProcessVoidedPhotos:
 
         items = [{
             'payment_method_id': 1, 'method_name_snapshot': 'FMNP',
-            'match_percent_snapshot': 100.0, 'method_amount': 50.0,
-            'match_amount': 25.0, 'customer_charged': 25.0,
+            'match_percent_snapshot': 100.0, 'method_amount': 5000,
+            'match_amount': 2500, 'customer_charged': 2500,
             'photo_path': 'photos/p.jpg',
         }]
         save_payment_line_items(1, items)
@@ -1393,7 +1393,7 @@ class TestProcessVoidedPhotos:
                                       delete_fmnp_entry)
         from fam.sync.drive import _process_voided_photos
 
-        e1 = create_fmnp_entry(1, 1, 25.0, 'Alice', photo_path='photos/a.jpg')
+        e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(e1, 'https://drive.google.com/file/d/GONE/view')
         delete_fmnp_entry(e1)
 

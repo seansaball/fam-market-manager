@@ -3,12 +3,18 @@
 import logging
 from fam.database.connection import get_connection
 from fam.models.audit import log_action
+from fam.utils.timezone import eastern_timestamp
 
 logger = logging.getLogger('fam.models.customer_order')
 
 
 def generate_customer_label(market_day_id: int) -> str:
-    """Generate a sequential customer label like C-001 for the given market day."""
+    """Generate a sequential customer label like C-001 for the given market day.
+
+    NOTE: Uses COUNT-based sequence which is safe under SQLite's single-writer
+    model.  If the app ever supports concurrent writers (e.g. multi-device),
+    this should be replaced with a dedicated sequence table or AUTOINCREMENT.
+    """
     conn = get_connection()
     row = conn.execute(
         "SELECT COUNT(*) FROM customer_orders WHERE market_day_id=?",
@@ -29,9 +35,9 @@ def create_customer_order(market_day_id: int, customer_label: str | None = None,
     conn = get_connection()
     label = customer_label or generate_customer_label(market_day_id)
     cursor = conn.execute(
-        "INSERT INTO customer_orders (market_day_id, customer_label, zip_code)"
-        " VALUES (?, ?, ?)",
-        (market_day_id, label, zip_code)
+        "INSERT INTO customer_orders (market_day_id, customer_label, zip_code, created_at)"
+        " VALUES (?, ?, ?, ?)",
+        (market_day_id, label, zip_code, eastern_timestamp())
     )
     conn.commit()
     order_id = cursor.lastrowid
@@ -98,11 +104,20 @@ def get_order_vendor_summary(order_id: int) -> list:
     return [dict(r) for r in rows]
 
 
+# Valid status values for customer orders
+VALID_ORDER_STATUSES = {'Draft', 'Confirmed', 'Voided'}
+
 def update_customer_order_status(order_id: int, status: str, commit=True):
     """Update the status of a customer order.
 
     When *commit* is False the caller is responsible for committing.
+    Raises ValueError if status is not a valid order status.
     """
+    if status not in VALID_ORDER_STATUSES:
+        raise ValueError(
+            f"Invalid order status '{status}'. "
+            f"Must be one of: {', '.join(sorted(VALID_ORDER_STATUSES))}"
+        )
     conn = get_connection()
     conn.execute(
         "UPDATE customer_orders SET status=? WHERE id=?",
@@ -169,11 +184,11 @@ def get_confirmed_customers_for_market_day(market_day_id: int) -> list:
 
 
 def get_customer_prior_match(customer_label: str, market_day_id: int,
-                             exclude_order_id: int | None = None) -> float:
+                             exclude_order_id: int | None = None) -> int:
     """Sum the FAM match (match_amount) already used by a customer label on a market day.
 
-    Only counts Confirmed orders.  *exclude_order_id* lets you omit the
-    current order so it isn't double-counted.
+    Returns integer cents.  Only counts Confirmed orders.
+    *exclude_order_id* lets you omit the current order so it isn't double-counted.
     """
     conn = get_connection()
     query = """
@@ -190,7 +205,7 @@ def get_customer_prior_match(customer_label: str, market_day_id: int,
         query += " AND co.id != ?"
         params.append(exclude_order_id)
     row = conn.execute(query, params).fetchone()
-    return round(row[0], 2) if row else 0.0
+    return int(row[0]) if row else 0
 
 
 def get_draft_orders_for_market_day(market_day_id: int) -> list:

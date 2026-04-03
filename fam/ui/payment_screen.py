@@ -22,7 +22,8 @@ from fam.models.customer_order import (
 from fam.models.market_day import get_open_market_day
 
 logger = logging.getLogger('fam.ui.payment_screen')
-from fam.utils.calculations import calculate_payment_breakdown
+from fam.utils.calculations import calculate_payment_breakdown, charge_to_method_amount
+from fam.utils.money import cents_to_dollars, format_dollars, format_dollars_comma
 from fam.ui.widgets.payment_row import PaymentRow
 from fam.ui.widgets.summary_card import SummaryRow
 from fam.ui.styles import (
@@ -43,11 +44,11 @@ class PaymentScreen(QWidget):
         super().__init__(parent)
         self._current_order_id = None
         self._order_transactions = []
-        self._order_total = 0.0
-        self._match_limit = None  # None = no cap, float = remaining cap value
-        self._daily_limit = None  # Full daily limit from market settings
-        self._prior_match = 0.0   # FAM match already used by this customer today
-        self._market_id = None    # Market ID for filtering payment methods
+        self._order_total = 0       # integer cents
+        self._match_limit = None    # None = no cap, int = remaining cap in cents
+        self._daily_limit = None    # Full daily limit from market settings (cents)
+        self._prior_match = 0       # FAM match already used by this customer (cents)
+        self._market_id = None      # Market ID for filtering payment methods
         self._payment_rows = []
         self._build_ui()
 
@@ -149,12 +150,11 @@ class PaymentScreen(QWidget):
 
         # ── Payment rows area ───────────────────────────────────────
         payment_header = QHBoxLayout()
-        pay_lbl = make_section_label("Payment Methods")
-        payment_header.addWidget(pay_lbl)
+
         self.add_method_btn = QPushButton("+ Add Payment Method")
         self.add_method_btn.setObjectName("secondary_btn")
         self.add_method_btn.clicked.connect(self._add_payment_row)
-        payment_header.addStretch()
+        payment_header.addWidget(self.add_method_btn)
 
         self.auto_distribute_btn = QPushButton("⚡ Auto-Distribute")
         self.auto_distribute_btn.setObjectName("secondary_btn")
@@ -163,7 +163,12 @@ class PaymentScreen(QWidget):
         )
         self.auto_distribute_btn.clicked.connect(self._auto_distribute)
         payment_header.addWidget(self.auto_distribute_btn)
-        payment_header.addWidget(self.add_method_btn)
+
+        payment_header.addStretch()
+
+        pay_lbl = make_section_label("Payment Methods")
+        payment_header.addWidget(pay_lbl)
+
         layout.addLayout(payment_header)
 
         # Scrollable payment rows
@@ -178,7 +183,7 @@ class PaymentScreen(QWidget):
         pay_scroll.setWidgetResizable(True)
         pay_scroll.setWidget(self.rows_container)
         pay_scroll.setMinimumHeight(150)
-        pay_scroll.setMaximumHeight(1200)
+        # No maximum height — the area grows dynamically with the window.
         pay_scroll.setStyleSheet(f"""
             QScrollArea {{
                 background-color: {BACKGROUND};
@@ -186,7 +191,7 @@ class PaymentScreen(QWidget):
                 border-radius: 8px;
             }}
         """)
-        layout.addWidget(pay_scroll)
+        layout.addWidget(pay_scroll, 1)  # stretch=1 so it fills available space
 
         # Error/validation message
         self.error_label = QLabel("")
@@ -292,8 +297,6 @@ class PaymentScreen(QWidget):
         self._last_receipt_data = None
         layout.addWidget(self.success_frame)
 
-        layout.addStretch()
-
         scroll.setWidget(inner_widget)
         outer.addWidget(scroll)
 
@@ -317,7 +320,7 @@ class PaymentScreen(QWidget):
 
         # Determine match limit from market settings, accounting for prior usage
         if order.get('match_limit_active'):
-            self._daily_limit = order.get('daily_match_limit') or 100.00
+            self._daily_limit = order.get('daily_match_limit') or 10000  # cents
 
             # Check for prior FAM match usage by this customer today
             self._prior_match = get_customer_prior_match(
@@ -325,24 +328,24 @@ class PaymentScreen(QWidget):
                 order['market_day_id'],
                 exclude_order_id=order_id
             )
-            remaining_limit = round(max(self._daily_limit - self._prior_match, 0.0), 2)
+            remaining_limit = max(self._daily_limit - self._prior_match, 0)
             self._match_limit = remaining_limit
 
             if self._prior_match > 0:
                 self.match_limit_label.setText(
-                    f"Daily match limit: ${self._daily_limit:.2f} per customer  \u2502  "
-                    f"Previously redeemed: ${self._prior_match:.2f}  \u2502  "
-                    f"Remaining: ${remaining_limit:.2f}"
+                    f"Daily match limit: {format_dollars(self._daily_limit)} per customer  \u2502  "
+                    f"Previously redeemed: {format_dollars(self._prior_match)}  \u2502  "
+                    f"Remaining: {format_dollars(remaining_limit)}"
                 )
             else:
                 self.match_limit_label.setText(
-                    f"Daily match limit: ${self._daily_limit:.2f} per customer"
+                    f"Daily match limit: {format_dollars(self._daily_limit)} per customer"
                 )
             self.match_limit_label.setVisible(True)
         else:
             self._match_limit = None
             self._daily_limit = None
-            self._prior_match = 0.0
+            self._prior_match = 0
             self.match_limit_label.setText("Match limit: Off")
             self.match_limit_label.setVisible(True)
 
@@ -354,7 +357,7 @@ class PaymentScreen(QWidget):
             f"Customer {order['customer_label']}  —  {order['market_name']}  |  {n_receipts} receipt(s)"
         )
         self.order_receipts_label.setText(f"{n_receipts} receipt(s)")
-        self.order_total_label.setText(f"${self._order_total:.2f}")
+        self.order_total_label.setText(format_dollars(self._order_total))
 
         self._populate_vendor_summary()
         self._clear_payment_rows()
@@ -392,17 +395,17 @@ class PaymentScreen(QWidget):
             self._market_id = txn.get('market_id')
             self._match_limit = None
             self._daily_limit = None
-            self._prior_match = 0.0
+            self._prior_match = 0
             self.match_limit_label.setVisible(False)
             self.match_cap_warning.setVisible(False)
             self._order_transactions = [txn]
-            self._order_total = txn['receipt_total']
+            self._order_total = txn['receipt_total']  # already integer cents
 
             self.customer_id_label.setText(
                 f"{txn['fam_transaction_id']}  —  {txn['vendor_name']}"
             )
             self.order_receipts_label.setText(f"Vendor: {txn['vendor_name']}")
-            self.order_total_label.setText(f"${txn['receipt_total']:.2f}")
+            self.order_total_label.setText(format_dollars(txn['receipt_total']))
 
             self._populate_vendor_summary()
             self._clear_payment_rows()
@@ -429,14 +432,14 @@ class PaymentScreen(QWidget):
         vendor_totals = {}
         for t in self._order_transactions:
             name = t['vendor_name']
-            vendor_totals[name] = vendor_totals.get(name, 0.0) + t['receipt_total']
+            vendor_totals[name] = vendor_totals.get(name, 0) + t['receipt_total']
 
         rows = sorted(vendor_totals.items())
         self.vendor_table.setSortingEnabled(False)
         self.vendor_table.setRowCount(len(rows))
         for i, (vname, vtotal) in enumerate(rows):
             self.vendor_table.setItem(i, 0, make_item(vname))
-            self.vendor_table.setItem(i, 1, make_item(f"${vtotal:.2f}", vtotal))
+            self.vendor_table.setItem(i, 1, make_item(format_dollars(vtotal), vtotal))
             self.vendor_table.setRowHeight(i, 30)
         self.vendor_table.setSortingEnabled(True)
 
@@ -476,59 +479,196 @@ class PaymentScreen(QWidget):
         self._update_summary()
 
     def _auto_distribute(self):
-        """Auto-fill remaining balance into the last payment row with a selected method."""
+        """Smart auto-distribute: seed 1 unit per denominated method, then fill up.
+
+        Denominated rows keep their manual charge (locked) — they represent
+        physical tokens/checks the customer handed over.  Non-denominated
+        rows are reset to zero so they act as absorbers for the remaining
+        balance.  If no non-denominated row exists and there is remaining
+        balance, an overflow row is added automatically (SNAP preferred,
+        then Cash, then any non-denominated method).
+        """
         if not self._order_total or self._order_total <= 0:
             return
 
-        from fam.utils.calculations import charge_to_method_amount
+        from fam.utils.calculations import (
+            smart_auto_distribute, charge_to_method_amount,
+        )
 
-        # Find the target: the last row with a method selected
-        target_row = None
-        for row in reversed(self._payment_rows):
-            if row.has_method_selected():
-                target_row = row
+        # Build row descriptors for the algorithm.
+        # Non-denominated rows are always reset to 0 (absorbers).
+        # Denominated rows with a charge are locked (user's physical count).
+        row_descriptors = []
+        for i, row in enumerate(self._payment_rows):
+            method = row.get_selected_method()
+            if not method:
+                continue
+            is_denom = (
+                method.get('denomination') and method['denomination'] > 0
+            )
+            charge = row._get_active_charge()
+            if not is_denom and charge > 0:
+                # Reset non-denominated row — auto-distribute will refill it
+                charge = 0
+            row_descriptors.append({
+                'index': i,
+                'match_pct': method['match_percent'],
+                'denomination': method.get('denomination'),
+                'sort_order': method.get('sort_order', 0),
+                'current_charge': charge,
+            })
+
+        if not row_descriptors:
+            return
+
+        # ── Overflow detection: add absorber row if needed ────────
+        # If every row with a selected method is denominated (locked) and
+        # there's remaining balance, add a non-denominated overflow row
+        # so smart_auto_distribute has somewhere to put the remainder.
+        has_non_denom = any(
+            not (d.get('denomination') and d['denomination'] > 0)
+            for d in row_descriptors
+        )
+        if not has_non_denom:
+            locked_total = sum(
+                charge_to_method_amount(d['current_charge'], d['match_pct'])
+                for d in row_descriptors
+                if d['current_charge'] > 0
+            )
+            remaining_balance = self._order_total - locked_total
+            if remaining_balance > 1:
+                overflow_row = self._add_overflow_row(row_descriptors)
+                if overflow_row is not None:
+                    method = overflow_row.get_selected_method()
+                    new_index = len(self._payment_rows) - 1
+                    row_descriptors.append({
+                        'index': new_index,
+                        'match_pct': method['match_percent'],
+                        'denomination': method.get('denomination'),
+                        'sort_order': method.get('sort_order', 0),
+                        'current_charge': 0,
+                    })
+
+        assignments = smart_auto_distribute(self._order_total, row_descriptors)
+
+        # ── Match-cap post-processing ──────────────────────────────
+        # When a daily match limit is active, the nominal auto-distribute
+        # gives charges based on the full match percentage.  If the total
+        # uncapped match exceeds the remaining limit, the customer must
+        # cover the deficit — increase matched rows' charges accordingly.
+        if self._match_limit is not None and assignments:
+            # Sum uncapped match from ALL rows — both new assignments AND
+            # locked rows (denominated tokens with charge already set).
+            # Without locked rows, the deficit calculation underestimates
+            # total match and may not increase charges enough.
+            total_uncapped_match = 0
+            for a in assignments:
+                desc = row_descriptors[
+                    next(j for j, d in enumerate(row_descriptors)
+                         if d['index'] == a['index'])
+                ]
+                ma = charge_to_method_amount(a['charge'], desc['match_pct'])
+                total_uncapped_match += ma - a['charge']
+            for desc in row_descriptors:
+                if desc['current_charge'] > 0 and desc['match_pct'] > 0:
+                    ma = charge_to_method_amount(
+                        desc['current_charge'], desc['match_pct']
+                    )
+                    total_uncapped_match += ma - desc['current_charge']
+
+            if total_uncapped_match > self._match_limit:
+                match_deficit = total_uncapped_match - self._match_limit
+                # Distribute deficit across matched (non-denominated) rows
+                for a in assignments:
+                    desc = row_descriptors[
+                        next(j for j, d in enumerate(row_descriptors)
+                             if d['index'] == a['index'])
+                    ]
+                    if desc['match_pct'] > 0 and not (
+                        desc.get('denomination') and desc['denomination'] > 0
+                    ):
+                        row_match = (
+                            charge_to_method_amount(
+                                a['charge'], desc['match_pct']
+                            ) - a['charge']
+                        )
+                        if total_uncapped_match > 0:
+                            share = round(
+                                match_deficit * row_match
+                                / total_uncapped_match
+                            )
+                            a['charge'] += share
+
+        # Apply assignments to payment rows
+        for assignment in assignments:
+            row = self._payment_rows[assignment['index']]
+            row._set_active_charge(assignment['charge'])
+            row._recompute()
+
+        self._update_summary()
+
+    def _add_overflow_row(self, existing_descriptors):
+        """Add a non-denominated overflow row for auto-distribute.
+
+        Picks the best available method not already in use:
+          1. SNAP (highest match, most common)
+          2. Cash (fallback, 0% match)
+          3. Any non-denominated method
+
+        Returns the new PaymentRow, or None if no suitable method exists.
+        """
+        from fam.models.payment_method import (
+            get_payment_methods_for_market, get_all_payment_methods,
+        )
+
+        if self._market_id:
+            methods = get_payment_methods_for_market(
+                self._market_id, active_only=True
+            )
+            if not methods:
+                methods = get_all_payment_methods(active_only=True)
+        else:
+            methods = get_all_payment_methods(active_only=True)
+
+        # IDs already selected in existing rows
+        used_ids = set()
+        for row in self._payment_rows:
+            mid = row.get_selected_method_id()
+            if mid is not None:
+                used_ids.add(mid)
+
+        # Filter to non-denominated methods not already in use
+        candidates = [
+            m for m in methods
+            if m['id'] not in used_ids
+            and (not m.get('denomination') or m['denomination'] <= 0)
+        ]
+
+        if not candidates:
+            return None
+
+        # Priority: SNAP-like (name contains 'snap', highest match%) > Cash > any
+        snap_like = [m for m in candidates if 'snap' in m['name'].lower()]
+        cash_like = [m for m in candidates if 'cash' in m['name'].lower()]
+
+        if snap_like:
+            chosen = max(snap_like, key=lambda m: m['match_percent'])
+        elif cash_like:
+            chosen = cash_like[0]
+        else:
+            # Pick the candidate with the highest match percent
+            chosen = max(candidates, key=lambda m: m['match_percent'])
+
+        # Add the row and select the method
+        new_row = self._add_payment_row()
+        combo = new_row.method_combo
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            if data and data.get('id') == chosen['id']:
+                combo.setCurrentIndex(i)
                 break
 
-        if target_row is None:
-            return
-
-        # Sum total allocation from all rows EXCEPT the target
-        other_total = 0.0
-        for row in self._payment_rows:
-            if row is target_row:
-                continue
-            data = row.get_data()
-            if data and data['method_amount'] > 0:
-                other_total += data['method_amount']
-
-        remaining = round(self._order_total - other_total, 2)
-        if remaining <= 0:
-            target_row.amount_spin.blockSignals(True)
-            target_row.amount_spin.setValue(0)
-            target_row.amount_spin.blockSignals(False)
-            target_row._recompute()
-            self._update_summary()
-            return
-
-        method = target_row.get_selected_method()
-        if not method:
-            return
-
-        match_pct = method['match_percent']
-        # remaining = charge × (1 + match_pct/100)  →  charge = remaining / (1 + match_pct/100)
-        charge = round(remaining / (1.0 + match_pct / 100.0), 2)
-
-        # Respect denomination (round DOWN to nearest multiple)
-        denom = method.get('denomination')
-        if denom and denom > 0 and charge > 0:
-            charge = round(int(charge / denom) * denom, 2)
-
-        if charge >= 0:
-            target_row.amount_spin.blockSignals(True)
-            target_row.amount_spin.setValue(charge)
-            target_row.amount_spin.blockSignals(False)
-            target_row._recompute()
-            self._update_summary()
+        return new_row
 
     def _refresh_method_choices(self):
         """Disable already-selected methods in other rows, and hide the
@@ -565,15 +705,45 @@ class PaymentScreen(QWidget):
     # ------------------------------------------------------------------
     def _update_summary(self):
         receipt_total = self._order_total
+
+        # ── Step 1: Push input limits FIRST ──────────────────────────
+        # This may clamp widget values (signals blocked) so that the
+        # subsequent reads see the corrected amounts.  Without this,
+        # the summary would display stale pre-clamp values.
+        self._push_row_limits()
+
+        # ── Step 2: Refresh each row's per-row labels (Match / Total)
+        # so they reflect the (possibly clamped) charge values.
+        for row in self._payment_rows:
+            row._recompute()
+
+        # ── Step 3: Read final charge values and compute breakdown ───
+        # When a daily match cap allows higher charges than the nominal
+        # formula would produce, the nominal method_amount (charge × (1 +
+        # pct/100)) can exceed the receipt total.  Cap each row's
+        # method_amount at the remaining receipt to prevent over-allocation
+        # while still letting the customer enter the real amount they pay.
         entries = []
+        running_alloc = 0
         for row in self._payment_rows:
             data = row.get_data()
             if data:
+                ma = data['method_amount']
+                # Only cap non-denominated rows — denominated rows need
+                # their overage to flow through so the existing forfeit
+                # detection (remaining < 0) works correctly.
+                method = row.get_selected_method()
+                is_denom = method and method.get('denomination') and method['denomination'] > 0
+                if not is_denom:
+                    max_ma = max(0, receipt_total - running_alloc)
+                    if ma > max_ma:
+                        ma = max_ma
                 entries.append({
-                    'method_amount': data['method_amount'],
+                    'method_amount': ma,
                     'match_percent': data['match_percent'],
                     'method_name': data['method_name_snapshot'],
                 })
+                running_alloc += ma
 
         if entries:
             calc_entries = [
@@ -587,37 +757,37 @@ class PaymentScreen(QWidget):
             remaining = result['allocation_remaining']
             fam_match = result['fam_subsidy_total']
 
-            self.summary_row.update_card("allocated", f"${allocated:.2f}")
-            self.summary_row.update_card("remaining", f"${remaining:.2f}")
-            self.summary_row.update_card("customer_pays", f"${result['customer_total_paid']:.2f}")
-            self.summary_row.update_card("fam_match", f"${fam_match:.2f}")
+            self.summary_row.update_card("allocated", format_dollars(allocated))
+            self.summary_row.update_card("remaining", format_dollars(remaining))
+            self.summary_row.update_card("customer_pays", format_dollars(result['customer_total_paid']))
+            self.summary_row.update_card("fam_match", format_dollars(fam_match))
 
-            # Update row display values when cap changes match/total
-            if result.get('match_was_capped') and result.get('line_items'):
+            # Update row display values to reflect the final calculated
+            # breakdown.  This covers match-cap adjustments, penny
+            # reconciliation, and denomination overage reductions so the
+            # row labels always match the collection list and confirmation
+            # dialog — no 1-cent visual discrepancies.
+            if result.get('line_items'):
                 valid_rows = [r for r in self._payment_rows if r.get_data()]
                 for i, row in enumerate(valid_rows):
                     if i < len(result['line_items']):
                         li = result['line_items'][i]
                         row.set_display_values(li['match_amount'], li['method_amount'])
-            else:
-                # Reset to uncapped values
-                for row in self._payment_rows:
-                    row._recompute()
 
             # Show/hide match cap warning
             if result.get('match_was_capped'):
                 uncapped = result['uncapped_fam_subsidy_total']
                 if self._prior_match > 0:
                     self.match_cap_warning.setText(
-                        f"FAM Match capped at ${self._match_limit:.2f} \u2014 "
-                        f"this customer already redeemed ${self._prior_match:.2f} "
-                        f"of their ${self._daily_limit:.2f} daily limit"
+                        f"FAM Match capped at {format_dollars(self._match_limit)} \u2014 "
+                        f"this customer already redeemed {format_dollars(self._prior_match)} "
+                        f"of their {format_dollars(self._daily_limit)} daily limit"
                     )
                 else:
                     self.match_cap_warning.setText(
-                        f"FAM Match capped at ${self._match_limit:.2f} "
+                        f"FAM Match capped at {format_dollars(self._match_limit)} "
                         f"(daily limit per customer \u2014 "
-                        f"uncapped would be ${uncapped:.2f})"
+                        f"uncapped would be {format_dollars(uncapped)})"
                     )
                 self.match_cap_warning.setVisible(True)
             else:
@@ -625,16 +795,54 @@ class PaymentScreen(QWidget):
 
             # Dynamic color-coding
             # Remaining: green when $0, red when over-allocated, gold when under
-            # Check if over-allocation is due to denomination constraints
+
+            # Check for denomination overage BEFORE penny normalization so
+            # even a $0.01 overage from denominations is properly detected
+            # and displayed (adjusted match, warning label, gold color).
             is_denom_overage = False
+            denom_overage_amt = 0
             if remaining < 0:
-                max_denom = 0.0
+                # Use the *effective* denomination — the method_amount of
+                # one denomination unit — as the threshold.  A $5 token with
+                # 100% match creates $10 of allocation per unit, so the max
+                # legitimate overshoot is up to $10, not $5.
+                effective_denom_sum = 0
                 for row in self._payment_rows:
                     method = row.get_selected_method()
                     if method and method.get('denomination'):
-                        max_denom = max(max_denom, method['denomination'])
-                if max_denom > 0 and abs(remaining) <= max_denom:
+                        effective_denom_sum += charge_to_method_amount(
+                            method['denomination'], method['match_percent']
+                        )
+                if effective_denom_sum > 0 and abs(remaining) <= effective_denom_sum:
                     is_denom_overage = True
+                    denom_overage_amt = abs(remaining)
+
+            # Penny tolerance: treat ±1 cent as fully allocated, but ONLY
+            # when it's NOT a denomination overage (those are real forfeit).
+            # Also update the allocated display to match the order total so
+            # the summary cards are visually consistent (no contradictory
+            # "$56.77 order / $56.76 allocated / $0.00 remaining").
+            if abs(remaining) <= 1 and not is_denom_overage:
+                remaining = 0
+                self.summary_row.update_card("remaining", "$0.00")
+                self.summary_row.update_card("allocated", format_dollars(receipt_total))
+
+            # When denomination overage exists, adjust displayed totals so
+            # the summary cards and collection list show the real match
+            # (reduced by the forfeit amount), not the raw calculation.
+            if is_denom_overage and denom_overage_amt > 0:
+                fam_match = fam_match - denom_overage_amt
+                self.summary_row.update_card("fam_match", format_dollars(fam_match))
+                # Adjust result line items so collection list shows correct match
+                overage_left = denom_overage_amt
+                for li in result['line_items']:
+                    if overage_left <= 0:
+                        break
+                    if li['match_amount'] > 0:
+                        reduction = min(overage_left, li['match_amount'])
+                        li['match_amount'] = li['match_amount'] - reduction
+                        li['method_amount'] = li['method_amount'] - reduction
+                        overage_left = overage_left - reduction
 
             if remaining == 0:
                 self.summary_row.update_card_color("remaining", PRIMARY_GREEN)
@@ -644,10 +852,9 @@ class PaymentScreen(QWidget):
                 # Denomination overage — warn but don't show as hard error
                 self.summary_row.update_card_color("remaining", HARVEST_GOLD)
                 self.summary_row.update_card_color("allocated", HARVEST_GOLD)
-                overage = abs(remaining)
                 self.denom_overage_warning.setText(
-                    f"\u26a0  Denomination overage: ${overage:.2f} — "
-                    f"Customer forfeits ${overage:.2f} of FAM match because "
+                    f"\u26a0  Denomination overage: {format_dollars(denom_overage_amt)} — "
+                    f"Customer forfeits {format_dollars(denom_overage_amt)} of FAM match because "
                     f"denominated payment cannot be broken into smaller increments."
                 )
                 self.denom_overage_warning.setVisible(True)
@@ -669,7 +876,7 @@ class PaymentScreen(QWidget):
             self._update_collection_list(entries, result)
         else:
             self.summary_row.update_card("allocated", "$0.00")
-            self.summary_row.update_card("remaining", f"${receipt_total:.2f}")
+            self.summary_row.update_card("remaining", format_dollars(receipt_total))
             self.summary_row.update_card("customer_pays", "$0.00")
             self.summary_row.update_card("fam_match", "$0.00")
 
@@ -683,6 +890,100 @@ class PaymentScreen(QWidget):
             self.match_cap_warning.setVisible(False)
             self.denom_overage_warning.setVisible(False)
 
+    def _push_row_limits(self):
+        """Cap each row's input to prevent exceeding the remaining order balance.
+
+        Block signals on all rows first to prevent cascading updates —
+        setMaximum() clamps current values which would fire valueChanged
+        and re-enter _update_summary in a loop.
+
+        When a daily match limit is active, the max charge must account for
+        the reduced effective match.  Without this, a 100% match method would
+        cap the charge at ``remaining / 2`` even though the customer must pay
+        ``remaining - available_match`` when the cap kicks in.
+        """
+        from fam.utils.calculations import charge_to_method_amount
+
+        # Block signals on all rows to prevent cascade
+        for row in self._payment_rows:
+            row.blockSignals(True)
+
+        try:
+            for i, row in enumerate(self._payment_rows):
+                method = row.get_selected_method()
+                if not method:
+                    continue
+                # Sum method_amount from all OTHER rows (integer cents)
+                other_total = 0
+                other_match = 0          # match consumed by other rows
+                for j, r in enumerate(self._payment_rows):
+                    if j == i or not r.has_method_selected():
+                        continue
+                    other_method = r.get_selected_method()
+                    if other_method:
+                        other_charge = r._get_active_charge()
+                        other_ma = charge_to_method_amount(
+                            other_charge,
+                            other_method['match_percent']
+                        )
+                        other_total += other_ma
+                        other_match += other_ma - other_charge
+                remaining = max(0, self._order_total - other_total)
+
+                # Convert remaining (method_amount space) to charge space.
+                # Always floor so the customer never absorbs a rounding
+                # penny — any ≤1-cent gap is pushed to FAM match during
+                # penny reconciliation.  Uses the same floor logic as
+                # smart_auto_distribute so both paths always agree.
+                match_pct = method['match_percent']
+                divisor = 1.0 + match_pct / 100.0
+                max_charge_nominal = int(remaining / divisor)
+
+                # When a daily match limit is active, the nominal formula
+                # assumes full match — but the cap may reduce the effective
+                # match, requiring the customer to pay more.  Compute the
+                # match-limit-aware max charge.
+                #
+                # IMPORTANT: This inflation ONLY applies to non-denominated
+                # methods.  Denominated methods (tokens, checks) are physical
+                # units — the customer hands over N × denomination.  Inflating
+                # max_charge would allow too many units whose uncapped
+                # method_amount far exceeds the receipt total.
+                denom = method.get('denomination')
+                is_denominated = denom and denom > 0
+
+                if self._match_limit is not None and match_pct > 0 and not is_denominated:
+                    available_match = max(0, self._match_limit - other_match)
+                    # Uncapped match for the full remaining balance
+                    uncapped_match = remaining - max_charge_nominal
+                    if uncapped_match > available_match:
+                        # Match is capped — customer must cover the gap
+                        max_charge_capped = remaining - available_match
+                        max_charge = max(max_charge_nominal, max_charge_capped)
+                    else:
+                        max_charge = max_charge_nominal
+                else:
+                    max_charge = max_charge_nominal
+
+                # Denominated methods: allow +1 unit for forfeit if there's
+                # a gap that exact denomination units can't fill.  The customer
+                # hands over a real check — FAM match flexes to absorb the
+                # overage.  The denom_overage_warning already shows this in
+                # yellow in the summary area.
+                if is_denominated:
+                    normal_units = int(max_charge / denom)
+                    normal_alloc = charge_to_method_amount(
+                        normal_units * denom, match_pct
+                    )
+                    if remaining - normal_alloc > 1:
+                        max_charge = (normal_units + 1) * denom
+
+                row.set_max_charge(max_charge)
+        finally:
+            # Always unblock signals
+            for row in self._payment_rows:
+                row.blockSignals(False)
+
     def _update_collection_list(self, entries, result):
         """Rebuild the compact collection checklist next to the Confirm button."""
         self._clear_collection_list()
@@ -690,7 +991,7 @@ class PaymentScreen(QWidget):
         if not result.get('line_items'):
             return
 
-        customer_total = 0.0
+        customer_total = 0
         for i, li in enumerate(result['line_items']):
             method_name = entries[i].get('method_name', 'Unknown')
             customer_charged = li['customer_charged']
@@ -702,15 +1003,15 @@ class PaymentScreen(QWidget):
 
             customer_total += customer_charged
 
-            text = f"•  ${customer_charged:.2f} via {method_name}"
+            text = f"•  {format_dollars(customer_charged)} via {method_name}"
             if match_amount > 0:
-                text += f"  (FAM matches ${match_amount:.2f})"
+                text += f"  (FAM matches {format_dollars(match_amount)})"
 
             lbl = QLabel(text)
             lbl.setStyleSheet("font-size: 13px; padding: 1px 0;")
             self.collect_list_layout.addWidget(lbl)
 
-        self.collect_total_label.setText(f"Total to Collect: ${customer_total:.2f}")
+        self.collect_total_label.setText(f"Total to Collect: {format_dollars(customer_total)}")
 
     def _clear_collection_list(self):
         while self.collect_list_layout.count():
@@ -724,9 +1025,21 @@ class PaymentScreen(QWidget):
     # ------------------------------------------------------------------
     def _collect_line_items(self):
         items = []
+        running_alloc = 0
+        receipt_total = self._order_total
         for row in self._payment_rows:
             data = row.get_data()
             if data and data['method_amount'] > 0:
+                # Only cap non-denominated rows — denominated rows need
+                # their overage to flow through so forfeit detection and
+                # _apply_denomination_forfeit() work correctly.
+                method = row.get_selected_method()
+                is_denom = method and method.get('denomination') and method['denomination'] > 0
+                if not is_denom:
+                    max_ma = max(0, receipt_total - running_alloc)
+                    if data['method_amount'] > max_ma:
+                        data['method_amount'] = max_ma
+                running_alloc += data['method_amount']
                 items.append(data)
         return items
 
@@ -739,7 +1052,7 @@ class PaymentScreen(QWidget):
         try:
             items = self._collect_line_items()
             if items:
-                save_payment_line_items(self._order_transactions[0]['id'], items)
+                self._distribute_and_save_payments(items, self._order_total)
 
             self.success_frame.setVisible(True)
             self.success_msg.setText("Draft saved successfully.")
@@ -769,27 +1082,56 @@ class PaymentScreen(QWidget):
         difference is a match forfeit the customer must accept.
         """
         allocated = result.get('allocated_total', 0)
-        overage = round(allocated - receipt_total, 2)
+        overage = allocated - receipt_total
 
-        # Only applies when over-allocated (not under or exact)
+        # Only applies when over-allocated (not under or exact).
         if overage <= 0:
-            return 0.0
+            return 0
 
-        # Find the largest denomination among active payment rows
-        max_denom = 0.0
+        # Use effective denomination (method_amount of one unit) as
+        # threshold.  A $5 token with 100% match creates $10 allocation
+        # per unit, so a single +1 unit can overshoot by up to $10.
+        effective_denom_sum = 0
         for row in self._payment_rows:
             method = row.get_selected_method()
             if method and method.get('denomination'):
-                max_denom = max(max_denom, method['denomination'])
+                effective_denom_sum += charge_to_method_amount(
+                    method['denomination'], method['match_percent']
+                )
 
-        if max_denom <= 0:
-            return 0.0
+        if effective_denom_sum <= 0:
+            return 0
 
-        # Only allow overage up to the max denomination — beyond that is a hard block
-        if overage > max_denom:
-            return 0.0
+        # Only allow overage up to the effective denomination sum
+        if overage > effective_denom_sum:
+            return 0
 
         return overage
+
+    def _apply_denomination_forfeit(self, result, items, overage):
+        """Reduce match on denominated line items so vendor total equals receipt.
+
+        When a denomination method (e.g. $5 FMNP checks) over-allocates the
+        order, the customer forfeits a portion of FAM match.  This adjusts the
+        breakdown so saved data is correct: customer_charged stays the same,
+        method_amount and match_amount are reduced by the overage.
+        """
+        remaining_overage = overage
+        for i, li in enumerate(result['line_items']):
+            if remaining_overage <= 0:
+                break
+            if li['match_amount'] > 0:
+                reduction = min(remaining_overage, li['match_amount'])
+                li['match_amount'] = li['match_amount'] - reduction
+                li['method_amount'] = li['method_amount'] - reduction
+                # Also update the items list so saved data is correct
+                items[i]['method_amount'] = li['method_amount']
+                items[i]['match_amount'] = li['match_amount']
+                remaining_overage = remaining_overage - reduction
+
+        # Update result totals
+        result['allocated_total'] = result['allocated_total'] - overage
+        result['fam_subsidy_total'] = result['fam_subsidy_total'] - overage
 
     def _confirm_payment(self):
         # Prevent double-click from triggering duplicate processing
@@ -836,20 +1178,24 @@ class PaymentScreen(QWidget):
             receipt_total, entries, match_limit=self._match_limit
         )
 
-        # Check if over-allocation is caused by denomination constraints
-        denom_overage = 0.0
-        if not result['is_valid']:
-            denom_overage = self._check_denomination_overage(result, receipt_total)
-            if denom_overage <= 0:
-                # Not a denomination issue — hard block
-                self._show_error("\n".join(result['errors']))
-                self.confirm_btn.setEnabled(True)
-                return
+        # Check if over-allocation is caused by denomination constraints.
+        # Always check — even penny-level overages are real forfeit when
+        # caused by denomination rounding.
+        denom_overage = self._check_denomination_overage(result, receipt_total)
+        if denom_overage > 0:
+            # Adjust line items: reduce match to account for forfeit so
+            # vendor reimbursement stays exactly at receipt_total.
+            self._apply_denomination_forfeit(result, items, denom_overage)
+        elif not result['is_valid']:
+            # Not a denomination issue — hard block
+            self._show_error("\n".join(result['errors']))
+            self.confirm_btn.setEnabled(True)
+            return
 
         # ── Pre-confirmation dialog: list what to collect ─────────
         confirm_lines = ["Please confirm you have collected the following "
                          "from the customer:\n"]
-        customer_total = 0.0
+        customer_total = 0
         if result.get('line_items'):
             for i, li in enumerate(result['line_items']):
                 method_name = items[i].get('method_name_snapshot', 'Unknown')
@@ -859,19 +1205,19 @@ class PaymentScreen(QWidget):
                 if method_amount <= 0:
                     continue
                 customer_total += customer_charged
-                line = f"  •  ${customer_charged:.2f} via {method_name}"
+                line = f"  •  {format_dollars(customer_charged)} via {method_name}"
                 if match_amount > 0:
-                    line += f"  (FAM matches ${match_amount:.2f})"
+                    line += f"  (FAM matches {format_dollars(match_amount)})"
                 confirm_lines.append(line)
 
-        confirm_lines.append(f"\nTotal to collect: ${customer_total:.2f}")
-        confirm_lines.append(f"Order total (vendor reimbursement): ${receipt_total:.2f}")
+        confirm_lines.append(f"\nTotal to collect: {format_dollars(customer_total)}")
+        confirm_lines.append(f"Order total (vendor reimbursement): {format_dollars(receipt_total)}")
         confirm_lines.append(f"\nReceipts: {len(self._order_transactions)}")
 
         if denom_overage > 0:
             confirm_lines.append(
-                f"\n⚠  DENOMINATION OVERAGE: ${denom_overage:.2f}\n"
-                f"The customer is forfeiting ${denom_overage:.2f} of FAM match "
+                f"\n⚠  DENOMINATION OVERAGE: {format_dollars(denom_overage)}\n"
+                f"The customer is forfeiting {format_dollars(denom_overage)} of FAM match "
                 f"because the denominated payment cannot be broken into "
                 f"smaller increments."
             )
@@ -941,8 +1287,8 @@ class PaymentScreen(QWidget):
 
         # Track running totals per payment-method index so the last
         # transaction gets the exact remainder (no penny drift).
-        allocated_method = [0.0] * len(items)
-        allocated_match = [0.0] * len(items)
+        allocated_method = [0] * len(items)
+        allocated_match = [0] * len(items)
 
         for t_idx, t in enumerate(self._order_transactions):
             is_last = (t_idx == num_txns - 1)
@@ -952,9 +1298,9 @@ class PaymentScreen(QWidget):
             for j, item in enumerate(items):
                 if is_last:
                     # Last transaction gets the remainder
-                    method_amount = round(item['method_amount'] - allocated_method[j], 2)
+                    method_amount = item['method_amount'] - allocated_method[j]
                 else:
-                    method_amount = round(item['method_amount'] * proportion, 2)
+                    method_amount = round(item['method_amount'] * proportion)
                     allocated_method[j] += method_amount
 
                 match_pct = item['match_percent_snapshot']
@@ -962,14 +1308,14 @@ class PaymentScreen(QWidget):
                     # Compute the exact match for the original total, then subtract
                     # what was already distributed to previous transactions
                     total_match = round(
-                        item['method_amount'] * (match_pct / (100.0 + match_pct)), 2
+                        item['method_amount'] * (match_pct / (100.0 + match_pct))
                     )
-                    match_amount = round(total_match - allocated_match[j], 2)
+                    match_amount = total_match - allocated_match[j]
                 else:
-                    match_amount = round(method_amount * (match_pct / (100.0 + match_pct)), 2)
+                    match_amount = round(method_amount * (match_pct / (100.0 + match_pct)))
                     allocated_match[j] += match_amount
 
-                customer_charged = round(method_amount - match_amount, 2)
+                customer_charged = method_amount - match_amount
 
                 txn_items.append({
                     'payment_method_id': item['payment_method_id'],
@@ -994,18 +1340,18 @@ class PaymentScreen(QWidget):
                 for txn_items in all_txn_items:
                     for li in txn_items:
                         li['match_amount'] = round(
-                            li['match_amount'] * cap_ratio, 2
+                            li['match_amount'] * cap_ratio
                         )
-                        li['customer_charged'] = round(
-                            li['method_amount'] - li['match_amount'], 2
+                        li['customer_charged'] = (
+                            li['method_amount'] - li['match_amount']
                         )
 
                 # Penny adjustment: fix rounding drift so sum == cap exactly
-                capped_sum = round(sum(
+                capped_sum = sum(
                     li['match_amount']
                     for txn_items in all_txn_items for li in txn_items
-                ), 2)
-                penny_diff = round(self._match_limit - capped_sum, 2)
+                )
+                penny_diff = self._match_limit - capped_sum
                 if penny_diff != 0:
                     # Adjust the line item with the largest match
                     all_lines = [
@@ -1014,11 +1360,11 @@ class PaymentScreen(QWidget):
                     ]
                     if all_lines:
                         target = max(all_lines, key=lambda li: li['match_amount'])
-                        target['match_amount'] = round(
-                            target['match_amount'] + penny_diff, 2
+                        target['match_amount'] = (
+                            target['match_amount'] + penny_diff
                         )
-                        target['customer_charged'] = round(
-                            target['method_amount'] - target['match_amount'], 2
+                        target['customer_charged'] = (
+                            target['method_amount'] - target['match_amount']
                         )
 
         # Store photos from payment rows (if any) and attach paths to line items.
@@ -1084,37 +1430,47 @@ class PaymentScreen(QWidget):
             confirmed_by = (open_md.get('opened_by', '') if open_md else '') or 'Volunteer'
 
             txns = []
-            total_receipt = 0.0
-            total_customer = 0.0
-            total_match = 0.0
+            total_receipt = 0
+            total_customer = 0
+            total_match = 0
             payment_totals: dict[str, dict] = {}
 
             for t in self._order_transactions:
                 txn = get_transaction_by_id(t['id'])
-                receipt = float(txn['receipt_total'])
+                receipt = txn['receipt_total']  # integer cents
                 total_receipt += receipt
                 line_items = get_payment_line_items(t['id'])
 
                 txns.append({
                     'fam_id': txn['fam_transaction_id'],
                     'vendor': txn.get('vendor_name', ''),
-                    'receipt_total': receipt,
+                    'receipt_total': cents_to_dollars(receipt),
                 })
 
                 for li in line_items:
                     method = li['method_name_snapshot']
-                    amt = float(li['method_amount'])
-                    match = float(li['match_amount'])
-                    cust = float(li['customer_charged'])
+                    amt = li['method_amount']    # integer cents
+                    match = li['match_amount']   # integer cents
+                    cust = li['customer_charged']  # integer cents
                     total_customer += cust
                     total_match += match
                     if method not in payment_totals:
                         payment_totals[method] = {
-                            'amount': 0.0, 'match': 0.0, 'customer': 0.0,
+                            'amount': 0, 'match': 0, 'customer': 0,
                         }
                     payment_totals[method]['amount'] += amt
                     payment_totals[method]['match'] += match
                     payment_totals[method]['customer'] += cust
+
+            # Convert accumulated cents to dollars at the display boundary
+            payment_totals_dollars = {
+                m: {
+                    'amount': cents_to_dollars(v['amount']),
+                    'match': cents_to_dollars(v['match']),
+                    'customer': cents_to_dollars(v['customer']),
+                }
+                for m, v in payment_totals.items()
+            }
 
             return {
                 'market_name': market_name,
@@ -1122,10 +1478,10 @@ class PaymentScreen(QWidget):
                 'customer_label': customer_label,
                 'confirmed_by': confirmed_by,
                 'transactions': txns,
-                'payment_totals': payment_totals,
-                'total_receipt': round(total_receipt, 2),
-                'total_customer': round(total_customer, 2),
-                'total_match': round(total_match, 2),
+                'payment_totals': payment_totals_dollars,
+                'total_receipt': cents_to_dollars(total_receipt),
+                'total_customer': cents_to_dollars(total_customer),
+                'total_match': cents_to_dollars(total_match),
             }
         except Exception:
             logger.exception("Failed to build receipt data")

@@ -1,7 +1,7 @@
 # FAM Market Manager — Technical Overview
 
-> **Version:** 1.8.5
-> **Last Updated:** March 2026
+> **Version:** 1.9.2
+> **Last Updated:** April 2026
 > **Audience:** Developers, administrators, and stakeholders
 
 ---
@@ -116,7 +116,7 @@ The application runs as a standalone Windows desktop executable with local SQLit
 | Photo Upload | google-auth (AuthorizedSession) | Google Drive REST API |
 | Auto-Update | urllib.request (stdlib) | GitHub Releases API |
 | Packaging | PyInstaller | Standalone Windows executable |
-| Testing | pytest | Unit and integration tests (1095 tests) |
+| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1470 tests) |
 
 **Runtime Dependencies** (`requirements.txt`):
 - `PySide6 >= 6.5.0`
@@ -140,7 +140,7 @@ fam-market-manager/
 │   ├── settings_io.py          # .fam file import/export
 │   ├── database/
 │   │   ├── connection.py       # Thread-local SQLite connections
-│   │   ├── schema.py           # Table creation + migrations (v1–v21)
+│   │   ├── schema.py           # Table creation + migrations (v1–v22)
 │   │   ├── seed.py             # Sample data (opt-in via tutorial)
 │   │   └── backup.py           # SQLite backup API + retention
 │   ├── models/
@@ -179,33 +179,41 @@ fam-market-manager/
 │   │   └── worker.py           # QThread workers for check + download
 │   └── utils/
 │       ├── app_settings.py     # Market code, device ID, sync/update settings, key-value store
-│       ├── calculations.py     # Match formula + payment breakdown
+│       ├── calculations.py     # Match formula + payment breakdown + penny reconciliation
+│       ├── money.py            # Integer-cents helpers: dollars_to_cents, cents_to_dollars, format_dollars
 │       ├── export.py           # CSV export + ledger backup
 │       ├── logging_config.py   # Rotating file logger
 │       ├── log_reader.py       # Log file parser for Error Log sync tab
 │       ├── photo_storage.py    # Photo storage in {data_dir}/photos/ with SHA-256 hashing + resize
 │       └── photo_paths.py      # JSON encode/decode for multi-photo pipe-separated paths
 ├── tests/
-│   ├── test_match_formula.py       # 68 tests — core formula verification
-│   ├── test_match_limit.py         # 18 tests — daily cap logic
+│   ├── test_match_formula.py       # 98 tests — core formula verification
+│   ├── test_match_limit.py         # 28 tests — daily cap logic
 │   ├── test_returning_customer.py  # 21 tests + DB integration
-│   ├── test_adjustments.py         # 105 tests — adjustments, voids, ledger
-│   ├── test_fmnp_reports.py        # 42 tests — FMNP entries and reports
-│   ├── test_models.py              # 118 tests — model CRUD operations, photo queries
+│   ├── test_adjustments.py         # 71 tests — adjustments, voids, ledger
+│   ├── test_fmnp_reports.py        # 38 tests — FMNP entries and reports
+│   ├── test_models.py              # 130 tests — model CRUD operations, photo queries
 │   ├── test_market_code.py         # 44 tests — market code, device ID, exports
 │   ├── test_backup.py              # 21 tests — backup creation + retention
 │   ├── test_schema.py              # 40 tests — migrations v1–v21, triggers, indexes
-│   ├── test_settings_io.py         # 102 tests — import/export round-trip
+│   ├── test_settings_io.py         # 54 tests — import/export round-trip
 │   ├── test_sync.py                # 124 tests — cloud sync, data collection, Google Sheets
 │   ├── test_update.py              # 77 tests — URL parsing, version comparison, update flow
-│   ├── test_denomination.py        # 29 tests — denomination constraints, charge conversion
-│   ├── test_charge_conversion.py   # 22 tests — charge-to-amount conversion edge cases
-│   ├── test_auto_distribute.py     # 21 tests — multi-receipt payment distribution
+│   ├── test_denomination.py        # 43 tests — denomination constraints, charge conversion
+│   ├── test_charge_conversion.py   # 52 tests — charge-to-amount conversion edge cases
+│   ├── test_auto_distribute.py     # 71 tests — multi-receipt payment distribution, max-cap math
 │   ├── test_multi_photo.py         # 112 tests — multi-photo storage, dedup, Drive upload
 │   ├── test_cloud_sync_ux.py       # 151 tests — sync UX flows, Drive integration, Agent Tracker
+│   ├── test_money_boundaries.py    # 63 tests — integer-cents boundaries, float accumulation, FMNP check splitting, penny reconciliation
+│   ├── test_reconciliation.py      # 25 tests — three-way reconciliation (DB == Ledger == Sheets)
+│   ├── test_ui_payment.py          # 37 tests — automated UI: PaymentScreen widget behavior
+│   ├── test_ui_workflows.py        # 31 tests — end-to-end market day simulation, cap workflows
+│   ├── test_ui_guards.py           # 66 tests — max-cap clamping, lifecycle guards, match-cap-aware charge
+│   ├── test_ui_expanded.py         # 50 tests — production readiness E2E: payment pipelines, void exclusion, reconciliation
+│   ├── test_payment_method_safety.py # 23 tests — payment method CRUD safety, deactivation guards
 │   └── conftest.py / __init__.py
 ├── releases/
-│   └── FAM_Manager_v1.8.5.zip # Distribution package
+│   └── FAM_Manager_v1.9.2.zip # Distribution package
 ├── fam_manager.spec            # PyInstaller build configuration
 ├── build.bat                   # Windows build script
 ├── requirements.txt
@@ -226,7 +234,7 @@ SQLite connections are **thread-local** via `threading.local()`. Each thread laz
 
 The database file (`fam_data.db`) is stored in `%APPDATA%\FAM Market Manager\` in production, or in the project root during development. This separation ensures application upgrades never affect user data.
 
-### 5.2 Schema (Version 21)
+### 5.2 Schema (Version 22)
 
 **Core Tables:**
 
@@ -292,6 +300,7 @@ Schema migrations run automatically on startup. Each migration is guarded by a t
 | v18-v19 | Added vendor registration fields (check_payable_to, address, ach_enabled) |
 | v19-v20 | Added FK indexes (transactions.vendor_id, customer_orders.market_day_id, fmnp_entries.vendor_id, payment_line_items.payment_method_id) |
 | v20-v21 | Added indexes: transactions(customer_order_id), market_days(market_id, date), audit_log(table_name, record_id) |
+| v21-v22 | Converted all monetary REAL columns to INTEGER cents (markets.daily_match_limit, payment_methods.denomination, transactions.receipt_total, payment_line_items.method_amount/match_amount/customer_charged, fmnp_entries.amount) |
 
 ### 5.5 Database Triggers
 
@@ -547,6 +556,8 @@ customer_charged = method_amount - match_amount
 
 **Key property:** `match_amount + customer_charged == method_amount` (always holds)
 
+All monetary values are **integer cents** (e.g. $89.99 = 8999). See Section 15 for the full Money Handling Contract.
+
 **Formula locations** (must remain synchronized):
 
 1. `fam/utils/calculations.py` -> `calculate_payment_breakdown()` -- canonical implementation
@@ -568,6 +579,10 @@ When a customer order contains multiple receipts, payments are distributed propo
 ### 11.4 Denomination Validation
 
 Payment methods with a `denomination` value (e.g., $5.00 for FMNP checks) enforce that amounts entered in the UI are exact multiples of that denomination. The UI uses charge-based input: the user enters the total charge and the system calculates individual check amounts.
+
+### 11.5 Penny Reconciliation
+
+When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is impossible. `calculate_payment_breakdown()` detects a ±1¢ gap between `allocated_total` and `receipt_total` and absorbs it into the FAM match of the largest matched line item. Customer charge stays unchanged — only the FAM subsidy absorbs the rounding artifact.
 
 ---
 
@@ -600,27 +615,34 @@ Payment methods with a `denomination` value (e.g., $5.00 for FMNP checks) enforc
 
 ## 13. Testing
 
-**1095 tests** across 18 test files:
+**1470 tests** across 24 test files:
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `test_match_formula.py` | 68 | Core formula, reconciliation, edge cases, real-world scenarios |
-| `test_match_limit.py` | 18 | Daily cap logic, proportional reduction, high percentages |
+| `test_match_formula.py` | 98 | Core formula, reconciliation, edge cases, real-world scenarios |
+| `test_match_limit.py` | 28 | Daily cap logic, proportional reduction, high percentages, penny reconciliation under cap, cap=0/1¢ boundaries |
 | `test_returning_customer.py` | 21 | DB integration, prior match tracking, effective remaining limit |
-| `test_adjustments.py` | 105 | Adjustments, voids, voided ledger exclusion, multi-method |
-| `test_fmnp_reports.py` | 42 | FMNP entries, soft-delete, reporting |
-| `test_models.py` | 118 | Model CRUD operations, transaction lifecycle, photo queries |
+| `test_adjustments.py` | 71 | Adjustments, voids, voided ledger exclusion, multi-method |
+| `test_fmnp_reports.py` | 38 | FMNP entries, soft-delete, reporting |
+| `test_models.py` | 130 | Model CRUD operations, transaction lifecycle, photo queries |
 | `test_market_code.py` | 44 | Market code derivation, device ID, export filenames, CSV columns |
 | `test_backup.py` | 21 | Backup creation, retention enforcement |
 | `test_schema.py` | 40 | Migrations v1-v21, triggers, indexes, defaults |
-| `test_settings_io.py` | 102 | Import/export parsing, round-trip, sanitization |
+| `test_settings_io.py` | 54 | Import/export parsing, round-trip, sanitization |
 | `test_sync.py` | 124 | Cloud sync, data collection, Google Sheets mocking |
 | `test_update.py` | 77 | URL parsing, version comparison, GitHub API, update flow |
-| `test_denomination.py` | 29 | Denomination constraints, charge conversion, validation |
-| `test_charge_conversion.py` | 22 | Charge-to-amount conversion edge cases |
-| `test_auto_distribute.py` | 21 | Multi-receipt payment distribution |
+| `test_denomination.py` | 43 | Denomination constraints, charge conversion, validation |
+| `test_charge_conversion.py` | 52 | Charge-to-amount conversion edge cases |
+| `test_auto_distribute.py` | 71 | Multi-receipt payment distribution, max-cap math, cap reconciliation |
 | `test_multi_photo.py` | 112 | Multi-photo storage, dedup (3-layer), Drive upload, hash cache |
 | `test_cloud_sync_ux.py` | 151 | Sync UX flows, Drive integration, dead URL detection, Agent Tracker |
+| `test_money_boundaries.py` | 63 | Integer-cents boundaries, float accumulation, FMNP check splitting, penny reconciliation |
+| `test_reconciliation.py` | 25 | Three-way reconciliation (DB == Ledger == Sheets) |
+| `test_ui_payment.py` | 37 | Automated UI tests: PaymentScreen widget behavior, row management, summary cards |
+| `test_ui_workflows.py` | 31 | End-to-end market day simulation, returning customer cap workflows, void exclusion |
+| `test_ui_guards.py` | 66 | Max-cap clamping, market day lifecycle guards, adjustment edge cases, match-cap-aware charge input |
+| `test_ui_expanded.py` | 50 | Production readiness: payment confirm E2E (DB/sync/ledger), draft save/resume, returning customer match limits, void-after-confirm exclusion, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent pipeline, high-volume reconciliation (30 txns), report state changes |
+| `test_payment_method_safety.py` | 23 | Payment method CRUD safety, market assignment, deactivation guards, Reports FMNP separation |
 
 **Run:** `python -m pytest tests/ -v`
 
@@ -668,3 +690,158 @@ All persistent data is stored in `%APPDATA%\FAM Market Manager\`:
 | `_update_backup/` | Previous app version backup (created during auto-update) |
 
 **Upgrades are seamless:** replace the application folder and launch. Schema migrations run automatically. Legacy data (v1.5.1 and earlier) is auto-migrated from the exe directory to AppData on first launch.
+
+---
+
+## 15. Money Handling Contract (Integer Cents)
+
+All monetary values throughout the application are stored, computed, and transmitted as **integer cents** (e.g. `$89.99` = `8999`). This eliminates IEEE 754 float precision drift that accumulates when adding many dollar values.
+
+### 15.1 Representation by Layer
+
+| Layer | Representation | Conversion |
+|-------|---------------|------------|
+| Database (schema v22+) | INTEGER cents | Migration v21→v22 converted all REAL dollar columns |
+| Python business logic | `int` cents | All calculations, models, sync, export |
+| UI input (QDoubleSpinBox) | Dollar float | `dollars_to_cents()` on read from widget |
+| UI display | Dollar string | `format_dollars(cents)` or `cents_to_dollars(cents)` |
+| CSV/Ledger export | Dollar float | `cents_to_dollars()` at write boundary |
+| Google Sheets sync | Dollar float | `cents_to_dollars()` in `data_collector.py` |
+
+### 15.2 Boundary Helpers (`fam/utils/money.py`)
+
+| Function | Direction | Example |
+|----------|-----------|---------|
+| `dollars_to_cents(89.99)` | UI → internal | `8999` |
+| `cents_to_dollars(8999)` | internal → display | `89.99` |
+| `format_dollars(8999)` | internal → string | `"$89.99"` |
+| `format_dollars_comma(123456)` | internal → string | `"$1,234.56"` |
+
+### 15.3 Anti-Patterns
+
+- **Float accumulation**: Never sum `cents_to_dollars()` results across multiple rows. Accumulate in integer cents, convert once.
+- **Dollar arithmetic**: Never do `receipt_total / 2` in dollar space. Work in cents.
+- **Mixed types**: A variable is either cents (int) or dollars (float), never ambiguous.
+
+### 15.4 Known Dollar Island
+
+`large_receipt_threshold` in `app_settings` is stored and compared as a dollar value (float). It is compared only against QDoubleSpinBox dollar values in the UI — it never enters the cents pipeline.
+
+---
+
+## 16. Data Integrity & Reconciliation
+
+### 16.1 Three-Way Invariant
+
+For every completed transaction: **DB == Ledger == Sheets**
+
+- **DB**: `transactions` + `payment_line_items` tables (integer cents)
+- **Ledger**: `fam_ledger_backup.txt` (dollar strings, converted from cents at write time)
+- **Sheets**: Google Sheets sync payload (dollar floats, converted from cents in `data_collector.py`)
+
+### 16.2 Automated Tests (`test_reconciliation.py`)
+
+25 end-to-end tests verify the three-way invariant across single transactions, multi-transaction aggregates, FMNP entries, edits, voids, persistence round-trips, edge-case amounts, and high-volume scenarios (50 transactions).
+
+### 16.3 FMNP Check Splitting
+
+When an FMNP entry covers multiple checks, the total is split using integer division with remainder distribution, guaranteeing `sum(all checks) == total` exactly.
+
+### 16.4 FMNP Treatment Across Layers
+
+FMNP data intentionally appears differently depending on the layer. This is by design, not a bug:
+
+| Layer | What It Includes | Why |
+|-------|-----------------|-----|
+| **DB (`transactions` + `payment_line_items`)** | Regular transactions only; FMNP entries tracked separately in `fmnp_entries` table | Clean separation of payment-flow transactions from vendor-reported FMNP checks |
+| **Sync — Market Day Summary** | Transactions only (`receipt_cents`, `customer_paid_cents`, `fam_match_cents`) | Matches DB scope; FMNP tracked via separate `fmnp_cents` field |
+| **Sync — FMNP Entries tab** | Per-check rows from both `fmnp_entries` and FMNP `payment_line_items` | Full FMNP picture from both data sources |
+| **Ledger (`fam_ledger_backup.txt`)** | Combines regular transactions + FMNP in the FAM Match total | Human-readable "everything in one place" for paper audit |
+| **Reports Screen** | Separate cards: FAM Match card (transactions only) + FMNP Match card (FMNP only) | Clear visual separation for coordinators |
+
+The three-way reconciliation tests (`test_reconciliation.py`) verify that DB == Ledger == Sheets for transaction data, with FMNP tracked separately in each layer's appropriate location.
+
+### 16.5 Atomic Financial Operations
+
+All financial state changes use explicit transaction boundaries with rollback on failure:
+
+| Operation | Location | Pattern |
+|-----------|----------|---------|
+| `confirm_transaction()` | `transaction.py` | `try/commit=False/except/rollback` — writes line items + updates status atomically |
+| `void_transaction()` | `transaction.py` | `try/commit=False/except/rollback` — sets Voided status + audit log atomically |
+| `save_payment_line_items()` | `transaction.py` | `try/commit=False/except/rollback` — replaces all line items in one transaction |
+| Admin adjustment | `admin_screen.py` | `try/except/rollback` — updates transaction + audit log atomically |
+
+**Non-atomic by design:** `create_transaction()` and `create_customer_order()` do NOT use explicit transaction wrapping. These create Draft-status records with no financial impact — a partially-created draft is harmless and will be cleaned up or completed by the user.
+
+### 16.6 Market Day Lifecycle Guards
+
+Transactions can only be created on an open market day. This is enforced at the **model level** in `create_transaction()`:
+
+```python
+row = conn.execute("SELECT date, status FROM market_days WHERE id=?", (market_day_id,)).fetchone()
+if row is None:
+    raise ValueError(f"Market day {market_day_id} not found")
+if row['status'] != 'Open':
+    raise ValueError(f"Market day {market_day_id} is '{row['status']}' — transactions can only be created on an open market day")
+```
+
+This guard is authoritative — it fires regardless of which UI path reaches it. The Receipt Intake screen also has a UI-level guard (disabling the Add button when no open market day exists), but the model-level guard is the safety net.
+
+### 16.7 Max-Cap Clamping (UI Guard)
+
+The Payment Screen prevents users from exceeding the remaining order balance at input time:
+
+1. **`_push_row_limits()`** in `payment_screen.py` — after every row change, recalculates each row's maximum allowed charge based on `order_total - sum(other rows' method_amounts)`
+2. **`set_max_charge()`** in `PaymentRow` — receives the max and applies it to the active input widget
+3. **`setMaxCharge()`** in `DenominationStepper` — converts remaining balance to max unit count via `floor(remaining / denomination)`, disables the + button at max
+
+For denominated methods (e.g., FMNP $5 checks), the max is in charge space — the match flexes to fit. For non-denominated methods, the max charge accounts for match percentage: `remaining / (1 + match_pct / 100)`.
+
+### 16.8 Snapshot Architecture
+
+`payment_line_items` stores `method_name_snapshot` and `match_percent_snapshot` at the time of payment confirmation. This ensures historical records remain accurate even if payment method settings are later changed. Reports, ledger, and sync all read from these snapshot columns rather than joining to the current `payment_methods` table.
+
+---
+
+## 17. Developer Guardrails & Known Limitations
+
+### 17.1 Code-Enforced Guardrails
+
+These are automatically enforced by the codebase — no developer discipline required:
+
+| Guardrail | Enforcement |
+|-----------|------------|
+| Market day must be Open to create transactions | `create_transaction()` raises `ValueError` |
+| Receipt total must be positive | SQLite `BEFORE INSERT` trigger |
+| Match percent must be 0-999 | SQLite `BEFORE INSERT/UPDATE` trigger |
+| Payment line item amounts must be non-negative | SQLite `BEFORE INSERT` trigger |
+| FMNP amount must be positive | SQLite `BEFORE INSERT` trigger |
+| Foreign keys enforced | `PRAGMA foreign_keys=ON` on every connection |
+| Schema version tracked | `schema_version` table, auto-migration on startup |
+| Pre-migration backup | `.pre-migration.bak` created before any schema change |
+| Snapshot columns frozen at confirmation | `confirm_transaction()` writes `method_name_snapshot` and `match_percent_snapshot` |
+| Penny reconciliation | `calculate_payment_breakdown()` absorbs ±1¢ gaps into FAM match |
+| Max-cap clamping | `_push_row_limits()` prevents UI input beyond remaining balance |
+| Photo dedup (within-entry) | Hard block on duplicate SHA-256 hash within same entry |
+
+### 17.2 Developer-Discipline Guardrails
+
+These require developers to follow conventions — no automated enforcement:
+
+| Convention | Rationale |
+|------------|-----------|
+| All new monetary columns must be INTEGER cents | Prevents float drift; `dollars_to_cents()` at UI boundary only |
+| Never sum `cents_to_dollars()` results | Accumulate in int cents, convert once at display/export |
+| Formula changes must update all 4 locations | `calculations.py`, `payment_row._recompute()`, `payment_row.get_data()`, `payment_screen._distribute_and_save_payments()` |
+| New financial operations must use try/except/rollback | Follow pattern in `confirm_transaction()` |
+| Audit log entries must include `app_version` and `device_id` | Required for multi-device traceability |
+
+### 17.3 Known Non-Blocking Limitations
+
+| Limitation | Impact | Mitigation |
+|------------|--------|------------|
+| `QDoubleSpinBox` IEEE 754 float at UI boundary | Could theoretically produce ±0.001¢ error on exotic inputs | `dollars_to_cents()` uses `int(round(dollars * 100))` — rounds to nearest cent |
+| `large_receipt_threshold` stored as dollar float | Only compared against UI dollar values, never enters cents pipeline | Isolated "dollar island" — no accumulation risk |
+| `update_transaction` uses f-string SQL for field names | Field names come from hardcoded `allowed` set; values are parameterized | Safe by construction — no user input reaches field names |
+| No server-side validation for cloud sync | Google Sheets is a display-only destination | One-way sync by design; spreadsheet changes are overwritten on next sync |

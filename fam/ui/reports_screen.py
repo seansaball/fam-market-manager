@@ -41,6 +41,7 @@ from fam.ui.helpers import (
     make_field_label, make_item, configure_table, CheckableComboBox,
     DateRangeWidget, NoScrollComboBox
 )
+from fam.utils.money import cents_to_dollars
 
 
 class ReportsScreen(QWidget):
@@ -548,8 +549,8 @@ class ReportsScreen(QWidget):
                 'address': _build_addr(r),
                 'month': month_str,
                 'dates': r['transaction_dates'] or '',
-                'total_due': r['gross_sales'],
-                'methods': method_by_vendor.get(key, {}),
+                'total_due': cents_to_dollars(r['gross_sales']),
+                'methods': {m: cents_to_dollars(a) for m, a in method_by_vendor.get(key, {}).items()},
                 'fmnp_external': 0,
             }
 
@@ -571,9 +572,10 @@ class ReportsScreen(QWidget):
 
         for r in fmnp_vendor_rows:
             key = (r['market_name'], r['vendor'])
+            fmnp_dollars = cents_to_dollars(r['fmnp_entry_total'])
             if key in vendor_dict:
-                vendor_dict[key]['fmnp_external'] = r['fmnp_entry_total']
-                vendor_dict[key]['total_due'] += r['fmnp_entry_total']
+                vendor_dict[key]['fmnp_external'] = fmnp_dollars
+                vendor_dict[key]['total_due'] += fmnp_dollars
                 existing = set(vendor_dict[key]['dates'].split(',')) \
                     if vendor_dict[key]['dates'] else set()
                 new_dates = set((r['fmnp_dates'] or '').split(','))
@@ -591,9 +593,9 @@ class ReportsScreen(QWidget):
                     'address': _build_addr(r),
                     'month': month_str,
                     'dates': r['fmnp_dates'] or '',
-                    'total_due': r['fmnp_entry_total'],
+                    'total_due': fmnp_dollars,
                     'methods': {},
-                    'fmnp_external': r['fmnp_entry_total'],
+                    'fmnp_external': fmnp_dollars,
                 }
 
         vendor_list = sorted(vendor_dict.values(), key=lambda x: (x['market_name'], x['vendor']))
@@ -683,8 +685,8 @@ class ReportsScreen(QWidget):
         total_customer = 0
         total_fam_match = 0
         for i, r in enumerate(match_rows):
-            allocated = r['total_allocated']
-            fam_match = r['total_fam_match']
+            allocated = cents_to_dollars(r['total_allocated'])
+            fam_match = cents_to_dollars(r['total_fam_match'])
             total_customer += (allocated - fam_match)
             total_fam_match += fam_match
 
@@ -706,20 +708,21 @@ class ReportsScreen(QWidget):
             {fmnp_where}
         """, fmnp_params).fetchone()['total']
 
-        if fmnp_ext_total > 0:
+        fmnp_ext_dollars = cents_to_dollars(fmnp_ext_total)
+        if fmnp_ext_dollars > 0:
             row_idx = self.match_table.rowCount()
             self.match_table.setRowCount(row_idx + 1)
             self.match_table.setItem(row_idx, 0, make_item("FMNP (External)"))
             self.match_table.setItem(row_idx, 1, make_item(
-                f"${fmnp_ext_total:.2f}", fmnp_ext_total))
+                f"${fmnp_ext_dollars:.2f}", fmnp_ext_dollars))
             self.match_table.setItem(row_idx, 2, make_item(
-                f"${fmnp_ext_total:.2f}", fmnp_ext_total))
-            total_fam_match += fmnp_ext_total
+                f"${fmnp_ext_dollars:.2f}", fmnp_ext_dollars))
+            total_fam_match += fmnp_ext_dollars
 
             self._match_data.append({
                 'Payment Method': 'FMNP (External)',
-                'Total Allocated': fmnp_ext_total,
-                'Total FAM Match': fmnp_ext_total
+                'Total Allocated': fmnp_ext_dollars,
+                'Total FAM Match': fmnp_ext_dollars
             })
         self.match_table.resizeColumnsToContents()
         self.match_table.setSortingEnabled(True)
@@ -738,7 +741,7 @@ class ReportsScreen(QWidget):
                    COALESCE(SUM(pl.customer_charged), 0) as customer_paid,
                    COALESCE(SUM(pl.match_amount), 0) as fam_match,
                    GROUP_CONCAT(pl.method_name_snapshot || ': $' ||
-                       PRINTF('%.2f', pl.method_amount), ', ') as methods
+                       PRINTF('%.2f', pl.method_amount / 100.0), ', ') as methods
             FROM transactions t
             JOIN vendors v ON t.vendor_id = v.id
             JOIN market_days md ON t.market_day_id = md.id
@@ -753,13 +756,16 @@ class ReportsScreen(QWidget):
         self.ledger_table.setSortingEnabled(False)
         self.ledger_table.setRowCount(len(ledger_rows))
         for i, r in enumerate(ledger_rows):
+            rt = cents_to_dollars(r['receipt_total'])
+            cp = cents_to_dollars(r['customer_paid'])
+            fm = cents_to_dollars(r['fam_match'])
             self.ledger_table.setItem(i, 0, make_item(r['fam_transaction_id']))
             self.ledger_table.setItem(i, 1, make_item(r['created_at'] or ''))
             self.ledger_table.setItem(i, 2, make_item(r['customer_id']))
             self.ledger_table.setItem(i, 3, make_item(r['vendor']))
-            self.ledger_table.setItem(i, 4, make_item(f"${r['receipt_total']:.2f}", r['receipt_total']))
-            self.ledger_table.setItem(i, 5, make_item(f"${r['customer_paid']:.2f}", r['customer_paid']))
-            self.ledger_table.setItem(i, 6, make_item(f"${r['fam_match']:.2f}", r['fam_match']))
+            self.ledger_table.setItem(i, 4, make_item(f"${rt:.2f}", rt))
+            self.ledger_table.setItem(i, 5, make_item(f"${cp:.2f}", cp))
+            self.ledger_table.setItem(i, 6, make_item(f"${fm:.2f}", fm))
             self.ledger_table.setItem(i, 7, make_item(r['status']))
             self.ledger_table.setItem(i, 8, make_item(r['methods'] or ''))
 
@@ -768,9 +774,9 @@ class ReportsScreen(QWidget):
                 'Timestamp': r['created_at'] or '',
                 'Customer': r['customer_id'],
                 'Vendor': r['vendor'],
-                'Receipt Total': r['receipt_total'],
-                'Customer Paid': r['customer_paid'],
-                'FAM Match': r['fam_match'],
+                'Receipt Total': rt,
+                'Customer Paid': cp,
+                'FAM Match': fm,
                 'Status': r['status'],
                 'Payment Methods': r['methods'] or ''
             })
@@ -796,15 +802,16 @@ class ReportsScreen(QWidget):
                 row_idx = offset + i
                 check_info = (f"FMNP (External) - {r['check_count']} checks"
                               if r['check_count'] else "FMNP (External)")
+                amt = cents_to_dollars(r['amount'])
                 self.ledger_table.setItem(row_idx, 0, make_item(f"FMNP-{r['id']}"))
                 self.ledger_table.setItem(row_idx, 1, make_item(r['created_at'] or ''))
                 self.ledger_table.setItem(row_idx, 2, make_item(''))
                 self.ledger_table.setItem(row_idx, 3, make_item(r['vendor']))
                 self.ledger_table.setItem(row_idx, 4, make_item(
-                    f"${r['amount']:.2f}", r['amount']))
+                    f"${amt:.2f}", amt))
                 self.ledger_table.setItem(row_idx, 5, make_item("$0.00", 0))
                 self.ledger_table.setItem(row_idx, 6, make_item(
-                    f"${r['amount']:.2f}", r['amount']))
+                    f"${amt:.2f}", amt))
                 self.ledger_table.setItem(row_idx, 7, make_item("FMNP Entry"))
                 self.ledger_table.setItem(row_idx, 8, make_item(check_info))
 
@@ -813,9 +820,9 @@ class ReportsScreen(QWidget):
                     'Timestamp': r['created_at'] or '',
                     'Customer': '',
                     'Vendor': r['vendor'],
-                    'Receipt Total': r['amount'],
+                    'Receipt Total': amt,
                     'Customer Paid': 0,
-                    'FAM Match': r['amount'],
+                    'FAM Match': amt,
                     'Status': 'FMNP Entry',
                     'Payment Methods': check_info
                 })
@@ -843,8 +850,9 @@ class ReportsScreen(QWidget):
         """, params).fetchall()
 
         self._chart_trend_data = [
-            {'date': r['date'], 'gross': r['gross_total'],
-             'match': r['fam_match_total'], 'customer': r['customer_paid_total']}
+            {'date': r['date'], 'gross': cents_to_dollars(r['gross_total']),
+             'match': cents_to_dollars(r['fam_match_total']),
+             'customer': cents_to_dollars(r['customer_paid_total'])}
             for r in trend_rows
         ]
 
@@ -862,7 +870,7 @@ class ReportsScreen(QWidget):
             ORDER BY md.date
         """, params).fetchall()
 
-        fmnp_inapp_map = {r['date']: r['fmnp_match'] for r in fmnp_trend}
+        fmnp_inapp_map = {r['date']: cents_to_dollars(r['fmnp_match']) for r in fmnp_trend}
 
         # External FMNP entries trend
         fmnp_entry_trend = conn.execute(f"""
@@ -875,7 +883,7 @@ class ReportsScreen(QWidget):
             ORDER BY md.date
         """, fmnp_params).fetchall()
 
-        fmnp_entry_map = {r['date']: r['fmnp_entry_total'] for r in fmnp_entry_trend}
+        fmnp_entry_map = {r['date']: cents_to_dollars(r['fmnp_entry_total']) for r in fmnp_entry_trend}
         all_fmnp_dates = sorted(set(fmnp_inapp_map.keys()) | set(fmnp_entry_map.keys()))
         self._chart_fmnp_data = [
             {'date': d, 'fmnp': fmnp_inapp_map.get(d, 0) + fmnp_entry_map.get(d, 0)}
@@ -884,12 +892,12 @@ class ReportsScreen(QWidget):
 
         # Pie chart data — reuse already-fetched match_rows
         self._chart_pie_data = [
-            {'method': r['method'], 'total': r['total_allocated']}
+            {'method': r['method'], 'total': cents_to_dollars(r['total_allocated'])}
             for r in match_rows
         ]
-        if fmnp_ext_total > 0:
+        if fmnp_ext_dollars > 0:
             self._chart_pie_data.append({
-                'method': 'FMNP (External)', 'total': fmnp_ext_total
+                'method': 'FMNP (External)', 'total': fmnp_ext_dollars
             })
 
         # Customer & receipt traffic time-series
@@ -922,11 +930,11 @@ class ReportsScreen(QWidget):
             {where}
             GROUP BY v.id, v.name
         """, params).fetchall()
-        chart_match_by_vendor = {r['vendor']: r['total_match'] for r in chart_match_rows}
-        # Add external FMNP to vendor match totals
+        chart_match_by_vendor = {r['vendor']: cents_to_dollars(r['total_match']) for r in chart_match_rows}
+        # Add external FMNP to vendor match totals (already converted to dollars above)
         for r in fmnp_vendor_rows:
             chart_match_by_vendor[r['vendor']] = \
-                chart_match_by_vendor.get(r['vendor'], 0) + r['fmnp_entry_total']
+                chart_match_by_vendor.get(r['vendor'], 0) + cents_to_dollars(r['fmnp_entry_total'])
 
         self._chart_vendor_match = sorted(
             [{'vendor': name, 'match': amt}
@@ -1017,6 +1025,8 @@ class ReportsScreen(QWidget):
         self.geo_table.setSortingEnabled(False)
         self.geo_table.setRowCount(len(geo_rows))
         for i, r in enumerate(geo_rows):
+            spend = cents_to_dollars(r['total_spend'])
+            match = cents_to_dollars(r['total_match'])
             self.geo_table.setItem(i, 0, make_item(r['zip_code']))
             self.geo_table.setItem(
                 i, 1, make_item(str(r['customer_count']), r['customer_count'])
@@ -1025,18 +1035,18 @@ class ReportsScreen(QWidget):
                 i, 2, make_item(str(r['receipt_count']), r['receipt_count'])
             )
             self.geo_table.setItem(
-                i, 3, make_item(f"${r['total_spend']:.2f}", r['total_spend'])
+                i, 3, make_item(f"${spend:.2f}", spend)
             )
             self.geo_table.setItem(
-                i, 4, make_item(f"${r['total_match']:.2f}", r['total_match'])
+                i, 4, make_item(f"${match:.2f}", match)
             )
 
             self._geo_data.append({
                 'Zip Code': r['zip_code'],
                 '# Customers': r['customer_count'],
                 '# Receipts': r['receipt_count'],
-                'Total Spend': r['total_spend'],
-                'Total FAM Match': r['total_match'],
+                'Total Spend': spend,
+                'Total FAM Match': match,
             })
         self.geo_table.resizeColumnsToContents()
         self.geo_table.setSortingEnabled(True)
@@ -1530,7 +1540,7 @@ class ReportsScreen(QWidget):
 
     def _load_transaction_log(self):
         """Query audit data and populate the Transaction Log table."""
-        from datetime import date
+        from fam.utils.timezone import eastern_today
 
         # Determine filters
         today_only = self._txn_today_cb.isChecked()
@@ -1539,7 +1549,7 @@ class ReportsScreen(QWidget):
         date_from = None
         date_to = None
         if today_only:
-            today_str = date.today().isoformat()
+            today_str = eastern_today().isoformat()
             date_from = today_str
             date_to = today_str
 

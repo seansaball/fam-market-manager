@@ -5,16 +5,156 @@ import os
 
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QFileDialog,
-    QDialog, QDialogButtonBox, QMessageBox
+    QDialog, QDialogButtonBox, QMessageBox, QWidget, QSpinBox
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QStandardItemModel, QColor, QBrush
 from fam.models.payment_method import get_all_payment_methods, get_payment_methods_for_market
 from fam.utils.calculations import charge_to_method_amount, method_amount_to_charge
+from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
 
 logger = logging.getLogger('fam.ui.widgets.payment_row')
 from fam.ui.styles import LIGHT_GRAY, WHITE, ERROR_COLOR, SUBTITLE_GRAY, HARVEST_GOLD, ACCENT_GREEN
 from fam.ui.helpers import NoScrollDoubleSpinBox, NoScrollComboBox
+
+
+class DenominationStepper(QWidget):
+    """A unit-count stepper for denominated payment methods.
+
+    Shows [ − ] [ count ] [ + ]  $value  instead of a free-text dollar spinbox.
+    Emits valueChanged(int) with the charge in integer cents (count × denomination).
+    All monetary values (denomination, value, max_remaining) are integer cents.
+    """
+
+    valueChanged = Signal(int)
+
+    def __init__(self, denomination: int = 100, parent=None):
+        super().__init__(parent)
+        self._denomination = denomination
+        self._count = 0
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        # Stepper elements use the exact same sizing rules as the Charge
+        # spinbox (amount_spin) in PaymentRow so they naturally render at
+        # the same height: border 2px + padding 4px top/bottom + min-height 22px.
+        _shared_box = (
+            f"border: 2px solid {HARVEST_GOLD}; border-radius: 6px; "
+            f"background-color: {WHITE}; font-weight: bold; "
+            f"padding: 4px 0px; min-height: 22px;"
+        )
+
+        self._minus_btn = QPushButton("−")
+        self._minus_btn.setFixedWidth(26)
+        self._minus_btn.setStyleSheet(f"""
+            QPushButton {{ {_shared_box} font-size: 15px; color: {HARVEST_GOLD}; }}
+            QPushButton:hover {{ background-color: {HARVEST_GOLD}; color: {WHITE}; }}
+            QPushButton:pressed {{ background-color: {ACCENT_GREEN}; border-color: {ACCENT_GREEN}; color: {WHITE}; }}
+            QPushButton:disabled {{ background-color: {LIGHT_GRAY}; border-color: {LIGHT_GRAY}; color: #aaa; }}
+        """)
+        self._minus_btn.clicked.connect(self._decrement)
+        layout.addWidget(self._minus_btn)
+
+        self._count_spin = QSpinBox()
+        self._count_spin.setRange(0, 9999)
+        self._count_spin.setValue(0)
+        self._count_spin.setAlignment(Qt.AlignCenter)
+        self._count_spin.setButtonSymbols(QSpinBox.NoButtons)
+        self._count_spin.setFixedWidth(42)
+        self._count_spin.setStyleSheet(f"""
+            QSpinBox {{ {_shared_box} font-size: 14px; color: #222; }}
+            QSpinBox:focus {{ border-color: {ACCENT_GREEN}; background-color: #FEFFFE; }}
+        """)
+        self._count_spin.valueChanged.connect(self._on_spin_changed)
+        layout.addWidget(self._count_spin)
+
+        self._plus_btn = QPushButton("+")
+        self._plus_btn.setFixedWidth(26)
+        self._plus_btn.setStyleSheet(f"""
+            QPushButton {{ {_shared_box} font-size: 15px; color: {HARVEST_GOLD}; }}
+            QPushButton:hover {{ background-color: {HARVEST_GOLD}; color: {WHITE}; }}
+            QPushButton:pressed {{ background-color: {ACCENT_GREEN}; border-color: {ACCENT_GREEN}; color: {WHITE}; }}
+            QPushButton:disabled {{ background-color: {LIGHT_GRAY}; border-color: {LIGHT_GRAY}; color: #aaa; }}
+        """)
+        self._plus_btn.clicked.connect(self._increment)
+        layout.addWidget(self._plus_btn)
+
+        self._dollar_label = QLabel("$0.00")
+        self._dollar_label.setStyleSheet(
+            f"font-weight: bold; color: {ACCENT_GREEN}; font-size: 13px; "
+            f"padding: 4px 0px; min-height: 22px;"
+        )
+        self._dollar_label.setMinimumWidth(60)
+        layout.addWidget(self._dollar_label)
+
+    def setDenomination(self, denomination: int):
+        """Update the denomination value (integer cents) and refresh display."""
+        self._denomination = denomination
+        self._refresh_display()
+
+    def count(self) -> int:
+        """Return the current unit count."""
+        return self._count_spin.value()
+
+    def value(self) -> int:
+        """Return the current charge in integer cents (count × denomination)."""
+        return self._count_spin.value() * self._denomination
+
+    def setValue(self, cents: int):
+        """Set the count from a cents amount (reverse-engineers count)."""
+        if self._denomination > 0:
+            c = max(0, int(cents / self._denomination))
+        else:
+            c = 0
+        self._count_spin.blockSignals(True)
+        self._count_spin.setValue(c)
+        self._count_spin.blockSignals(False)
+        self._refresh_display()
+
+    def setCount(self, count: int):
+        """Set the unit count directly."""
+        self._count_spin.setValue(max(0, count))
+
+    def _on_spin_changed(self, val):
+        """Called when user types a value or spinbox changes."""
+        self._refresh_display()
+        self.valueChanged.emit(self.value())
+
+    def _increment(self):
+        self._count_spin.setValue(self._count_spin.value() + 1)
+
+    def _decrement(self):
+        v = self._count_spin.value()
+        if v > 0:
+            self._count_spin.setValue(v - 1)
+
+    def setMaxCharge(self, max_remaining: int):
+        """Cap stepper based on remaining order balance (integer cents).
+
+        For denominated methods, max_remaining is the raw remaining balance
+        (not divided by match) — the customer's check is the denomination,
+        and the match flexes to fit.
+
+        Blocks signals to prevent cascading updates when setMaximum()
+        clamps the current value.
+        """
+        if self._denomination > 0:
+            max_count = max(0, int(max_remaining / self._denomination))
+        else:
+            max_count = 0
+        self._count_spin.blockSignals(True)
+        self._count_spin.setMaximum(max_count)
+        self._count_spin.blockSignals(False)
+        self._refresh_display()
+
+    def _refresh_display(self):
+        self._dollar_label.setText(format_dollars(self.value()))
+        self._minus_btn.setEnabled(self._count_spin.value() > 0)
+        self._plus_btn.setEnabled(
+            self._count_spin.value() < self._count_spin.maximum()
+        )
 
 
 class PaymentRow(QFrame):
@@ -83,11 +223,18 @@ class PaymentRow(QFrame):
         self.amount_spin.valueChanged.connect(self._on_changed)
         layout.addWidget(self.amount_spin)
 
-        # Denomination hint (visible when method has denomination set)
+        # Denomination hint (visible when method has denomination set but stepper not active)
         self.denom_hint = QLabel("")
         self.denom_hint.setStyleSheet(f"font-weight: bold; color: {ACCENT_GREEN}; font-size: 13px;")
         self.denom_hint.setVisible(False)
         layout.addWidget(self.denom_hint)
+
+        # Denomination stepper — replaces the dollar spinbox for denominated methods
+        self._stepper = DenominationStepper(denomination=100, parent=self)
+        self._stepper.setVisible(False)
+        self._stepper.valueChanged.connect(self._on_changed)
+        layout.addWidget(self._stepper)
+        self._stepper_active = False
 
         # Computed fields
         layout.addWidget(QLabel("FAM Match:"))
@@ -168,47 +315,95 @@ class PaymentRow(QFrame):
 
     def _on_changed(self):
         self._update_match_label()
-        self._update_denomination_hint()
+        self._update_input_mode()
         self._update_photo_button()
         self._recompute()
         self.changed.emit()
 
-    def _update_denomination_hint(self):
-        """Show denomination hint and set spinbox step when method has denomination."""
+    def _update_input_mode(self):
+        """Swap between stepper (denominated) and spinbox (non-denominated)."""
         method = self.get_selected_method()
-        if method and method.get('denomination'):
-            denom = method['denomination']
-            self.denom_hint.setText(f"(${denom:.0f} increments)")
-            self.denom_hint.setVisible(True)
-            self.amount_spin.setSingleStep(denom)
+        if method and method.get('denomination') and method['denomination'] > 0:
+            denom = method['denomination']  # integer cents
+            if not self._stepper_active:
+                # Transfer current charge to stepper (spinbox is dollars → cents)
+                current_cents = dollars_to_cents(self.amount_spin.value())
+                self._stepper.setDenomination(denom)
+                self._stepper.setValue(current_cents)
+                self.amount_spin.setVisible(False)
+                self.denom_hint.setVisible(False)
+                self._stepper.setVisible(True)
+                self._stepper_active = True
+            else:
+                # Already active — just update denomination if it changed
+                self._stepper.setDenomination(denom)
         else:
-            self.denom_hint.setVisible(False)
-            self.amount_spin.setSingleStep(1.00)
+            if self._stepper_active:
+                # Transfer stepper value back to spinbox (cents → dollars)
+                current_cents = self._stepper.value()
+                self.amount_spin.blockSignals(True)
+                self.amount_spin.setValue(cents_to_dollars(current_cents))
+                self.amount_spin.blockSignals(False)
+                self._stepper.setVisible(False)
+                self.denom_hint.setVisible(False)
+                self.amount_spin.setVisible(True)
+                self.amount_spin.setSingleStep(1.00)
+                self._stepper_active = False
+            else:
+                self.denom_hint.setVisible(False)
+                self.amount_spin.setSingleStep(1.00)
+
+    def _get_active_charge(self) -> int:
+        """Return charge in integer cents from whichever input is active."""
+        if self._stepper_active:
+            return self._stepper.value()
+        return dollars_to_cents(self.amount_spin.value())
+
+    def _set_active_charge(self, cents: int):
+        """Set charge in integer cents on whichever input is active."""
+        if self._stepper_active:
+            self._stepper.setValue(cents)
+        else:
+            self.amount_spin.blockSignals(True)
+            self.amount_spin.setValue(cents_to_dollars(cents))
+            self.amount_spin.blockSignals(False)
+
+    def set_max_charge(self, max_charge_cents: int):
+        """Cap the input to prevent exceeding remaining order balance.
+
+        *max_charge_cents* is in integer cents.
+        Blocks signals to prevent cascading updates when setMaximum()
+        clamps the current value.
+        """
+        if self._stepper_active:
+            self._stepper.setMaxCharge(max_charge_cents)
+        else:
+            self.amount_spin.blockSignals(True)
+            self.amount_spin.setMaximum(max(cents_to_dollars(max_charge_cents), 0.0))
+            self.amount_spin.blockSignals(False)
 
     def _recompute(self):
         """Recompute FAM Match and Total from the charge amount input."""
         method = self.get_selected_method()
-        charge = self.amount_spin.value()
-        if method:
-            match_pct = method['match_percent']
-        else:
-            match_pct = 0.0
-        match_amt = round(charge * (match_pct / 100.0), 2)
-        total = round(charge + match_amt, 2)
-        self.match_amount_label.setText(f"${match_amt:.2f}")
-        self.total_label.setText(f"${total:.2f}")
+        charge = self._get_active_charge()  # integer cents
+        match_pct = method['match_percent'] if method else 0.0
+        total = charge_to_method_amount(charge, match_pct)  # integer cents
+        match_amt = total - charge  # integer cents
+        self.match_amount_label.setText(format_dollars(match_amt))
+        self.total_label.setText(format_dollars(total))
 
     def get_selected_method(self):
         return self.method_combo.currentData()
 
     def get_data(self):
+        """Return payment data with all monetary values in integer cents."""
         method = self.get_selected_method()
         if not method:
             return None
-        charge = self.amount_spin.value()
+        charge = self._get_active_charge()  # integer cents
         match_pct = method['match_percent']
-        match_amount = round(charge * (match_pct / 100.0), 2)
-        method_amount = charge_to_method_amount(charge, match_pct)
+        method_amount = charge_to_method_amount(charge, match_pct)  # integer cents
+        match_amount = method_amount - charge  # integer cents
         # Return list of photo source paths (filtered to non-None)
         photo_paths = [p for p in self._photo_source_paths if p]
         return {
@@ -259,9 +454,12 @@ class PaymentRow(QFrame):
                 item.setForeground(normal)
 
     def set_display_values(self, match_amount, total):
-        """Override the displayed match and total values (e.g., after cap)."""
-        self.match_amount_label.setText(f"${match_amount:.2f}")
-        self.total_label.setText(f"${total:.2f}")
+        """Override the displayed match and total values (e.g., after cap).
+
+        Values are in integer cents.
+        """
+        self.match_amount_label.setText(format_dollars(match_amount))
+        self.total_label.setText(format_dollars(total))
 
     def set_data(self, payment_method_id, method_amount):
         """Set the row from existing data (method_amount is total allocation from DB)."""
@@ -270,24 +468,27 @@ class PaymentRow(QFrame):
             if m and m['id'] == payment_method_id:
                 self.method_combo.setCurrentIndex(i)
                 break
-        # Convert total allocation back to charge amount for the spinbox
+        # Convert total allocation back to charge amount
         method = self.get_selected_method()
         if method:
             charge = method_amount_to_charge(method_amount, method['match_percent'])
         else:
             charge = method_amount
-        self.amount_spin.setValue(charge)
+        self._set_active_charge(charge)
 
     def validate_denomination(self):
         """Return error string if charge violates denomination, else None."""
+        # Stepper enforces valid denominations by construction
+        if self._stepper_active:
+            return None
         method = self.get_selected_method()
         if not method or not method.get('denomination'):
             return None
-        charge = self.amount_spin.value()
-        denom = method['denomination']
-        if charge > 0 and round(charge % denom, 2) != 0:
-            return (f"{method['name']} must be in ${denom:.0f} increments "
-                    f"(entered ${charge:.2f})")
+        charge = self._get_active_charge()  # integer cents
+        denom = method['denomination']  # integer cents
+        if charge > 0 and charge % denom != 0:
+            return (f"{method['name']} must be in {format_dollars(denom)} increments "
+                    f"(entered {format_dollars(charge)})")
         return None
 
     # ── Photo receipt (multi-photo aware) ────────────────────
@@ -295,16 +496,19 @@ class PaymentRow(QFrame):
     def _get_check_count(self) -> int:
         """Return the number of checks/photos expected for this payment row.
 
-        For denominated methods, count = int(charge / denomination).
-        Otherwise 1.  Returns 0 when charge is 0 or no method selected.
+        When stepper is active, reads the count directly.
+        Otherwise, count = int(charge_cents / denomination_cents) or 1.
+        Returns 0 when charge is 0 or no method selected.
         """
         method = self.get_selected_method()
         if not method:
             return 0
-        charge = self.amount_spin.value()
+        if self._stepper_active:
+            return self._stepper.count()
+        charge = self._get_active_charge()  # integer cents
         if charge <= 0:
             return 0
-        denom = method.get('denomination')
+        denom = method.get('denomination')  # integer cents
         if denom and denom > 0:
             return max(1, int(charge / denom))
         return 1
@@ -420,8 +624,8 @@ class PaymentRow(QFrame):
         method = self.get_selected_method()
         if not method or method.get('photo_required') != 'Mandatory':
             return None
-        charge = self.amount_spin.value()
-        if charge <= 0:
+        charge_cents = self._get_active_charge()
+        if charge_cents <= 0:
             return None  # No charge = no photo required
         count = self._get_check_count()
         filled = sum(1 for p in self._photo_source_paths if p)

@@ -209,7 +209,7 @@ class TestTriggers:
         with pytest.raises(sqlite3.IntegrityError, match="receipt_total must be > 0"):
             conn.execute(
                 "INSERT INTO transactions (fam_transaction_id, market_day_id, vendor_id, receipt_total)"
-                " VALUES ('FAM-001', 1, 1, -5.00)"
+                " VALUES ('FAM-001', 1, 1, -500)"
             )
 
     def test_transaction_positive_receipt_total_ok(self, fresh_db):
@@ -218,7 +218,7 @@ class TestTriggers:
         self._seed(conn)
         conn.execute(
             "INSERT INTO transactions (fam_transaction_id, market_day_id, vendor_id, receipt_total)"
-            " VALUES ('FAM-001', 1, 1, 10.00)"
+            " VALUES ('FAM-001', 1, 1, 1000)"
         )
         conn.commit()  # Should not raise
 
@@ -228,7 +228,7 @@ class TestTriggers:
         self._seed(conn)
         conn.execute(
             "INSERT INTO transactions (id, fam_transaction_id, market_day_id, vendor_id, receipt_total)"
-            " VALUES (1, 'FAM-001', 1, 1, 10.00)"
+            " VALUES (1, 'FAM-001', 1, 1, 1000)"
         )
         conn.execute(
             "INSERT INTO payment_methods (id, name, match_percent) VALUES (1, 'Cash', 0)"
@@ -239,7 +239,7 @@ class TestTriggers:
                 "INSERT INTO payment_line_items"
                 " (transaction_id, payment_method_id, method_name_snapshot,"
                 "  match_percent_snapshot, method_amount, match_amount, customer_charged)"
-                " VALUES (1, 1, 'Cash', 0, -5.00, 0, -5.00)"
+                " VALUES (1, 1, 'Cash', 0, -500, 0, -500)"
             )
 
     def test_fmnp_amount_must_be_positive(self, fresh_db):
@@ -259,7 +259,7 @@ class TestTriggers:
         with pytest.raises(sqlite3.IntegrityError, match="FMNP amount must be > 0"):
             conn.execute(
                 "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by)"
-                " VALUES (1, 1, -10.00, 'Admin')"
+                " VALUES (1, 1, -1000, 'Admin')"
             )
 
     def test_fmnp_update_amount_must_be_positive(self, fresh_db):
@@ -268,7 +268,7 @@ class TestTriggers:
         self._seed(conn)
         conn.execute(
             "INSERT INTO fmnp_entries (id, market_day_id, vendor_id, amount, entered_by)"
-            " VALUES (1, 1, 1, 5.00, 'Admin')"
+            " VALUES (1, 1, 1, 500, 'Admin')"
         )
         conn.commit()
         with pytest.raises(sqlite3.IntegrityError, match="FMNP amount must be > 0"):
@@ -582,7 +582,7 @@ class TestDefaults:
         conn.commit()
         row = conn.execute("SELECT * FROM markets WHERE name='Test'").fetchone()
         assert row["is_active"] == 1
-        assert row["daily_match_limit"] == 100.00
+        assert row["daily_match_limit"] == 10000  # $100.00 in cents
         assert row["match_limit_active"] == 1
 
     def test_vendor_defaults(self, fresh_db):
@@ -620,7 +620,7 @@ class TestDefaults:
         )
         conn.execute(
             "INSERT INTO transactions (fam_transaction_id, market_day_id, vendor_id, receipt_total)"
-            " VALUES ('FAM-001', 1, 1, 10.00)"
+            " VALUES ('FAM-001', 1, 1, 1000)"
         )
         conn.commit()
         row = conn.execute("SELECT * FROM transactions").fetchone()
@@ -636,7 +636,7 @@ class TestDefaults:
         )
         conn.execute(
             "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by)"
-            " VALUES (1, 1, 5.00, 'Admin')"
+            " VALUES (1, 1, 500, 'Admin')"
         )
         conn.commit()
         row = conn.execute("SELECT * FROM fmnp_entries").fetchone()

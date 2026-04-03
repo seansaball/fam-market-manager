@@ -26,6 +26,7 @@ from fam.ui.helpers import (
     make_field_label, make_section_label, make_item, make_action_btn,
     configure_table, NoScrollDoubleSpinBox, NoScrollComboBox
 )
+from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
 
 # 3-digit prefixes not assigned by USPS — rejects obviously invalid zips
 # without requiring a full database or API call.
@@ -492,7 +493,7 @@ class ReceiptIntakeScreen(QWidget):
             )
             for c in customers:
                 label = c['customer_label']
-                match_str = f"${c['total_match']:.2f}"
+                match_str = format_dollars(c['total_match'])
                 display = f"{label}  \u2014  {c['receipt_count']} receipt(s), {match_str} matched"
                 self.returning_combo.addItem(display, userData=label)
 
@@ -603,10 +604,11 @@ class ReceiptIntakeScreen(QWidget):
 
         try:
             self._ensure_customer_order()
+            receipt_total_cents = dollars_to_cents(receipt_total)
             txn_id, fam_txn_id = create_transaction(
                 market_day_id=self._active_market_day['id'],
                 vendor_id=vendor_id,
-                receipt_total=receipt_total,
+                receipt_total=receipt_total_cents,
                 notes=notes_text,
                 market_day_date=self._active_market_day['date'],
                 customer_order_id=self._current_order_id,
@@ -616,7 +618,7 @@ class ReceiptIntakeScreen(QWidget):
                 'txn_id': txn_id,
                 'fam_txn_id': fam_txn_id,
                 'vendor_name': vendor_name,
-                'receipt_total': receipt_total,
+                'receipt_total': receipt_total_cents,
                 'notes': notes_text or '',
             })
 
@@ -651,12 +653,12 @@ class ReceiptIntakeScreen(QWidget):
         self.receipts_table.setSortingEnabled(False)
         self.receipts_table.setRowCount(len(self._order_receipts))
 
-        running_total = 0.0
+        running_total_cents = 0
         for i, r in enumerate(self._order_receipts):
             self.receipts_table.setItem(i, 0, make_item(r['fam_txn_id']))
             self.receipts_table.setItem(i, 1, make_item(r['vendor_name']))
             self.receipts_table.setItem(
-                i, 2, make_item(f"${r['receipt_total']:.2f}", r['receipt_total'])
+                i, 2, make_item(format_dollars(r['receipt_total']), r['receipt_total'])
             )
             self.receipts_table.setItem(i, 3, make_item(r.get('notes', '')))
 
@@ -666,10 +668,10 @@ class ReceiptIntakeScreen(QWidget):
             )
             self.receipts_table.setCellWidget(i, 4, remove_btn)
             self.receipts_table.setRowHeight(i, 42)
-            running_total += r['receipt_total']
+            running_total_cents += r['receipt_total']
 
         self.receipts_table.setSortingEnabled(True)
-        self.running_total_label.setText(f"${running_total:.2f}")
+        self.running_total_label.setText(format_dollars(running_total_cents))
         count = len(self._order_receipts)
         self.receipts_header.setText(
             f"Receipts for Customer {self._current_customer_label or '—'}:  "
@@ -738,7 +740,7 @@ class ReceiptIntakeScreen(QWidget):
                 str(order['receipt_count']), order['receipt_count']
             ))
             self.pending_table.setItem(i, 2, make_item(
-                f"${order['order_total']:.2f}", order['order_total']
+                format_dollars(order['order_total']), order['order_total']
             ))
             self.pending_table.setItem(i, 3, make_item(order['status']))
 

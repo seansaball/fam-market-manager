@@ -3,9 +3,8 @@
 import logging
 import platform
 import time
-from datetime import datetime
-
 from fam.sync.base import SyncBackend, SyncResult
+from fam.utils.timezone import eastern_timestamp
 from fam.utils.app_settings import (
     get_market_code, get_device_id, set_setting, get_setting,
 )
@@ -74,7 +73,7 @@ class SyncManager:
 
         # Record outcome in app_settings
         failed = [n for n, r in results.items() if not r.success]
-        set_setting('last_sync_at', datetime.now().isoformat())
+        set_setting('last_sync_at', eastern_timestamp())
         if failed:
             set_setting('last_sync_error',
                         f"Failed: {', '.join(failed)}")
@@ -128,8 +127,7 @@ class SyncManager:
         row = {
             'device_id': did,
             'App Version': __version__,
-            'Last Sync': datetime.now().isoformat(sep=' ',
-                                                  timespec='seconds'),
+            'Last Sync': eastern_timestamp(),
             'Hostname': platform.node(),
             'OS': platform.platform(),
             'Status': status,

@@ -1777,9 +1777,9 @@ class TestSchemaMigrationV18:
         col_names = {r['name'] for r in rows}
         assert col_names == {'content_hash', 'relative_path', 'created_at'}
 
-    def test_version_is_21(self):
+    def test_version_is_22(self):
         from fam.database.schema import CURRENT_SCHEMA_VERSION
-        assert CURRENT_SCHEMA_VERSION == 21
+        assert CURRENT_SCHEMA_VERSION == 22
 
 
 # ══════════════════════════════════════════════════════════════════

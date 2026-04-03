@@ -73,7 +73,7 @@ def seed_sample_data():
     # Payment Methods
     payment_methods = [
         ("SNAP", 100.0, 1, 1, None, None),
-        ("FMNP", 100.0, 1, 2, 5.00, 'Optional'),
+        ("FMNP", 100.0, 1, 2, 500, 'Optional'),
         ("Food RX", 100.0, 1, 3, None, None),
         ("JH Food Bucks", 100.0, 1, 4, None, None),
         ("JH Tokens", 100.0, 1, 5, None, None),

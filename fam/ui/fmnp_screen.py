@@ -20,6 +20,7 @@ from fam.models.fmnp import (
 )
 from fam.models.audit import log_action
 from fam.utils.export import write_ledger_backup
+from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
 from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG, SUBTITLE_GRAY, ACCENT_GREEN
 from fam.ui.helpers import (
     make_field_label, make_item, make_section_label, make_action_btn,
@@ -198,10 +199,11 @@ class FMNPScreen(QWidget):
         fmnp = get_payment_method_by_name('FMNP')
         if fmnp:
             if fmnp.get('denomination'):
-                denom = fmnp['denomination']
-                self._fmnp_denomination = denom
-                self.amount_spin.setSingleStep(denom)
-                self.denom_hint.setText(f"(${denom:g} increments)")
+                denom_cents = fmnp['denomination']  # DB stores cents
+                self._fmnp_denomination = denom_cents
+                denom_dollars = cents_to_dollars(denom_cents)
+                self.amount_spin.setSingleStep(denom_dollars)
+                self.denom_hint.setText(f"({format_dollars(denom_cents)} increments)")
                 self.denom_hint.setVisible(True)
             else:
                 self.amount_spin.setSingleStep(1.00)
@@ -275,7 +277,8 @@ class FMNPScreen(QWidget):
 
             self.table.setItem(i, 0, make_item(str(e['id']), e['id']))
             self.table.setItem(i, 1, make_item(e['vendor_name']))
-            self.table.setItem(i, 2, make_item(f"${e['amount']:.2f}", e['amount']))
+            amount_dollars = cents_to_dollars(e['amount'])
+            self.table.setItem(i, 2, make_item(f"${amount_dollars:.2f}", amount_dollars))
             self.table.setItem(i, 3, make_item(str(e.get('check_count') or ''),
                                                 e.get('check_count') or 0))
             self.table.setItem(i, 4, make_item(e['entered_by']))
@@ -330,11 +333,11 @@ class FMNPScreen(QWidget):
 
     def _get_expected_photo_count(self) -> int:
         """Return the number of photo slots based on amount / denomination."""
-        amount = self.amount_spin.value()
-        if amount <= 0:
+        amount_cents = dollars_to_cents(self.amount_spin.value())
+        if amount_cents <= 0:
             return 1
         if self._fmnp_denomination and self._fmnp_denomination > 0:
-            return max(1, int(amount / self._fmnp_denomination))
+            return max(1, int(amount_cents / self._fmnp_denomination))
         return 1
 
     def _on_amount_changed(self):
@@ -580,14 +583,14 @@ class FMNPScreen(QWidget):
             self._show_error("Amount must be greater than $0.00.")
             return
 
-        # Validate denomination constraint
+        # Validate denomination constraint (both in cents for exact integer math)
+        amount_cents = dollars_to_cents(amount)
         if self._fmnp_denomination and self._fmnp_denomination > 0:
-            denom = self._fmnp_denomination
-            remainder = round(amount % denom, 2)
-            if remainder != 0:
+            denom = self._fmnp_denomination  # already in cents
+            if amount_cents % denom != 0:
                 self._show_error(
-                    f"Amount must be a multiple of ${denom:g} (FMNP denomination). "
-                    f"e.g. ${denom:g}, ${denom * 2:g}, ${denom * 3:g}"
+                    f"Amount must be a multiple of {format_dollars(denom)} (FMNP denomination). "
+                    f"e.g. {format_dollars(denom)}, {format_dollars(denom * 2)}, {format_dollars(denom * 3)}"
                 )
                 return
 
@@ -629,21 +632,21 @@ class FMNPScreen(QWidget):
                 new_encoded = encode_photo_paths(final_paths)
                 old_encoded = old.get('photo_path')
                 if changed or new_encoded != old_encoded:
-                    update_fmnp_entry(self._editing_id, amount=amount,
+                    update_fmnp_entry(self._editing_id, amount=amount_cents,
                                       vendor_id=vendor_id,
                                       check_count=check_count, notes=notes,
                                       photo_path=new_encoded)
                 else:
-                    update_fmnp_entry(self._editing_id, amount=amount,
+                    update_fmnp_entry(self._editing_id, amount=amount_cents,
                                       vendor_id=vendor_id,
                                       check_count=check_count, notes=notes)
 
                 log_action('fmnp_entries', self._editing_id, 'UPDATE', entered_by,
                             field_name='amount', old_value=old.get('amount'),
-                            new_value=amount, reason_code='edit', notes='FMNP entry updated')
+                            new_value=amount_cents, reason_code='edit', notes='FMNP entry updated')
                 self._cancel_edit()
             else:
-                entry_id = create_fmnp_entry(md_id, vendor_id, amount,
+                entry_id = create_fmnp_entry(md_id, vendor_id, amount_cents,
                                               entered_by, check_count, notes)
                 log_action('fmnp_entries', entry_id, 'INSERT', entered_by,
                            notes='FMNP entry created')
@@ -677,7 +680,7 @@ class FMNPScreen(QWidget):
         if not entry:
             return
         self._editing_id = entry_id
-        self.amount_spin.setValue(entry['amount'])
+        self.amount_spin.setValue(cents_to_dollars(entry['amount']))
         self.check_count_spin.setValue(entry.get('check_count') or 0)
         self.notes_input.setText(entry.get('notes') or '')
 

@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QInputDialog
 )
 from PySide6.QtCore import Qt, Signal
-from datetime import date
+from fam.utils.timezone import eastern_today
 
 from fam.database.connection import get_connection
 from fam.models.market_day import (
@@ -21,6 +21,7 @@ from fam.ui.helpers import (
     make_field_label as _make_field_label_fn, make_item, make_section_label,
     configure_table, NoScrollComboBox
 )
+from fam.utils.money import cents_to_dollars
 
 
 class MarketDayScreen(QWidget):
@@ -228,7 +229,8 @@ class MarketDayScreen(QWidget):
         for i, t in enumerate(txns):
             self.txn_table.setItem(i, 0, make_item(t['fam_transaction_id']))
             self.txn_table.setItem(i, 1, make_item(t['vendor_name']))
-            self.txn_table.setItem(i, 2, make_item(f"${t['receipt_total']:.2f}", t['receipt_total']))
+            rt_dollars = cents_to_dollars(t['receipt_total'])
+            self.txn_table.setItem(i, 2, make_item(f"${rt_dollars:.2f}", rt_dollars))
             self.txn_table.setItem(i, 3, make_item(t['status']))
             self.txn_table.setItem(i, 4, make_item(str(t.get('created_at', ''))))
             self.txn_table.setRowHeight(i, 30)
@@ -262,7 +264,7 @@ class MarketDayScreen(QWidget):
             )
             return
 
-        today = date.today().isoformat()
+        today = eastern_today().isoformat()
 
         # Check if a market day already exists for this market+date (prevents duplicates)
         existing = find_market_day(market_id, today)

@@ -4,6 +4,7 @@ import logging
 
 from fam import __version__ as _app_version
 from fam.database.connection import get_connection
+from fam.utils.timezone import eastern_timestamp
 
 logger = logging.getLogger('fam.models.audit')
 
@@ -36,13 +37,13 @@ def log_action(table_name, record_id, action, changed_by,
     conn.execute(
         """INSERT INTO audit_log
            (table_name, record_id, action, field_name, old_value, new_value,
-            reason_code, notes, changed_by, app_version, device_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            reason_code, notes, changed_by, app_version, device_id, changed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (table_name, record_id, action, field_name,
          str(old_value) if old_value is not None else None,
          str(new_value) if new_value is not None else None,
          reason_code, notes, changed_by, _app_version,
-         get_device_id() or '')
+         get_device_id() or '', eastern_timestamp())
     )
     if commit:
         conn.commit()

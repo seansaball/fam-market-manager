@@ -72,7 +72,7 @@ python run.py
 python -m pytest tests/ -v
 ```
 
-1095 tests across 18 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, settings import/export, cloud sync, auto-update, charge conversion, denomination validation, photo storage, multi-photo workflows, photo deduplication, and FMNP sync integration.
+1470 tests across 24 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, settings import/export, cloud sync, auto-update, charge conversion, denomination validation, photo storage, multi-photo workflows, photo deduplication, FMNP sync integration, integer-cents boundary validation, three-way reconciliation (DB/Ledger/Sheets), automated UI testing (payment screen, workflows, market-day simulation), max-cap clamping, market day lifecycle guards, adjustment edge cases, payment method CRUD safety, match-cap-aware charge input edge cases, and end-to-end production readiness tests (payment confirmation pipelines, draft save/resume, returning customer match limits, void-after-confirm exclusion, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent reconciliation, high-volume market day simulation, report-screen state changes).
 
 ## Building the Executable
 
@@ -96,6 +96,10 @@ Output: `dist\FAM Manager\FAM Manager.exe`
 
 | Version | Summary |
 |---------|---------|
+| v1.9.2 | Production readiness release: exhaustive financial audit, 50 new end-to-end UI integration tests, three-way reconciliation verified, production readiness assessment for board review, 1470 tests across 24 files |
+| v1.9.1 | Fix: match-cap-aware charge input — daily match limit now correctly raises charge field max when match is capped; auto-distribute and collect-line-items also cap-aware; 24 new edge case tests, 1365 tests across 23 files |
+| v1.9.0 | Automated UI test suite (pytest-qt), model-level market day lifecycle guard, max-cap clamping validation, payment method CRUD safety tests, comprehensive documentation lock-in, developer guardrails and known-limitations guide, 1333 tests across 23 files |
+| v1.8.6 | Integer-cents financial engine: all monetary storage/computation in integer cents (schema v22), penny reconciliation, FMNP check splitting via integer division, three-way reconciliation tests (DB/Ledger/Sheets), 1218 tests across 19 files |
 | v1.8.5 | Production hardening: Drive retry logic, FMNP dual-source sync (per-check rows), scrollable photo slots, resizable report columns, auto re-upload of deleted Drive photos, inherited folder permissions, 3 new DB indexes, 1095 tests |
 | v1.8.0 | Photo receipts, multi-photo FMNP, Google Drive photo sync, 3-layer SHA-256 dedup, charge-based payment input, agent tracker, denomination validation, 1036 tests |
 | v1.7.0 | Google Sheets cloud sync, auto-update from GitHub Releases, 618 tests |

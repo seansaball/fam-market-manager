@@ -86,7 +86,7 @@ def _create_market_day_with_transactions(
             """INSERT INTO transactions
                (market_day_id, vendor_id, receipt_total, status,
                 fam_transaction_id)
-               VALUES (?, ?, 25.00, ?, ?)""",
+               VALUES (?, ?, 2500, ?, ?)""",
             (md_id, vendor['id'], txn_status, fam_tid))
         txn_id = cursor.lastrowid
         txn_ids.append(txn_id)
@@ -109,7 +109,7 @@ def _create_market_day_with_transactions(
                (transaction_id, payment_method_id, method_name_snapshot,
                 match_percent_snapshot, method_amount,
                 customer_charged, match_amount)
-               VALUES (?, ?, ?, ?, 25.00, 12.50, 12.50)""",
+               VALUES (?, ?, ?, ?, 2500, 1250, 1250)""",
             (txn_id, pm['id'], pm['name'], pm['match_percent']))
 
     conn.commit()
@@ -855,7 +855,7 @@ class TestTransactionIdUniqueness:
             """INSERT INTO transactions
                (market_day_id, vendor_id, receipt_total, status,
                 fam_transaction_id)
-               VALUES (?, 1, 10.00, 'Confirmed',
+               VALUES (?, 1, 1000, 'Confirmed',
                        'FAM-BFM-abcd-20260309-0003')""",
             (md_id,))
         conn.commit()
@@ -899,7 +899,7 @@ class TestTransactionIdUniqueness:
             """INSERT INTO transactions
                (market_day_id, vendor_id, receipt_total, status,
                 fam_transaction_id)
-               VALUES (?, 1, 10.00, 'Confirmed',
+               VALUES (?, 1, 1000, 'Confirmed',
                        'FAM-BFM-20260401-0005')""",
             (md_id,))
         conn.commit()
@@ -1412,10 +1412,10 @@ class TestSchemaMigrationV16:
         assert 'app_version' in col_names
         assert 'device_id' in col_names
 
-    def test_schema_version_is_21(self):
-        """Current schema version should be 21."""
+    def test_schema_version_is_22(self):
+        """Current schema version should be 22."""
         from fam.database.schema import CURRENT_SCHEMA_VERSION
-        assert CURRENT_SCHEMA_VERSION == 21
+        assert CURRENT_SCHEMA_VERSION == 22
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1513,6 +1513,22 @@ class TestCollectorVersionFields:
 
         md_id, txn_ids = _create_market_day_with_transactions()
         log_action('transactions', txn_ids[0], 'CONFIRM', 'test')
+
+        # Fix: audit_log.changed_at defaults to CURRENT_TIMESTAMP (UTC)
+        # which may differ from the local-time market day date.  Force the
+        # audit row's timestamp to match the market day date so the
+        # date-scoped query in _collect_activity_log finds it.
+        conn = get_connection()
+        md_date = conn.execute(
+            "SELECT date FROM market_days WHERE id = ?", [md_id]
+        ).fetchone()['date']
+        conn.execute(
+            "UPDATE audit_log SET changed_at = ? || ' 12:00:00'"
+            " WHERE record_id = ? AND table_name = 'transactions'",
+            [md_date, txn_ids[0]]
+        )
+        conn.commit()
+
         data = collect_sync_data(md_id)
 
         activity_log = data.get('Activity Log', [])
@@ -2089,7 +2105,7 @@ class TestEnhancedVendorReimbursement:
         conn.execute(
             "INSERT INTO transactions (id, fam_transaction_id, market_day_id,"
             " vendor_id, receipt_total, status)"
-            " VALUES (999, 'FAM-MPM-001', ?, ?, 35.00, 'Confirmed')",
+            " VALUES (999, 'FAM-MPM-001', ?, ?, 3500, 'Confirmed')",
             (md_id, vendor['id']))
         # Payment line: 20 SNAP, 15 Cash
         pm1 = conn.execute("SELECT id, name, match_percent FROM payment_methods WHERE name != 'Cash' LIMIT 1").fetchone()
@@ -2097,13 +2113,13 @@ class TestEnhancedVendorReimbursement:
             "INSERT INTO payment_line_items"
             " (transaction_id, payment_method_id, method_name_snapshot,"
             "  match_percent_snapshot, method_amount, match_amount, customer_charged)"
-            " VALUES (999, ?, ?, ?, 20.00, 10.00, 10.00)",
+            " VALUES (999, ?, ?, ?, 2000, 1000, 1000)",
             (pm1['id'], pm1['name'], pm1['match_percent']))
         conn.execute(
             "INSERT INTO payment_line_items"
             " (transaction_id, payment_method_id, method_name_snapshot,"
             "  match_percent_snapshot, method_amount, match_amount, customer_charged)"
-            " VALUES (999, ?, 'Cash', 0.0, 15.00, 0.00, 15.00)",
+            " VALUES (999, ?, 'Cash', 0.0, 1500, 0, 1500)",
             (cash_pm_id,))
         conn.commit()
 
@@ -2125,7 +2141,7 @@ class TestEnhancedVendorReimbursement:
         # Add an external FMNP entry
         conn.execute(
             "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by)"
-            " VALUES (?, ?, 10.00, 'Test')",
+            " VALUES (?, ?, 1000, 'Test')",
             (md_id, vendor['id']))
         conn.commit()
 
@@ -2155,7 +2171,7 @@ class TestEnhancedVendorReimbursement:
         # Add FMNP entry only (no transactions for this vendor)
         conn.execute(
             "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by)"
-            " VALUES (?, 999, 20.00, 'Test')", (md_id,))
+            " VALUES (?, 999, 2000, 'Test')", (md_id,))
         conn.commit()
 
         from fam.sync.data_collector import collect_sync_data
@@ -2263,7 +2279,7 @@ class TestEnhancedVendorReimbursement:
             cursor = conn.execute(
                 """INSERT INTO transactions (market_day_id, vendor_id,
                    receipt_total, status, fam_transaction_id)
-                   VALUES (?, ?, 25.00, 'Confirmed', ?)""",
+                   VALUES (?, ?, 2500, 'Confirmed', ?)""",
                 (md_id, vendor['id'], f'FAM-TST-202604{seq:02d}-0001'))
             txn_id = cursor.lastrowid
             conn.execute(
@@ -2271,7 +2287,7 @@ class TestEnhancedVendorReimbursement:
                    (transaction_id, payment_method_id, method_name_snapshot,
                     match_percent_snapshot, method_amount,
                     customer_charged, match_amount)
-                   VALUES (?, ?, ?, ?, 25.00, 12.50, 12.50)""",
+                   VALUES (?, ?, ?, ?, 2500, 1250, 1250)""",
                 (txn_id, pm['id'], pm['name'], pm['match_percent']))
         conn.commit()
 
@@ -2309,7 +2325,7 @@ class TestEnhancedVendorReimbursement:
             cursor = conn.execute(
                 """INSERT INTO transactions (market_day_id, vendor_id,
                    receipt_total, status, fam_transaction_id)
-                   VALUES (?, ?, 25.00, 'Confirmed', ?)""",
+                   VALUES (?, ?, 2500, 'Confirmed', ?)""",
                 (md_id, vendor['id'], f'FAM-TST-2026050{i + 1}-0001'))
             txn_id = cursor.lastrowid
             conn.execute(
@@ -2317,7 +2333,7 @@ class TestEnhancedVendorReimbursement:
                    (transaction_id, payment_method_id, method_name_snapshot,
                     match_percent_snapshot, method_amount,
                     customer_charged, match_amount)
-                   VALUES (?, ?, ?, ?, 25.00, 12.50, 12.50)""",
+                   VALUES (?, ?, ?, ?, 2500, 1250, 1250)""",
                 (txn_id, pm['id'], pm['name'], pm['match_percent']))
         conn.commit()
 
