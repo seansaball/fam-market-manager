@@ -13,7 +13,8 @@ from fam.models.customer_order import (
     update_customer_order_status
 )
 from fam.models.transaction import (
-    create_transaction, confirm_transaction, save_payment_line_items
+    create_transaction, confirm_transaction, save_payment_line_items,
+    update_transaction
 )
 
 
@@ -157,6 +158,36 @@ class TestGetCustomerPriorMatch:
         _create_confirmed_order(1, 5000, 2500)   # C-002
         assert get_customer_prior_match('C-001', 1) == 8000
         assert get_customer_prior_match('C-002', 1) == 2500
+
+    def test_adjusted_order_still_counted(self):
+        """An adjusted transaction must still count toward prior match."""
+        order_id, _ = _create_confirmed_order(1, 8000, 4000)
+        # Simulate admin adjustment — status changes to 'Adjusted'
+        conn = get_connection()
+        conn.execute(
+            "UPDATE transactions SET status='Adjusted' WHERE customer_order_id=?",
+            (order_id,))
+        conn.execute(
+            "UPDATE customer_orders SET status='Adjusted' WHERE id=?",
+            (order_id,))
+        conn.commit()
+        # Prior match must still reflect the $40 match from the adjusted order
+        assert get_customer_prior_match('C-001', 1) == 4000
+
+    def test_adjusted_order_in_confirmed_customers(self):
+        """Adjusted orders appear in get_confirmed_customers_for_market_day."""
+        order_id, _ = _create_confirmed_order(1, 6000, 3000)
+        conn = get_connection()
+        conn.execute(
+            "UPDATE transactions SET status='Adjusted' WHERE customer_order_id=?",
+            (order_id,))
+        conn.execute(
+            "UPDATE customer_orders SET status='Adjusted' WHERE id=?",
+            (order_id,))
+        conn.commit()
+        customers = get_confirmed_customers_for_market_day(1)
+        assert len(customers) == 1
+        assert customers[0]['total_match'] == 3000
 
 
 # ──────────────────────────────────────────────────────────────

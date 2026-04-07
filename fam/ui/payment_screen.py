@@ -1367,6 +1367,27 @@ class PaymentScreen(QWidget):
                             target['method_amount'] - target['match_amount']
                         )
 
+        # ── Penny reconciliation per transaction ─────────────────────
+        # The method_amounts collected from payment rows are computed
+        # independently per row.  Their sum can be ±1¢ off from the
+        # receipt_total due to rounding in charge_to_method_amount().
+        # Absorb the gap into the FAM match of the largest matched
+        # line item so that SUM(method_amount) == receipt_total exactly.
+        for t, txn_items in zip(self._order_transactions, all_txn_items):
+            txn_receipt = t['receipt_total']  # integer cents
+            txn_alloc = sum(li['method_amount'] for li in txn_items)
+            gap = txn_receipt - txn_alloc
+            if gap != 0 and abs(gap) <= len(txn_items):
+                # Find the matched line item with the largest method_amount
+                matched = [li for li in txn_items if li['match_percent_snapshot'] > 0]
+                target = max(
+                    matched or txn_items,
+                    key=lambda li: li['method_amount'],
+                )
+                target['method_amount'] += gap
+                target['match_amount'] += gap
+                # customer_charged stays the same — FAM absorbs the penny
+
         # Store photos from payment rows (if any) and attach paths to line items.
         # Photos are stored once and reused across multi-receipt transactions.
         # Supports multiple photos per payment method (e.g. 3 FMNP checks = 3 photos).

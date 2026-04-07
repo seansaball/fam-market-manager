@@ -5,7 +5,7 @@
 > needs to understand, maintain, or extend the project **without** access to
 > previous conversation history. Keep this file up to date with every commit.
 >
-> **Last updated:** 2026-04-03 — v1.9.2
+> **Last updated:** 2026-04-07 — v1.9.3
 
 ---
 
@@ -28,7 +28,7 @@ dedicated Windows PC.
 | Packaging     | PyInstaller (Windows .exe)          |
 | Cloud Sync    | gspread + google-auth               |
 | Auto-Update   | urllib.request (stdlib)              |
-| Tests         | pytest + pytest-qt (1470 tests)     |
+| Tests         | pytest + pytest-qt (1473 tests)     |
 
 ---
 
@@ -37,7 +37,7 @@ dedicated Windows PC.
 ```
 fam-market-manager/
 ├── fam/                          # Application package
-│   ├── __init__.py               # __version__ = "1.9.2"
+│   ├── __init__.py               # __version__ = "1.9.3"
 │   ├── app.py                    # Qt app entry, data dir, exception handler
 │   ├── settings_io.py            # .fam file import/export
 │   ├── database/
@@ -90,7 +90,7 @@ fam-market-manager/
 ├── tests/
 │   ├── test_match_formula.py         # 98 tests — formula validation, edge cases, real-world scenarios
 │   ├── test_match_limit.py           # 28 tests — daily cap logic, proportional reduction, penny reconciliation under cap, cap=0/1¢ boundaries
-│   ├── test_returning_customer.py    # 21 tests — multi-visit tracking
+│   ├── test_returning_customer.py    # 23 tests — multi-visit tracking
 │   ├── test_adjustments.py           # 71 tests — adjustments, voids, ledger
 │   ├── test_fmnp_reports.py          # 38 tests — FMNP entries and reports
 │   ├── test_models.py                # 130 tests — model CRUD operations
@@ -110,7 +110,7 @@ fam-market-manager/
 │   ├── test_ui_payment.py            # 37 tests — payment screen UI (pytest-qt): summary cards, multi-method, stepper, auto-distribute
 │   ├── test_ui_workflows.py          # 31 tests — end-to-end market day simulation, returning customer cap workflows, void exclusion
 │   ├── test_ui_guards.py             # 66 tests — max-cap clamping, market day lifecycle guards, adjustment edge cases, match-cap-aware charge input
-│   ├── test_ui_expanded.py           # 50 tests — production readiness: payment confirm E2E, draft save/resume, returning customer match limits, void-after-confirm, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent pipeline, high-volume reconciliation, report state changes
+│   ├── test_ui_expanded.py           # 51 tests — production readiness: payment confirm E2E, draft save/resume, returning customer match limits, void-after-confirm, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent pipeline, high-volume reconciliation, report state changes
 │   └── test_payment_method_safety.py # 23 tests — payment method CRUD, deactivation safety, FMNP/FAM report separation
 ├── releases/
 │   └── (zip files on GitHub Releases)
@@ -341,7 +341,7 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 
 **Run:** `python -m pytest tests/ -v` from project root
 
-**1470 total tests across 24 files** — all must pass before committing.
+**1473 total tests across 24 files** — all must pass before committing.
 
 ---
 
@@ -378,6 +378,7 @@ Legacy data (v1.5.1 and earlier) auto-migrated from exe directory on first launc
 
 | Version | Date       | Summary |
 |---------|------------|---------|
+| v1.9.3  | 2026-04-07 | Hotfix: penny reconciliation added to payment save path (receipt ±1¢ drift eliminated), match limit query includes Adjusted transactions (returning customer cap no longer bypassed after admin edit), 1473 tests across 24 files |
 | v1.9.2  | 2026-04-03 | Production readiness release: exhaustive financial audit (all money paths traced UI → DB → reports → ledger → sync), 50 new end-to-end UI integration tests, three-way reconciliation verified across all outputs, production readiness assessment for board review, 1470 tests across 24 files |
 | v1.9.1  | 2026-04-02 | Fix: match-cap-aware charge input — daily match limit now correctly raises the charge field maximum so customers can enter the full amount owed when their match is capped; auto-distribute and collect-line-items also cap-aware; 24 new edge case tests (returning customer cumulative cap, void exclusion, penny reconciliation under cap, 200% match with cap, cap=0/1¢ boundaries), 1365 tests across 23 files |
 | v1.9.0  | 2026-04-02 | Automated UI test suite (pytest-qt: payment screen, end-to-end workflows, market-day simulation), model-level market day lifecycle guard, max-cap clamping validation, payment method CRUD safety tests, comprehensive documentation lock-in (TECHNICAL_OVERVIEW, USER_GUIDE, PROJECT_INSTRUCTIONS), developer guardrails and known-limitations guide, 1333 tests across 23 files |

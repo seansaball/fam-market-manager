@@ -72,7 +72,7 @@ python run.py
 python -m pytest tests/ -v
 ```
 
-1470 tests across 24 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, settings import/export, cloud sync, auto-update, charge conversion, denomination validation, photo storage, multi-photo workflows, photo deduplication, FMNP sync integration, integer-cents boundary validation, three-way reconciliation (DB/Ledger/Sheets), automated UI testing (payment screen, workflows, market-day simulation), max-cap clamping, market day lifecycle guards, adjustment edge cases, payment method CRUD safety, match-cap-aware charge input edge cases, and end-to-end production readiness tests (payment confirmation pipelines, draft save/resume, returning customer match limits, void-after-confirm exclusion, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent reconciliation, high-volume market day simulation, report-screen state changes).
+1473 tests across 24 test files covering formula validation, match limits, returning customers, transaction adjustments, FMNP reports, market codes, device IDs, backups, schema migrations, settings import/export, cloud sync, auto-update, charge conversion, denomination validation, photo storage, multi-photo workflows, photo deduplication, FMNP sync integration, integer-cents boundary validation, three-way reconciliation (DB/Ledger/Sheets), automated UI testing (payment screen, workflows, market-day simulation), max-cap clamping, market day lifecycle guards, adjustment edge cases, payment method CRUD safety, match-cap-aware charge input edge cases, and end-to-end production readiness tests (payment confirmation pipelines, draft save/resume, returning customer match limits, void-after-confirm exclusion, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent reconciliation, high-volume market day simulation, report-screen state changes).
 
 ## Building the Executable
 
@@ -96,6 +96,7 @@ Output: `dist\FAM Manager\FAM Manager.exe`
 
 | Version | Summary |
 |---------|---------|
+| v1.9.3 | Hotfix: penny reconciliation in payment save path, match limit includes Adjusted transactions, 1473 tests across 24 files |
 | v1.9.2 | Production readiness release: exhaustive financial audit, 50 new end-to-end UI integration tests, three-way reconciliation verified, production readiness assessment for board review, 1470 tests across 24 files |
 | v1.9.1 | Fix: match-cap-aware charge input — daily match limit now correctly raises charge field max when match is capped; auto-distribute and collect-line-items also cap-aware; 24 new edge case tests, 1365 tests across 23 files |
 | v1.9.0 | Automated UI test suite (pytest-qt), model-level market day lifecycle guard, max-cap clamping validation, payment method CRUD safety tests, comprehensive documentation lock-in, developer guardrails and known-limitations guide, 1333 tests across 23 files |

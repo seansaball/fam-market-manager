@@ -165,7 +165,7 @@ def get_confirmed_customers_for_market_day(market_day_id: int) -> list:
     """Get distinct confirmed customer labels for a market day with their FAM match totals.
 
     Returns a list of dicts: {customer_label, order_count, total_match, receipt_count}.
-    Only includes customers who have at least one Confirmed order.
+    Only includes customers who have at least one Confirmed or Adjusted order.
     """
     conn = get_connection()
     rows = conn.execute("""
@@ -174,9 +174,9 @@ def get_confirmed_customers_for_market_day(market_day_id: int) -> list:
                COUNT(t.id) as receipt_count,
                COALESCE(SUM(pli.match_amount), 0) as total_match
         FROM customer_orders co
-        JOIN transactions t ON t.customer_order_id = co.id AND t.status = 'Confirmed'
+        JOIN transactions t ON t.customer_order_id = co.id AND t.status IN ('Confirmed', 'Adjusted')
         LEFT JOIN payment_line_items pli ON pli.transaction_id = t.id
-        WHERE co.market_day_id = ? AND co.status = 'Confirmed'
+        WHERE co.market_day_id = ? AND co.status IN ('Confirmed', 'Adjusted')
         GROUP BY co.customer_label
         ORDER BY co.customer_label
     """, (market_day_id,)).fetchall()
@@ -187,18 +187,18 @@ def get_customer_prior_match(customer_label: str, market_day_id: int,
                              exclude_order_id: int | None = None) -> int:
     """Sum the FAM match (match_amount) already used by a customer label on a market day.
 
-    Returns integer cents.  Only counts Confirmed orders.
+    Returns integer cents.  Counts Confirmed and Adjusted orders.
     *exclude_order_id* lets you omit the current order so it isn't double-counted.
     """
     conn = get_connection()
     query = """
         SELECT COALESCE(SUM(pli.match_amount), 0)
         FROM customer_orders co
-        JOIN transactions t ON t.customer_order_id = co.id AND t.status = 'Confirmed'
+        JOIN transactions t ON t.customer_order_id = co.id AND t.status IN ('Confirmed', 'Adjusted')
         JOIN payment_line_items pli ON pli.transaction_id = t.id
         WHERE co.market_day_id = ?
           AND co.customer_label = ?
-          AND co.status = 'Confirmed'
+          AND co.status IN ('Confirmed', 'Adjusted')
     """
     params = [market_day_id, customer_label]
     if exclude_order_id is not None:

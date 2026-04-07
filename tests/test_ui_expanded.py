@@ -1249,11 +1249,85 @@ class TestOddCentPipeline:
             confirm_transaction(tid, confirmed_by='Test')
         update_customer_order_status(order_id, 'Confirmed')
 
-        # DB: method_amount should match receipt total (±1 cent from penny recon)
+        # DB: method_amount must match receipt total EXACTLY after penny recon.
+        # Exception: 1¢ with 100% match — charge rounds to 0 via banker's
+        # rounding so the charge-based input can't represent it at all.
         pli = get_payment_line_items(txn_ids[0])
         total_ma = sum(li['method_amount'] for li in pli)
-        assert abs(total_ma - total_cents) <= 1, (
-            f"DB method_amount {total_ma} vs receipt {total_cents}")
+        if total_cents == 1:
+            assert total_ma <= 1  # representation limit, not a recon bug
+        else:
+            assert total_ma == total_cents, (
+                f"DB method_amount {total_ma} vs receipt {total_cents}")
+
+    def test_multi_method_penny_reconciliation_in_db(self, qtbot, market_db):
+        """Multi-method order where independent rounding creates a 1¢ gap.
+
+        Reproduces the bug: SNAP + two $5 denominated methods on an $81.85
+        order.  Each row computes method_amount independently, summing to
+        $81.84 (8184¢) instead of $81.85 (8185¢).  Penny reconciliation
+        in _distribute_and_save_payments must close the gap so the saved
+        DB records match receipt_total exactly.
+        """
+        from fam.ui.payment_screen import PaymentScreen
+        from fam.models.transaction import (
+            confirm_transaction, save_payment_line_items, get_payment_line_items
+        )
+        from fam.models.customer_order import update_customer_order_status
+
+        # $81.85 order — FMNP takes 1 unit ($5 denom, 100% match → $10
+        # method_amount), SNAP absorbs the rest.  SNAP charge is computed
+        # from the remainder, but charge_to_method_amount rounds it to an
+        # even number, creating a 1¢ gap.
+        receipt_cents = 8185
+        fmnp_ma = 1000  # 1 × $5 × 2 (100% match)
+        snap_remainder = receipt_cents - fmnp_ma  # 7185
+        # method_amount_to_charge(7185, 100) → round(7185/2) = 3592
+        # charge_to_method_amount(3592, 100) → 7184 (not 7185!)
+        snap_charge = method_amount_to_charge(snap_remainder, 100.0)
+
+        order_id, txn_ids = _create_order_with_receipts(
+            market_db, [(1, receipt_cents)])
+
+        screen = PaymentScreen()
+        qtbot.addWidget(screen)
+        screen.load_customer_order(order_id)
+
+        # Add SNAP row
+        snap_row = screen._payment_rows[0]
+        _select_method(snap_row, "SNAP")
+        _set_charge(snap_row, cents_to_dollars(snap_charge))
+
+        # Add FMNP row — 1 unit of $5
+        screen._add_payment_row()
+        fmnp_row = screen._payment_rows[1]
+        _select_method(fmnp_row, "FMNP")
+        _set_charge(fmnp_row, 5.00)
+
+        screen._update_summary()
+
+        # Confirm the raw items sum to less than receipt (the bug condition)
+        items = screen._collect_line_items()
+        raw_total = sum(i['method_amount'] for i in items)
+        assert raw_total < receipt_cents, (
+            f"Expected raw total ({raw_total}) < receipt ({receipt_cents})")
+
+        # Save — penny recon should fix the gap
+        screen._distribute_and_save_payments(items, screen._order_total)
+        for tid in txn_ids:
+            confirm_transaction(tid, confirmed_by='Test')
+        update_customer_order_status(order_id, 'Confirmed')
+
+        # DB must reconcile EXACTLY
+        pli = get_payment_line_items(txn_ids[0])
+        db_method_total = sum(li['method_amount'] for li in pli)
+        db_match_total = sum(li['match_amount'] for li in pli)
+        db_cust_total = sum(li['customer_charged'] for li in pli)
+
+        assert db_method_total == receipt_cents, (
+            f"DB method_amount total {db_method_total} != receipt {receipt_cents}")
+        assert db_match_total + db_cust_total == receipt_cents, (
+            f"match({db_match_total}) + cust({db_cust_total}) != receipt({receipt_cents})")
 
 
 # ═══════════════════════════════════════════════════════════════════

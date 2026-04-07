@@ -1,6 +1,6 @@
 # FAM Market Manager — Technical Overview
 
-> **Version:** 1.9.2
+> **Version:** 1.9.3
 > **Last Updated:** April 2026
 > **Audience:** Developers, administrators, and stakeholders
 
@@ -116,7 +116,7 @@ The application runs as a standalone Windows desktop executable with local SQLit
 | Photo Upload | google-auth (AuthorizedSession) | Google Drive REST API |
 | Auto-Update | urllib.request (stdlib) | GitHub Releases API |
 | Packaging | PyInstaller | Standalone Windows executable |
-| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1470 tests) |
+| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1473 tests) |
 
 **Runtime Dependencies** (`requirements.txt`):
 - `PySide6 >= 6.5.0`
@@ -189,7 +189,7 @@ fam-market-manager/
 ├── tests/
 │   ├── test_match_formula.py       # 98 tests — core formula verification
 │   ├── test_match_limit.py         # 28 tests — daily cap logic
-│   ├── test_returning_customer.py  # 21 tests + DB integration
+│   ├── test_returning_customer.py  # 23 tests + DB integration
 │   ├── test_adjustments.py         # 71 tests — adjustments, voids, ledger
 │   ├── test_fmnp_reports.py        # 38 tests — FMNP entries and reports
 │   ├── test_models.py              # 130 tests — model CRUD operations, photo queries
@@ -209,11 +209,11 @@ fam-market-manager/
 │   ├── test_ui_payment.py          # 37 tests — automated UI: PaymentScreen widget behavior
 │   ├── test_ui_workflows.py        # 31 tests — end-to-end market day simulation, cap workflows
 │   ├── test_ui_guards.py           # 66 tests — max-cap clamping, lifecycle guards, match-cap-aware charge
-│   ├── test_ui_expanded.py         # 50 tests — production readiness E2E: payment pipelines, void exclusion, reconciliation
+│   ├── test_ui_expanded.py         # 51 tests — production readiness E2E: payment pipelines, void exclusion, reconciliation
 │   ├── test_payment_method_safety.py # 23 tests — payment method CRUD safety, deactivation guards
 │   └── conftest.py / __init__.py
 ├── releases/
-│   └── FAM_Manager_v1.9.2.zip # Distribution package
+│   └── FAM_Manager_v1.9.3.zip # Distribution package
 ├── fam_manager.spec            # PyInstaller build configuration
 ├── build.bat                   # Windows build script
 ├── requirements.txt
@@ -615,13 +615,13 @@ When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is
 
 ## 13. Testing
 
-**1470 tests** across 24 test files:
+**1473 tests** across 24 test files:
 
 | File | Tests | Coverage |
 |------|-------|----------|
 | `test_match_formula.py` | 98 | Core formula, reconciliation, edge cases, real-world scenarios |
 | `test_match_limit.py` | 28 | Daily cap logic, proportional reduction, high percentages, penny reconciliation under cap, cap=0/1¢ boundaries |
-| `test_returning_customer.py` | 21 | DB integration, prior match tracking, effective remaining limit |
+| `test_returning_customer.py` | 23 | DB integration, prior match tracking, effective remaining limit |
 | `test_adjustments.py` | 71 | Adjustments, voids, voided ledger exclusion, multi-method |
 | `test_fmnp_reports.py` | 38 | FMNP entries, soft-delete, reporting |
 | `test_models.py` | 130 | Model CRUD operations, transaction lifecycle, photo queries |
@@ -641,7 +641,7 @@ When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is
 | `test_ui_payment.py` | 37 | Automated UI tests: PaymentScreen widget behavior, row management, summary cards |
 | `test_ui_workflows.py` | 31 | End-to-end market day simulation, returning customer cap workflows, void exclusion |
 | `test_ui_guards.py` | 66 | Max-cap clamping, market day lifecycle guards, adjustment edge cases, match-cap-aware charge input |
-| `test_ui_expanded.py` | 50 | Production readiness: payment confirm E2E (DB/sync/ledger), draft save/resume, returning customer match limits, void-after-confirm exclusion, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent pipeline, high-volume reconciliation (30 txns), report state changes |
+| `test_ui_expanded.py` | 51 | Production readiness: payment confirm E2E (DB/sync/ledger), draft save/resume, returning customer match limits, void-after-confirm exclusion, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent pipeline, high-volume reconciliation (30 txns), report state changes |
 | `test_payment_method_safety.py` | 23 | Payment method CRUD safety, market assignment, deactivation guards, Reports FMNP separation |
 
 **Run:** `python -m pytest tests/ -v`
