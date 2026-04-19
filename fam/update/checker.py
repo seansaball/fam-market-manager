@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import textwrap
+import zipfile
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -54,6 +55,12 @@ def parse_github_repo_url(url: str) -> Optional[tuple[str, str]]:
 def compare_versions(current: str, remote: str) -> int:
     """Compare semantic versions.
 
+    Handles any number of dotted components (2-part, 3-part, 4-part, …).
+    The shorter version is padded with zeros to match the longer one so
+    that ``1.6.1`` compares as older than ``1.6.1.1`` (4-part patch
+    release over a 3-part current version is correctly offered as an
+    update).
+
     Returns:
         -1 if current < remote  (update available)
          0 if equal
@@ -66,13 +73,22 @@ def compare_versions(current: str, remote: str) -> int:
             # Handle pre-release suffixes like "1.7.0-beta"
             num = re.match(r'(\d+)', segment)
             parts.append(int(num.group(1)) if num else 0)
-        # Pad to at least 3 parts
+        # Pad to at least 3 parts (handles 1.6 vs 1.6.0 equivalence)
         while len(parts) < 3:
             parts.append(0)
         return parts
 
     cur = _parse(current)
     rem = _parse(remote)
+
+    # Pad the shorter list with zeros so a 4-part release is compared
+    # fully against a 3-part current version (otherwise zip truncates
+    # and 1.6.1 vs 1.6.1.1 would compare as equal).
+    max_len = max(len(cur), len(rem))
+    while len(cur) < max_len:
+        cur.append(0)
+    while len(rem) < max_len:
+        rem.append(0)
 
     for c, r in zip(cur, rem):
         if c < r:
@@ -212,10 +228,163 @@ def verify_download(file_path: str, expected_size: int) -> bool:
 
 # ── Update script generation ─────────────────────────────────
 
+def _is_safe_zip_member_path(name: str) -> bool:
+    """Return True if ``name`` is a safe zip member path (no traversal,
+    no absolute paths, no drive letters).
+
+    Rejects ``..`` segments, leading ``/`` or ``\\``, and Windows drive
+    letters.  Used by :func:`_find_exe_in_zip` to avoid computing a
+    source directory outside the extraction temp dir.
+    """
+    if not name:
+        return False
+    # Reject absolute paths
+    if name.startswith('/') or name.startswith('\\'):
+        return False
+    # Reject Windows drive letters (e.g. ``C:foo``)
+    if len(name) >= 2 and name[1] == ':':
+        return False
+    # Reject any path segment equal to ``..``
+    # zipfile always uses forward slashes, but defensively split on both
+    segments = name.replace('\\', '/').split('/')
+    if any(seg == '..' for seg in segments):
+        return False
+    return True
+
+
+def _find_exe_in_zip(zip_path: str, exe_name: str = 'FAM Manager.exe') -> Optional[str]:
+    """Inspect a release zip and return the path *inside* the zip of the
+    directory containing ``exe_name``.
+
+    Release zips have historically been packaged with varying levels of
+    nesting (``FAM Manager/``, ``FAM_Manager_v1.9.3/FAM Manager/`` etc.).
+    This probe walks the archive listing and returns the parent folder
+    of the first match, or ``None`` if the exe is not found.
+
+    Unsafe entries (path traversal, absolute paths) are skipped silently
+    to avoid directing the installer at a location outside the temp dir.
+
+    The returned path uses forward slashes (zipfile convention) and has
+    no trailing slash.  An empty string means the exe sits at the zip
+    root.
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for name in zf.namelist():
+                if not _is_safe_zip_member_path(name):
+                    continue
+                # zipfile always uses forward slashes regardless of OS
+                if name.endswith('/' + exe_name) or name == exe_name:
+                    parent = name.rsplit('/', 1)[0] if '/' in name else ''
+                    return parent
+    except (zipfile.BadZipFile, OSError) as e:
+        logger.error("Failed to inspect zip %s: %s", zip_path, e)
+        return None
+    return None
+
+
+def _ps_single_quote(path: str) -> str:
+    """Escape a path for use inside a PowerShell single-quoted string.
+
+    PowerShell single-quoted strings treat every character literally
+    except ``'`` itself, which is escaped by doubling.  Used to pass
+    paths containing apostrophes (e.g. ``C:\\Users\\O'Brien\\...``) to
+    ``Expand-Archive -Path '...'`` without breaking the command.
+    """
+    return path.replace("'", "''")
+
+
+# ── Post-update verification ─────────────────────────────────
+
+PENDING_UPDATE_FILENAME = '_pending_update.json'
+
+
+def write_pending_update_marker(target_version: str, data_dir: Optional[str] = None) -> str:
+    """Write a marker file recording which version the updater is installing.
+
+    Called just before the update batch script is launched.  On the next
+    app launch, :func:`check_pending_update_result` compares the marker's
+    ``target_version`` to the running ``__version__`` and reports success
+    or failure.
+
+    Returns the path to the marker file.
+    """
+    if data_dir is None:
+        from fam.app import get_data_dir
+        data_dir = get_data_dir()
+    marker_path = os.path.join(data_dir, PENDING_UPDATE_FILENAME)
+    payload = {
+        'target_version': target_version.lstrip('vV'),
+    }
+    with open(marker_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f)
+    logger.info("Pending-update marker written: target=%s (%s)",
+                target_version, marker_path)
+    return marker_path
+
+
+def check_pending_update_result(current_version: str,
+                                data_dir: Optional[str] = None) -> Optional[dict]:
+    """Check whether a pending update completed successfully.
+
+    Returns:
+        - ``None`` — no pending update marker present (normal launch)
+        - ``{'status': 'success', 'target_version': ...}`` if the marker's
+          target matches ``current_version``
+        - ``{'status': 'failed', 'target_version': ..., 'actual_version': ...}``
+          if the marker exists but the versions disagree (silent install failure)
+
+    In all cases where the marker existed, it is removed after reading so
+    the check only fires once per update attempt.
+    """
+    if data_dir is None:
+        from fam.app import get_data_dir
+        data_dir = get_data_dir()
+    marker_path = os.path.join(data_dir, PENDING_UPDATE_FILENAME)
+    if not os.path.isfile(marker_path):
+        return None
+
+    try:
+        with open(marker_path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        target = str(payload.get('target_version', '')).lstrip('vV')
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Could not read pending-update marker %s: %s",
+                       marker_path, e)
+        try:
+            os.remove(marker_path)
+        except OSError:
+            pass
+        return None
+
+    # Always remove the marker so we only report once.
+    try:
+        os.remove(marker_path)
+    except OSError:
+        logger.warning("Could not remove pending-update marker %s", marker_path)
+
+    current_clean = current_version.lstrip('vV')
+    if compare_versions(current_clean, target) == 0:
+        logger.info("Pending update succeeded: %s", target)
+        return {'status': 'success', 'target_version': target}
+    logger.error("Pending update FAILED: expected %s, running %s",
+                 target, current_clean)
+    return {
+        'status': 'failed',
+        'target_version': target,
+        'actual_version': current_clean,
+    }
+
+
 def generate_update_script(app_dir: str, zip_path: str) -> str:
     """Write a batch script that replaces the app after it exits.
 
     Returns the path to the generated ``.bat`` file.
+
+    The script probes the downloaded zip at generation time to locate
+    the folder containing ``FAM Manager.exe``, then hard-codes that
+    exact path into the batch file.  This avoids brittle assumptions
+    about zip nesting structure.
     """
     from fam.app import get_data_dir
     data_dir = get_data_dir()
@@ -223,6 +392,52 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
     backup_dir = os.path.join(data_dir, '_update_backup')
     temp_dir = os.path.join(data_dir, '_update_temp')
     script_path = os.path.join(data_dir, '_fam_update.bat')
+    log_path = os.path.join(data_dir, '_fam_update.log')
+
+    # Probe zip to find the directory containing FAM Manager.exe.
+    # If not found, fall back to the old "first subfolder" heuristic.
+    inner_path = _find_exe_in_zip(zip_path)
+    if inner_path is None:
+        logger.warning(
+            "Could not locate 'FAM Manager.exe' inside %s — "
+            "falling back to first-subfolder copy", zip_path)
+        # Fallback: copy first top-level folder (legacy behaviour)
+        source_dir = None
+    else:
+        # Convert zip-style forward slashes to Windows backslashes
+        inner_win = inner_path.replace('/', '\\')
+        source_dir = os.path.join(temp_dir, inner_win) if inner_win else temp_dir
+        logger.info("Update source dir inside zip: %r → %s", inner_path, source_dir)
+
+    if source_dir is not None:
+        # Known source path — direct copy.  No ``pause`` here: the whole
+        # script's stdout/stderr is redirected to a log file, so a pause
+        # would hang waiting for stdin that never arrives.
+        install_block = f"""\
+        REM ── Copy extracted files over app directory ──
+        echo Installing update from {source_dir}...
+        if not exist "{source_dir}\\FAM Manager.exe" (
+            echo ERROR: Expected FAM Manager.exe not found in extracted zip.
+            echo Looked in: {source_dir}
+            exit /b 1
+        )
+        xcopy /E /I /Q /Y "{source_dir}\\*" "{app_dir}\\"
+        if %ERRORLEVEL% NEQ 0 (
+            echo ERROR: Failed to copy update files. Your backup is at {backup_dir}
+            exit /b 1
+        )
+"""
+    else:
+        # Legacy fallback — first top-level folder
+        install_block = f"""\
+        REM ── Copy extracted files over app directory (fallback) ──
+        echo Installing update (legacy fallback)...
+        for /D %%d in ("{temp_dir}\\*") do (
+            xcopy /E /I /Q /Y "%%d\\*" "{app_dir}\\"
+            goto DONE_COPY
+        )
+        :DONE_COPY
+"""
 
     # Escape paths for batch script (double backslashes not needed
     # because we're writing raw strings)
@@ -231,6 +446,11 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
         REM FAM Market Manager — Update Script
         REM Generated automatically. Do not edit.
 
+        REM Redirect all output to log file for post-mortem debugging
+        call :MAIN > "{log_path}" 2>&1
+        exit /b %ERRORLEVEL%
+
+        :MAIN
         echo ============================================
         echo   FAM Market Manager — Applying Update
         echo ============================================
@@ -247,7 +467,6 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
                 echo.
                 echo ERROR: FAM Manager did not close after 30 seconds.
                 echo Update cancelled.
-                pause
                 exit /b 1
             )
             timeout /t 1 /nobreak >NUL
@@ -261,7 +480,7 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
         echo Backing up current version...
         if exist "{backup_dir}" rmdir /s /q "{backup_dir}"
         mkdir "{backup_dir}"
-        xcopy /E /I /Q /Y "{app_dir}\\*" "{backup_dir}\\" >NUL 2>&1
+        xcopy /E /I /Q /Y "{app_dir}\\*" "{backup_dir}\\"
         if %ERRORLEVEL% NEQ 0 (
             echo WARNING: Backup may be incomplete, but continuing with update.
         )
@@ -271,23 +490,15 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
         echo Extracting update...
         if exist "{temp_dir}" rmdir /s /q "{temp_dir}"
         mkdir "{temp_dir}"
-        powershell -NoProfile -Command "Expand-Archive -Path '{zip_path}' -DestinationPath '{temp_dir}' -Force"
+        powershell -NoProfile -Command "Expand-Archive -Path '{_ps_single_quote(zip_path)}' -DestinationPath '{_ps_single_quote(temp_dir)}' -Force"
         if %ERRORLEVEL% NEQ 0 (
             echo.
             echo ERROR: Failed to extract update. Your current version is unchanged.
             echo The previous version backup is at: {backup_dir}
-            pause
             exit /b 1
         )
 
-        REM ── Copy extracted files over app directory ──
-        echo Installing update...
-        for /D %%d in ("{temp_dir}\\*") do (
-            xcopy /E /I /Q /Y "%%d\\*" "{app_dir}\\" >NUL 2>&1
-            goto DONE_COPY
-        )
-        :DONE_COPY
-
+{install_block}
         REM ── Clean up ──
         echo Cleaning up...
         rmdir /s /q "{temp_dir}" >NUL 2>&1
@@ -305,10 +516,11 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
 
         REM ── Self-delete ──
         (goto) 2>NUL & del "%~f0"
+        exit /b 0
     """)
 
     with open(script_path, 'w', encoding='utf-8') as f:
         f.write(script)
 
-    logger.info("Update script written to %s", script_path)
+    logger.info("Update script written to %s (log: %s)", script_path, log_path)
     return script_path

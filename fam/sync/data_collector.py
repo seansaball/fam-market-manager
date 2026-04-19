@@ -293,7 +293,7 @@ def _collect_fam_match(conn, md_id: int) -> list[dict]:
             'Payment Method': 'FMNP (External)',
             'Date': md_date,
             'Total Allocated': cents_to_dollars(fmnp_total),
-            'Total FAM Match': cents_to_dollars(fmnp_total),
+            'Total FAM Match': 0,
         })
 
     return result

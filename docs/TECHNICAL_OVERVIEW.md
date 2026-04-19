@@ -1,6 +1,6 @@
 # FAM Market Manager — Technical Overview
 
-> **Version:** 1.9.3
+> **Version:** 1.9.4
 > **Last Updated:** April 2026
 > **Audience:** Developers, administrators, and stakeholders
 
@@ -116,7 +116,7 @@ The application runs as a standalone Windows desktop executable with local SQLit
 | Photo Upload | google-auth (AuthorizedSession) | Google Drive REST API |
 | Auto-Update | urllib.request (stdlib) | GitHub Releases API |
 | Packaging | PyInstaller | Standalone Windows executable |
-| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1473 tests) |
+| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1518 tests) |
 
 **Runtime Dependencies** (`requirements.txt`):
 - `PySide6 >= 6.5.0`
@@ -198,7 +198,7 @@ fam-market-manager/
 │   ├── test_schema.py              # 40 tests — migrations v1–v21, triggers, indexes
 │   ├── test_settings_io.py         # 54 tests — import/export round-trip
 │   ├── test_sync.py                # 124 tests — cloud sync, data collection, Google Sheets
-│   ├── test_update.py              # 77 tests — URL parsing, version comparison, update flow
+│   ├── test_update.py              # 122 tests — URL parsing, version comparison, update flow, zip probe, runtime script execution, path safety, PowerShell escaping, pending-update verification
 │   ├── test_denomination.py        # 43 tests — denomination constraints, charge conversion
 │   ├── test_charge_conversion.py   # 52 tests — charge-to-amount conversion edge cases
 │   ├── test_auto_distribute.py     # 71 tests — multi-receipt payment distribution, max-cap math
@@ -213,7 +213,7 @@ fam-market-manager/
 │   ├── test_payment_method_safety.py # 23 tests — payment method CRUD safety, deactivation guards
 │   └── conftest.py / __init__.py
 ├── releases/
-│   └── FAM_Manager_v1.9.3.zip # Distribution package
+│   └── FAM_Manager_v1.9.4.zip # Distribution package
 ├── fam_manager.spec            # PyInstaller build configuration
 ├── build.bat                   # Windows build script
 ├── requirements.txt
@@ -615,7 +615,7 @@ When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is
 
 ## 13. Testing
 
-**1473 tests** across 24 test files:
+**1518 tests** across 24 test files:
 
 | File | Tests | Coverage |
 |------|-------|----------|
@@ -630,7 +630,7 @@ When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is
 | `test_schema.py` | 40 | Migrations v1-v21, triggers, indexes, defaults |
 | `test_settings_io.py` | 54 | Import/export parsing, round-trip, sanitization |
 | `test_sync.py` | 124 | Cloud sync, data collection, Google Sheets mocking |
-| `test_update.py` | 77 | URL parsing, version comparison, GitHub API, update flow |
+| `test_update.py` | 122 | URL parsing, version comparison, GitHub API, update flow, nested-zip exe probe, runtime batch execution against synthetic installs, path-traversal guard, PowerShell escaping, pending-update marker |
 | `test_denomination.py` | 43 | Denomination constraints, charge conversion, validation |
 | `test_charge_conversion.py` | 52 | Charge-to-amount conversion edge cases |
 | `test_auto_distribute.py` | 71 | Multi-receipt payment distribution, max-cap math, cap reconciliation |

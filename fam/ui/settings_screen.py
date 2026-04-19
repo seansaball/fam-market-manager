@@ -2196,7 +2196,10 @@ class SettingsScreen(QWidget):
         import subprocess
         import sys
         from fam.app import get_app_dir
-        from fam.update.checker import generate_update_script
+        from fam.update.checker import (
+            generate_update_script,
+            write_pending_update_marker,
+        )
 
         self._update_progress.setValue(100)
         self._update_status_lbl.setText(
@@ -2209,6 +2212,19 @@ class SettingsScreen(QWidget):
         try:
             app_dir = get_app_dir()
             script_path = generate_update_script(app_dir, zip_path)
+
+            # Record the target version so the next launch can verify the
+            # install actually landed.  If the user ends up on the same
+            # version after the updater runs, the mismatch will surface
+            # loudly on startup instead of failing silently.
+            target_version = (
+                self._update_info.get('version', '') if self._update_info else ''
+            )
+            if target_version:
+                try:
+                    write_pending_update_marker(target_version)
+                except Exception:
+                    logger.exception("Failed to write pending-update marker")
 
             # Launch the batch script and exit
             subprocess.Popen(

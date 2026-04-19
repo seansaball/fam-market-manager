@@ -138,7 +138,7 @@ class ReportsScreen(QWidget):
         self.summary_row.add_card("total_receipts", "Total Receipts")
         self.summary_row.add_card("customer_paid", "Customer Paid")
         self.summary_row.add_card("fam_match", "FAM Match", highlight=True)
-        self.summary_row.add_card("fmnp_total", "FMNP Match", highlight=True)
+        self.summary_row.add_card("fmnp_total", "FMNP Checks", highlight=True)
 
         layout.addWidget(self.summary_row)
 
@@ -716,13 +716,13 @@ class ReportsScreen(QWidget):
             self.match_table.setItem(row_idx, 1, make_item(
                 f"${fmnp_ext_dollars:.2f}", fmnp_ext_dollars))
             self.match_table.setItem(row_idx, 2, make_item(
-                f"${fmnp_ext_dollars:.2f}", fmnp_ext_dollars))
-            total_fam_match += fmnp_ext_dollars
+                "$0.00", 0))
+            # No FAM match — external checks are vendor reimbursements only
 
             self._match_data.append({
                 'Payment Method': 'FMNP (External)',
                 'Total Allocated': fmnp_ext_dollars,
-                'Total FAM Match': fmnp_ext_dollars
+                'Total FAM Match': 0,
             })
         self.match_table.resizeColumnsToContents()
         self.match_table.setSortingEnabled(True)

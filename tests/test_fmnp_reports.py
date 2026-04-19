@@ -708,44 +708,144 @@ class TestFMNPCrudAndAudit:
         assert all(e['id'] != eid for e in entries)
 
     def test_create_logged(self, fresh_db):
-        """INSERT audit log entry created on create."""
+        """create_fmnp_entry itself writes an INSERT audit row attributed
+        to the entered_by person."""
         self._setup_minimal(fresh_db)
         eid = create_fmnp_entry(1, 1, 7500, 'Alice')
-        log_action('fmnp_entries', eid, 'INSERT', 'Alice', notes='Created')
         row = fresh_db.execute(
-            "SELECT * FROM audit_log WHERE table_name='fmnp_entries' AND action='INSERT' AND record_id=?",
+            "SELECT * FROM audit_log WHERE table_name='fmnp_entries' "
+            "AND action='INSERT' AND record_id=?",
             (eid,)
         ).fetchone()
-        assert row is not None
+        assert row is not None, "Model did not emit INSERT audit row on create"
         assert row['changed_by'] == 'Alice'
+        assert row['notes'] and 'amount=$75.00' in row['notes']
 
     def test_update_logged(self, fresh_db):
-        """UPDATE audit log entry tracks old/new values."""
+        """update_fmnp_entry writes an UPDATE audit row with old/new values
+        attributed to changed_by."""
         self._setup_minimal(fresh_db)
         eid = create_fmnp_entry(1, 1, 5000, 'Admin')
-        update_fmnp_entry(eid, amount=9900)
-        log_action('fmnp_entries', eid, 'UPDATE', 'Bob',
-                   field_name='amount', old_value=5000, new_value=9900)
+        update_fmnp_entry(eid, amount=9900, changed_by='Bob')
         row = fresh_db.execute(
-            "SELECT * FROM audit_log WHERE table_name='fmnp_entries' AND action='UPDATE' AND record_id=?",
+            "SELECT * FROM audit_log WHERE table_name='fmnp_entries' "
+            "AND action='UPDATE' AND record_id=?",
             (eid,)
         ).fetchone()
-        assert row is not None
+        assert row is not None, "Model did not emit UPDATE audit row"
+        assert row['field_name'] == 'amount'
         assert row['old_value'] == '5000'
         assert row['new_value'] == '9900'
+        assert row['changed_by'] == 'Bob'
 
     def test_delete_logged(self, fresh_db):
-        """DELETE audit log entry recorded for soft-delete."""
+        """delete_fmnp_entry writes a DELETE audit row attributed to
+        changed_by."""
         self._setup_minimal(fresh_db)
         eid = create_fmnp_entry(1, 1, 5000, 'Admin')
-        log_action('fmnp_entries', eid, 'DELETE', 'Charlie', notes='Removed')
-        delete_fmnp_entry(eid)
+        delete_fmnp_entry(eid, changed_by='Charlie')
         row = fresh_db.execute(
-            "SELECT * FROM audit_log WHERE table_name='fmnp_entries' AND action='DELETE' AND record_id=?",
+            "SELECT * FROM audit_log WHERE table_name='fmnp_entries' "
+            "AND action='DELETE' AND record_id=?",
+            (eid,)
+        ).fetchone()
+        assert row is not None, "Model did not emit DELETE audit row"
+        assert row['changed_by'] == 'Charlie'
+
+    # ── v1.9.4 FMNP-audit hardening ──────────────────────────────
+    def test_update_logs_per_field(self, fresh_db):
+        """A single update_fmnp_entry call changing three fields produces
+        one audit row per field so the forensic trail is complete."""
+        self._setup_minimal(fresh_db)
+        fresh_db.execute("INSERT INTO vendors (id, name, is_active) VALUES (2, 'V2', 1)")
+        fresh_db.commit()
+        eid = create_fmnp_entry(1, 1, 5000, 'Admin', check_count=1, notes='orig')
+        update_fmnp_entry(eid, amount=8000, vendor_id=2, notes='revised',
+                          changed_by='Auditor')
+        rows = fresh_db.execute(
+            "SELECT field_name, old_value, new_value FROM audit_log "
+            "WHERE table_name='fmnp_entries' AND action='UPDATE' "
+            "AND record_id=? ORDER BY id",
+            (eid,)
+        ).fetchall()
+        fields = {r['field_name']: (r['old_value'], r['new_value']) for r in rows}
+        assert fields == {
+            'amount':    ('5000', '8000'),
+            'vendor_id': ('1',    '2'),
+            'notes':     ('orig', 'revised'),
+        }
+
+    def test_update_noop_does_not_log(self, fresh_db):
+        """Calling update with identical values must not flood the audit
+        log with spurious UPDATE rows."""
+        self._setup_minimal(fresh_db)
+        eid = create_fmnp_entry(1, 1, 5000, 'Admin', check_count=2,
+                                 notes='original')
+        # Same values — should be a no-op
+        update_fmnp_entry(eid, amount=5000, check_count=2, notes='original',
+                          changed_by='Bob')
+        count = fresh_db.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE table_name='fmnp_entries' "
+            "AND action='UPDATE' AND record_id=?",
+            (eid,)
+        ).fetchone()[0]
+        assert count == 0, "No-op update should not emit audit rows"
+
+    def test_update_partial_change_logs_only_changed_field(self, fresh_db):
+        """If the caller passes multiple kwargs but only one differs from
+        the stored value, only that one field is logged."""
+        self._setup_minimal(fresh_db)
+        eid = create_fmnp_entry(1, 1, 5000, 'Admin', check_count=2,
+                                 notes='original')
+        update_fmnp_entry(eid, amount=5000, check_count=2, notes='NEW',
+                          changed_by='Bob')
+        rows = fresh_db.execute(
+            "SELECT field_name FROM audit_log WHERE table_name='fmnp_entries' "
+            "AND action='UPDATE' AND record_id=?",
+            (eid,)
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]['field_name'] == 'notes'
+
+    def test_update_photo_path_logged(self, fresh_db):
+        """Photo attachment after create is a legitimate change and must
+        produce a photo_path UPDATE audit row."""
+        self._setup_minimal(fresh_db)
+        eid = create_fmnp_entry(1, 1, 5000, 'Admin')  # no photo
+        update_fmnp_entry(eid, photo_path='fmnp/1.jpg', changed_by='Admin')
+        row = fresh_db.execute(
+            "SELECT field_name, old_value, new_value FROM audit_log "
+            "WHERE table_name='fmnp_entries' AND action='UPDATE' "
+            "AND record_id=? AND field_name='photo_path'",
             (eid,)
         ).fetchone()
         assert row is not None
-        assert row['changed_by'] == 'Charlie'
+        assert row['old_value'] is None
+        assert row['new_value'] == 'fmnp/1.jpg'
+
+    def test_delete_default_changed_by_is_system(self, fresh_db):
+        """Callers that don't pass changed_by still get an audit row with
+        'System' as the attribution, not an absent row."""
+        self._setup_minimal(fresh_db)
+        eid = create_fmnp_entry(1, 1, 5000, 'Admin')
+        delete_fmnp_entry(eid)  # no changed_by
+        row = fresh_db.execute(
+            "SELECT changed_by FROM audit_log WHERE table_name='fmnp_entries' "
+            "AND action='DELETE' AND record_id=?",
+            (eid,)
+        ).fetchone()
+        assert row is not None
+        assert row['changed_by'] == 'System'
+
+    def test_update_missing_entry_is_silent(self, fresh_db):
+        """Updating a non-existent entry_id should not raise; it's a
+        no-op that does not produce audit rows either."""
+        self._setup_minimal(fresh_db)
+        update_fmnp_entry(99999, amount=100, changed_by='Ghost')
+        count = fresh_db.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE record_id=99999"
+        ).fetchone()[0]
+        assert count == 0
 
     def test_entries_filtered_by_market_day(self, fresh_db):
         """get_fmnp_entries filters by market_day_id."""

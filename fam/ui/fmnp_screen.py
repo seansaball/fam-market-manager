@@ -18,7 +18,6 @@ from fam.models.fmnp import (
     get_fmnp_entries, create_fmnp_entry, update_fmnp_entry, delete_fmnp_entry,
     get_fmnp_entry_by_id
 )
-from fam.models.audit import log_action
 from fam.utils.export import write_ledger_backup
 from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
 from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG, SUBTITLE_GRAY, ACCENT_GREEN
@@ -631,25 +630,24 @@ class FMNPScreen(QWidget):
                 # Determine if we need to update photo_path in DB
                 new_encoded = encode_photo_paths(final_paths)
                 old_encoded = old.get('photo_path')
+                # Model auto-logs per-field UPDATE audit rows for any actual
+                # change; no-op if nothing changed.
                 if changed or new_encoded != old_encoded:
                     update_fmnp_entry(self._editing_id, amount=amount_cents,
                                       vendor_id=vendor_id,
                                       check_count=check_count, notes=notes,
-                                      photo_path=new_encoded)
+                                      photo_path=new_encoded,
+                                      changed_by=entered_by)
                 else:
                     update_fmnp_entry(self._editing_id, amount=amount_cents,
                                       vendor_id=vendor_id,
-                                      check_count=check_count, notes=notes)
-
-                log_action('fmnp_entries', self._editing_id, 'UPDATE', entered_by,
-                            field_name='amount', old_value=old.get('amount'),
-                            new_value=amount_cents, reason_code='edit', notes='FMNP entry updated')
+                                      check_count=check_count, notes=notes,
+                                      changed_by=entered_by)
                 self._cancel_edit()
             else:
+                # create_fmnp_entry auto-logs an INSERT audit row
                 entry_id = create_fmnp_entry(md_id, vendor_id, amount_cents,
                                               entered_by, check_count, notes)
-                log_action('fmnp_entries', entry_id, 'INSERT', entered_by,
-                           notes='FMNP entry created')
 
                 # Store all photos after create (need entry_id for filenames)
                 photo_paths = []
@@ -663,7 +661,9 @@ class FMNPScreen(QWidget):
                                            entry_id, e)
                 if photo_paths:
                     encoded = encode_photo_paths(photo_paths)
-                    update_fmnp_entry(entry_id, photo_path=encoded)
+                    # Photo attachment is a change → auto-logged UPDATE
+                    update_fmnp_entry(entry_id, photo_path=encoded,
+                                      changed_by=entered_by)
 
             self.amount_spin.setValue(0)
             self.check_count_spin.setValue(0)
@@ -720,9 +720,8 @@ class FMNPScreen(QWidget):
         if result == QMessageBox.Yes:
             try:
                 entered_by = self.entered_by_input.text().strip() or "System"
-                log_action('fmnp_entries', entry_id, 'DELETE', entered_by,
-                            notes='FMNP entry deleted')
-                delete_fmnp_entry(entry_id)
+                # delete_fmnp_entry auto-logs a DELETE audit row
+                delete_fmnp_entry(entry_id, changed_by=entered_by)
                 write_ledger_backup()
                 self._load_entries()
             except Exception as e:

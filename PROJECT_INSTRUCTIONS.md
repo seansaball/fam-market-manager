@@ -5,7 +5,7 @@
 > needs to understand, maintain, or extend the project **without** access to
 > previous conversation history. Keep this file up to date with every commit.
 >
-> **Last updated:** 2026-04-07 — v1.9.3
+> **Last updated:** 2026-04-10 — v1.9.4
 
 ---
 
@@ -28,7 +28,7 @@ dedicated Windows PC.
 | Packaging     | PyInstaller (Windows .exe)          |
 | Cloud Sync    | gspread + google-auth               |
 | Auto-Update   | urllib.request (stdlib)              |
-| Tests         | pytest + pytest-qt (1473 tests)     |
+| Tests         | pytest + pytest-qt (1518 tests)     |
 
 ---
 
@@ -37,7 +37,7 @@ dedicated Windows PC.
 ```
 fam-market-manager/
 ├── fam/                          # Application package
-│   ├── __init__.py               # __version__ = "1.9.3"
+│   ├── __init__.py               # __version__ = "1.9.4"
 │   ├── app.py                    # Qt app entry, data dir, exception handler
 │   ├── settings_io.py            # .fam file import/export
 │   ├── database/
@@ -378,6 +378,7 @@ Legacy data (v1.5.1 and earlier) auto-migrated from exe directory on first launc
 
 | Version | Date       | Summary |
 |---------|------------|---------|
+| v1.9.4  | 2026-04-10 | Auto-update hardening release: (1) updater probes release zip to locate `FAM Manager.exe` and hard-codes the exact source path in the batch script, eliminating silent install failures with double-nested folder structures; (2) `_fam_update.log` in %APPDATA% for post-mortem diagnosis; (3) path-traversal guard rejects unsafe zip member entries; (4) PowerShell path escaping so installs under user paths with apostrophes (e.g. `C:\Users\O'Brien\…`) do not silently fail; (5) pending-update marker file written before batch launches, checked on next startup — version mismatch now surfaces a visible error dialog instead of silent no-op; (6) blocking `pause` statements removed from redirected batch script; 36 new tests including runtime batch execution against synthetic installs, 1518 tests across 24 files |
 | v1.9.3  | 2026-04-07 | Hotfix: penny reconciliation added to payment save path (receipt ±1¢ drift eliminated), match limit query includes Adjusted transactions (returning customer cap no longer bypassed after admin edit), 1473 tests across 24 files |
 | v1.9.2  | 2026-04-03 | Production readiness release: exhaustive financial audit (all money paths traced UI → DB → reports → ledger → sync), 50 new end-to-end UI integration tests, three-way reconciliation verified across all outputs, production readiness assessment for board review, 1470 tests across 24 files |
 | v1.9.1  | 2026-04-02 | Fix: match-cap-aware charge input — daily match limit now correctly raises the charge field maximum so customers can enter the full amount owed when their match is capped; auto-distribute and collect-line-items also cap-aware; 24 new edge case tests (returning customer cumulative cap, void exclusion, penny reconciliation under cap, 200% match with cap, cap=0/1¢ boundaries), 1365 tests across 23 files |

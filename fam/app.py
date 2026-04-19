@@ -228,6 +228,28 @@ def run():
     window.show()
     logger.info("Application window opened")
 
+    # If a previous update attempt left a pending-version marker, check
+    # whether the installed version matches and surface the outcome.
+    # This converts silent updater failures (where the user ends up on
+    # the same version they started on) into a visible, actionable error.
+    try:
+        from fam import __version__
+        from fam.update.checker import check_pending_update_result
+        result = check_pending_update_result(__version__)
+        if result is not None and result.get('status') == 'failed':
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                window,
+                "Update did not complete",
+                f"An update to v{result['target_version']} was started "
+                f"but the application is still running v{result['actual_version']}.\n\n"
+                "The update log is at %APPDATA%\\FAM Market Manager\\_fam_update.log.\n\n"
+                "Please re-download the latest release manually from the "
+                "project's GitHub page.",
+            )
+    except Exception:
+        logger.exception("Pending-update check failed")
+
     exit_code = app.exec()
     logger.info("Application shutting down (exit code %s)", exit_code)
     sys.exit(exit_code)

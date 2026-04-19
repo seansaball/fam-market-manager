@@ -1042,8 +1042,8 @@ class TestSimulatedMarketDay:
             "Ledger should contain total receipts")
 
         # ── Reports Screen ──
-        # Note: Reports screen includes FMNP ($25) in FAM match total
-        expected_report_fam = expected_fam_match + 2500  # +$25 FMNP
+        # FMNP (External) checks are vendor reimbursements, not FAM match
+        expected_report_fam = expected_fam_match
         screen = ReportsScreen()
         qtbot.addWidget(screen)
         screen.refresh()

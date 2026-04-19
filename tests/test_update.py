@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import zipfile
+
 from fam.update.checker import (
     parse_github_repo_url,
     compare_versions,
@@ -18,6 +20,12 @@ from fam.update.checker import (
     download_update,
     verify_download,
     generate_update_script,
+    _find_exe_in_zip,
+    _is_safe_zip_member_path,
+    _ps_single_quote,
+    write_pending_update_marker,
+    check_pending_update_result,
+    PENDING_UPDATE_FILENAME,
 )
 
 
@@ -385,6 +393,121 @@ class TestGenerateUpdateScript:
 
         content = open(script, 'r').read()
         assert 'del "%~f0"' in content
+
+
+# ── Zip Structure Probe ───────────────────────────────────────
+
+
+def _make_zip(path, entries):
+    """Helper: create a zip containing the given file entries."""
+    with zipfile.ZipFile(path, 'w') as zf:
+        for name in entries:
+            zf.writestr(name, b"test")
+
+
+class TestFindExeInZip:
+    """Tests for _find_exe_in_zip() — locates FAM Manager.exe inside the zip."""
+
+    def test_exe_at_root(self, tmp_path):
+        zp = tmp_path / "u.zip"
+        _make_zip(zp, ["FAM Manager.exe", "_internal/foo.dll"])
+        assert _find_exe_in_zip(str(zp)) == ""
+
+    def test_exe_one_level_deep(self, tmp_path):
+        zp = tmp_path / "u.zip"
+        _make_zip(zp, [
+            "FAM Manager/FAM Manager.exe",
+            "FAM Manager/_internal/foo.dll",
+        ])
+        assert _find_exe_in_zip(str(zp)) == "FAM Manager"
+
+    def test_exe_two_levels_deep(self, tmp_path):
+        """This is the actual v1.9.2/v1.9.3 release zip layout."""
+        zp = tmp_path / "u.zip"
+        _make_zip(zp, [
+            "FAM_Manager_v1.9.3/FAM Manager/FAM Manager.exe",
+            "FAM_Manager_v1.9.3/FAM Manager/_internal/foo.dll",
+        ])
+        assert _find_exe_in_zip(str(zp)) == "FAM_Manager_v1.9.3/FAM Manager"
+
+    def test_exe_not_found(self, tmp_path):
+        zp = tmp_path / "u.zip"
+        _make_zip(zp, ["readme.txt", "something.dll"])
+        assert _find_exe_in_zip(str(zp)) is None
+
+    def test_bad_zip(self, tmp_path):
+        bad = tmp_path / "bad.zip"
+        bad.write_bytes(b"not a zip")
+        assert _find_exe_in_zip(str(bad)) is None
+
+
+class TestGenerateUpdateScriptNested:
+    """Tests for nested-zip handling in generate_update_script()."""
+
+    @patch('fam.app.get_data_dir')
+    def test_script_handles_double_nested_zip(self, mock_data_dir, tmp_path):
+        """v1.9.3-style zip (FAM_Manager_vX.Y.Z/FAM Manager/...) should
+        produce a batch script that copies from the correct sub-path."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        zp = tmp_path / "FAM_Manager_v1.9.3.zip"
+        _make_zip(zp, [
+            "FAM_Manager_v1.9.3/FAM Manager/FAM Manager.exe",
+            "FAM_Manager_v1.9.3/FAM Manager/_internal/foo.dll",
+        ])
+
+        script = generate_update_script(app_dir, str(zp))
+        content = open(script, 'r').read()
+
+        # The install xcopy should reference the inner "FAM Manager" folder
+        expected_src = os.path.join(
+            str(tmp_path), "_update_temp",
+            "FAM_Manager_v1.9.3", "FAM Manager",
+        )
+        assert expected_src in content
+        # Sanity check for the guard
+        assert "Expected FAM Manager.exe not found" in content
+
+    @patch('fam.app.get_data_dir')
+    def test_script_handles_single_nested_zip(self, mock_data_dir, tmp_path):
+        """Legacy zip with just FAM Manager/ at root."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        zp = tmp_path / "update.zip"
+        _make_zip(zp, [
+            "FAM Manager/FAM Manager.exe",
+            "FAM Manager/_internal/foo.dll",
+        ])
+
+        script = generate_update_script(app_dir, str(zp))
+        content = open(script, 'r').read()
+
+        expected_src = os.path.join(
+            str(tmp_path), "_update_temp", "FAM Manager")
+        assert expected_src in content
+
+    @patch('fam.app.get_data_dir')
+    def test_script_writes_log_file(self, mock_data_dir, tmp_path):
+        """Batch script should redirect all output to a log file."""
+        mock_data_dir.return_value = str(tmp_path)
+        zp = tmp_path / "u.zip"
+        _make_zip(zp, ["FAM Manager/FAM Manager.exe"])
+
+        script = generate_update_script(str(tmp_path / "app"), str(zp))
+        content = open(script, 'r').read()
+        assert '_fam_update.log' in content
+
+    @patch('fam.app.get_data_dir')
+    def test_script_fallback_when_exe_missing(self, mock_data_dir, tmp_path):
+        """If exe can't be located in zip, fall back to legacy loop."""
+        mock_data_dir.return_value = str(tmp_path)
+        zp = tmp_path / "u.zip"
+        _make_zip(zp, ["random/file.txt"])
+
+        script = generate_update_script(str(tmp_path / "app"), str(zp))
+        content = open(script, 'r').read()
+        # Legacy fallback uses the for /D loop
+        assert 'for /D %%d' in content
 
 
 # ── Settings Helpers ──────────────────────────────────────────
@@ -768,10 +891,18 @@ class TestVersionComparisonExtended:
         assert compare_versions("1.6.1.0", "1.6.1.1") == -1
 
     def test_four_vs_three_part(self):
-        # 3-part padded to match 4-part: 1.6.1.0 vs 1.6.1.1
-        # zip stops at shorter list, so these are equal (by design —
-        # we only use 3-part semver)
-        assert compare_versions("1.6.1", "1.6.1.1") == 0
+        # A 4-part patch release over a 3-part current version must be
+        # offered as an update.  The shorter list is zero-padded:
+        # 1.6.1 → [1,6,1,0]  vs  1.6.1.1 → [1,6,1,1]  →  -1 (update).
+        assert compare_versions("1.6.1", "1.6.1.1") == -1
+
+    def test_three_part_vs_four_part_equal(self):
+        # Conversely, 1.6.1 and 1.6.1.0 are equal once padded.
+        assert compare_versions("1.6.1", "1.6.1.0") == 0
+
+    def test_four_part_current_newer_than_three_part(self):
+        # 1.6.1.1 → [1,6,1,1] is newer than 1.6.1 → [1,6,1,0].
+        assert compare_versions("1.6.1.1", "1.6.1") == 1
 
     def test_leading_zeros(self):
         assert compare_versions("1.06.01", "1.6.1") == 0
@@ -782,3 +913,510 @@ class TestVersionComparisonExtended:
     def test_release_candidate(self):
         # "2.0.0-rc1" → treated as 2.0.0
         assert compare_versions("1.9.9", "2.0.0-rc1") == -1
+
+
+# ═════════════════════════════════════════════════════════════════
+#   v1.9.4 HARDENING — runtime execution + safety + verification
+# ═════════════════════════════════════════════════════════════════
+
+import subprocess
+import sys
+
+
+def _make_real_app_zip(zip_path, inner_folder, exe_bytes=b"NEW_EXE_CONTENTS"):
+    """Build a release-style zip containing a fake FAM Manager.exe.
+
+    ``inner_folder`` is the path inside the zip that holds the exe.
+    Pass ``""`` for a flat zip, ``"FAM Manager"`` for single nesting,
+    or ``"FAM_Manager_v1.9.4/FAM Manager"`` for the historical layout.
+    """
+    with zipfile.ZipFile(zip_path, 'w') as zf:
+        prefix = inner_folder.rstrip('/') + '/' if inner_folder else ''
+        zf.writestr(prefix + 'FAM Manager.exe', exe_bytes)
+        zf.writestr(prefix + '_internal/marker.dll', b"support_lib")
+
+
+def _prime_fake_install(app_dir, old_bytes=b"OLD_EXE_CONTENTS"):
+    """Create a fake existing install at ``app_dir``."""
+    os.makedirs(app_dir, exist_ok=True)
+    with open(os.path.join(app_dir, 'FAM Manager.exe'), 'wb') as f:
+        f.write(old_bytes)
+    internal = os.path.join(app_dir, '_internal')
+    os.makedirs(internal, exist_ok=True)
+    with open(os.path.join(internal, 'old_support.dll'), 'wb') as f:
+        f.write(b"old_support")
+
+
+def _run_batch(script_path, timeout=60):
+    """Run the generated update batch file and wait for it to finish.
+
+    Returns the CompletedProcess.  Uses ``cmd /c`` the same way the real
+    app launches it.  Tests should assert on file-system state after
+    this returns since stdout is redirected inside the script.
+    """
+    return subprocess.run(
+        ['cmd', '/c', script_path],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+# ── Tier 1: Runtime execution tests (Windows only) ────────────
+
+
+@pytest.mark.skipif(sys.platform != 'win32',
+                    reason="Auto-update batch script is Windows-only")
+class TestUpdateScriptRuntime:
+    """Actually execute the generated batch script against synthetic
+    directories and assert the on-disk outcome.
+
+    These tests would have caught the v1.9.3 double-nested-zip bug before
+    release; content-only assertions on the .bat text did not.
+    """
+
+    @patch('fam.app.get_data_dir')
+    def test_script_replaces_exe_flat_zip(self, mock_data_dir, tmp_path):
+        """Flat zip: FAM Manager.exe at the root."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir)
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "", exe_bytes=b"NEW_FLAT")
+
+        script = generate_update_script(app_dir, zp)
+        _run_batch(script)
+
+        with open(os.path.join(app_dir, 'FAM Manager.exe'), 'rb') as f:
+            assert f.read() == b"NEW_FLAT"
+
+    @patch('fam.app.get_data_dir')
+    def test_script_replaces_exe_single_nested(self, mock_data_dir, tmp_path):
+        """Legacy layout: FAM Manager/FAM Manager.exe."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir)
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "FAM Manager", exe_bytes=b"NEW_SINGLE")
+
+        script = generate_update_script(app_dir, zp)
+        _run_batch(script)
+
+        with open(os.path.join(app_dir, 'FAM Manager.exe'), 'rb') as f:
+            assert f.read() == b"NEW_SINGLE"
+
+    @patch('fam.app.get_data_dir')
+    def test_script_replaces_exe_double_nested(self, mock_data_dir, tmp_path):
+        """v1.9.2/v1.9.3 broken layout: FAM_Manager_vX.Y.Z/FAM Manager/...
+
+        This is the exact layout that caused the original bug.  A
+        content-only test would not have caught this; runtime execution
+        proves the hard-coded source_dir and guard work end to end.
+        """
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir)
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp,
+                           "FAM_Manager_v1.9.4/FAM Manager",
+                           exe_bytes=b"NEW_DOUBLE")
+
+        script = generate_update_script(app_dir, zp)
+        _run_batch(script)
+
+        with open(os.path.join(app_dir, 'FAM Manager.exe'), 'rb') as f:
+            assert f.read() == b"NEW_DOUBLE"
+        # Critical: no leftover subfolder should have been copied
+        assert not os.path.isdir(os.path.join(app_dir, 'FAM Manager'))
+        assert not os.path.isdir(
+            os.path.join(app_dir, 'FAM_Manager_v1.9.4'))
+
+    @patch('fam.app.get_data_dir')
+    def test_script_backup_contains_old_version(self, mock_data_dir, tmp_path):
+        """After a successful run, the backup dir must hold the OLD bytes."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir, old_bytes=b"OLD_FOR_BACKUP")
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "FAM Manager", exe_bytes=b"NEW_INSTALL")
+
+        script = generate_update_script(app_dir, zp)
+        _run_batch(script)
+
+        backup_exe = os.path.join(
+            str(tmp_path), '_update_backup', 'FAM Manager.exe')
+        assert os.path.isfile(backup_exe), "backup was not created"
+        with open(backup_exe, 'rb') as f:
+            assert f.read() == b"OLD_FOR_BACKUP"
+
+    @patch('fam.app.get_data_dir')
+    def test_script_cleans_up_temp_and_zip(self, mock_data_dir, tmp_path):
+        """Successful install should delete both the extract temp dir
+        and the downloaded zip."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir)
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "FAM Manager")
+
+        script = generate_update_script(app_dir, zp)
+        _run_batch(script)
+
+        assert not os.path.isdir(str(tmp_path / "_update_temp"))
+        assert not os.path.isfile(zp)
+
+    @patch('fam.app.get_data_dir')
+    def test_script_self_deletes_after_run(self, mock_data_dir, tmp_path):
+        """The .bat file must remove itself at the end so it doesn't
+        linger across reboots."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir)
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "FAM Manager")
+
+        script = generate_update_script(app_dir, zp)
+        assert os.path.isfile(script)
+        _run_batch(script)
+        assert not os.path.isfile(script), "update script did not self-delete"
+
+    @patch('fam.app.get_data_dir')
+    def test_script_guard_fires_when_source_dir_wrong(self, mock_data_dir,
+                                                      tmp_path):
+        """Tamper with the generated script so source_dir points at a
+        path where no FAM Manager.exe exists.  The guard should catch
+        this and exit non-zero with a diagnostic, not silently no-op.
+        """
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir, old_bytes=b"UNCHANGED")
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "FAM Manager", exe_bytes=b"NEW_BYTES")
+
+        script = generate_update_script(app_dir, zp)
+
+        # Swap the real source_dir for a bogus one
+        content = open(script, 'r', encoding='utf-8').read()
+        bad_src = str(tmp_path / "_update_temp" / "does_not_exist")
+        real_src = str(tmp_path / "_update_temp" / "FAM Manager")
+        # Replace every occurrence so both the guard check and the xcopy
+        # path reference the fake location
+        content = content.replace(real_src, bad_src)
+        with open(script, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        result = _run_batch(script)
+
+        # Guard must have fired: non-zero exit
+        assert result.returncode != 0
+        # Log should name the error
+        log_path = str(tmp_path / "_fam_update.log")
+        assert os.path.isfile(log_path)
+        log_text = open(log_path, 'r', encoding='utf-8').read()
+        assert "Expected FAM Manager.exe not found" in log_text
+        # Old install must NOT have been replaced
+        with open(os.path.join(app_dir, 'FAM Manager.exe'), 'rb') as f:
+            assert f.read() == b"UNCHANGED"
+
+    @patch('fam.app.get_data_dir')
+    def test_script_exits_nonzero_on_corrupt_zip(self, mock_data_dir,
+                                                 tmp_path):
+        """When the zip fails to extract, the script must exit with an
+        error and leave the existing install untouched."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir, old_bytes=b"DO_NOT_REPLACE")
+        # Build a valid zip for script generation (so probe works), then
+        # overwrite with garbage so PowerShell extract fails at runtime.
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "FAM Manager")
+        script = generate_update_script(app_dir, zp)
+        with open(zp, 'wb') as f:
+            f.write(b"this is not a valid zip file at all")
+
+        result = _run_batch(script)
+
+        assert result.returncode != 0
+        # Install untouched
+        with open(os.path.join(app_dir, 'FAM Manager.exe'), 'rb') as f:
+            assert f.read() == b"DO_NOT_REPLACE"
+
+
+# ── Tier 2: Log file assertions ───────────────────────────────
+
+
+@pytest.mark.skipif(sys.platform != 'win32',
+                    reason="Log file is produced by Windows batch execution")
+class TestUpdateScriptLogFile:
+    """The _fam_update.log is the only diagnostic users can send us when
+    an auto-update appears to fail.  These tests lock in its presence
+    and content so future regressions don't strip it silently.
+    """
+
+    @patch('fam.app.get_data_dir')
+    def test_log_file_created_on_run(self, mock_data_dir, tmp_path):
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir)
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "FAM Manager")
+
+        script = generate_update_script(app_dir, zp)
+        _run_batch(script)
+
+        log_path = str(tmp_path / "_fam_update.log")
+        assert os.path.isfile(log_path), "_fam_update.log was not created"
+        assert os.path.getsize(log_path) > 0
+
+    @patch('fam.app.get_data_dir')
+    def test_log_contains_install_source_path(self, mock_data_dir, tmp_path):
+        """Log should record the hard-coded source_dir so we can confirm
+        the Python-side probe matched the actual zip layout."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir)
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "FAM_Manager_v1.9.4/FAM Manager")
+
+        script = generate_update_script(app_dir, zp)
+        _run_batch(script)
+
+        log_text = open(str(tmp_path / "_fam_update.log"),
+                        'r', encoding='utf-8').read()
+        assert "Installing update from" in log_text
+        assert "FAM_Manager_v1.9.4" in log_text
+
+    @patch('fam.app.get_data_dir')
+    def test_log_contains_error_on_failure(self, mock_data_dir, tmp_path):
+        """A failed install must leave an ERROR: line in the log."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = str(tmp_path / "app")
+        _prime_fake_install(app_dir)
+        zp = str(tmp_path / "update.zip")
+        _make_real_app_zip(zp, "FAM Manager")
+        script = generate_update_script(app_dir, zp)
+        # Corrupt the zip so extract fails
+        with open(zp, 'wb') as f:
+            f.write(b"garbage")
+
+        _run_batch(script)
+
+        log_text = open(str(tmp_path / "_fam_update.log"),
+                        'r', encoding='utf-8').read()
+        assert "ERROR" in log_text
+
+
+# ── Tier 3: Safety / escaping edge cases ──────────────────────
+
+
+class TestSafeZipMemberPath:
+    """Regression tests for _is_safe_zip_member_path()."""
+
+    def test_normal_path_accepted(self):
+        assert _is_safe_zip_member_path("FAM Manager/FAM Manager.exe")
+
+    def test_root_file_accepted(self):
+        assert _is_safe_zip_member_path("FAM Manager.exe")
+
+    def test_parent_traversal_rejected(self):
+        assert not _is_safe_zip_member_path("../FAM Manager.exe")
+
+    def test_nested_parent_traversal_rejected(self):
+        assert not _is_safe_zip_member_path(
+            "FAM Manager/../../FAM Manager.exe")
+
+    def test_absolute_unix_rejected(self):
+        assert not _is_safe_zip_member_path("/etc/passwd")
+
+    def test_absolute_windows_rejected(self):
+        assert not _is_safe_zip_member_path("\\Windows\\System32\\evil.exe")
+
+    def test_drive_letter_rejected(self):
+        assert not _is_safe_zip_member_path("C:Windows/evil.exe")
+
+    def test_empty_rejected(self):
+        assert not _is_safe_zip_member_path("")
+
+
+class TestFindExePathTraversalGuard:
+    """_find_exe_in_zip must skip unsafe entries so we never compute a
+    source_dir outside the extraction temp dir."""
+
+    def test_traversal_entry_ignored(self, tmp_path):
+        zp = tmp_path / "evil.zip"
+        _make_zip(zp, [
+            "../FAM Manager.exe",             # would escape temp_dir
+            "FAM Manager/FAM Manager.exe",    # legitimate
+        ])
+        # Must return the safe entry, not the traversal one
+        assert _find_exe_in_zip(str(zp)) == "FAM Manager"
+
+    def test_only_unsafe_entries_returns_none(self, tmp_path):
+        zp = tmp_path / "evil.zip"
+        _make_zip(zp, ["../../FAM Manager.exe"])
+        assert _find_exe_in_zip(str(zp)) is None
+
+
+class TestPowerShellPathEscape:
+    """_ps_single_quote() escapes apostrophes for PowerShell -Path '...'.
+
+    Without this, user directories like C:\\Users\\O'Brien\\... break
+    Expand-Archive silently and the update appears to 'succeed' while
+    nothing is installed.
+    """
+
+    def test_no_quote_passes_through(self):
+        assert _ps_single_quote("C:\\Users\\Sean\\AppData") == \
+            "C:\\Users\\Sean\\AppData"
+
+    def test_single_quote_doubled(self):
+        assert _ps_single_quote("C:\\Users\\O'Brien") == \
+            "C:\\Users\\O''Brien"
+
+    def test_multiple_quotes(self):
+        assert _ps_single_quote("a'b'c") == "a''b''c"
+
+
+class TestGenerateScriptPathEdgeCases:
+    """generate_update_script must cope with awkward but legal Windows
+    paths for both app_dir and data_dir."""
+
+    @patch('fam.app.get_data_dir')
+    def test_app_dir_with_spaces(self, mock_data_dir, tmp_path):
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = "C:\\Program Files\\FAM Manager"
+        zp = tmp_path / "u.zip"
+        _make_zip(zp, ["FAM Manager/FAM Manager.exe"])
+
+        script = generate_update_script(app_dir, str(zp))
+        content = open(script, 'r', encoding='utf-8').read()
+
+        # Path is quoted, so spaces should be intact (not escaped/broken)
+        assert f'"{app_dir}' in content
+
+    @patch('fam.app.get_data_dir')
+    def test_zip_path_with_apostrophe_escaped_for_powershell(
+            self, mock_data_dir, tmp_path):
+        """PowerShell Expand-Archive would break on a raw apostrophe in
+        the zip path.  The generator must double the quote.
+
+        Note: the raw apostrophe *does* still appear in the batch-style
+        ``del "..."`` line, where double-quote wrapping makes it safe.
+        Only the PowerShell single-quoted -Path argument needs the
+        doubling.  We assert on the Expand-Archive line specifically.
+        """
+        mock_data_dir.return_value = str(tmp_path)
+        apostrophe_path = "C:\\Users\\O'Brien\\Downloads\\update.zip"
+
+        with patch('fam.update.checker._find_exe_in_zip',
+                   return_value="FAM Manager"):
+            script = generate_update_script("C:\\App", apostrophe_path)
+        content = open(script, 'r', encoding='utf-8').read()
+
+        # Find the Expand-Archive line
+        ps_line = next(
+            (ln for ln in content.splitlines() if 'Expand-Archive' in ln),
+            None,
+        )
+        assert ps_line is not None, "Expand-Archive line not in script"
+        # That line must use the doubled apostrophe (PowerShell escape)
+        assert "O''Brien" in ps_line
+        # And must not contain a raw single-quote break inside ''...''
+        # A raw ' inside the PS -Path '...' would end the string early.
+        # Count apostrophes between the first pair of single quotes that
+        # wrap the -Path argument: must be an even number (0 is fine).
+        path_arg = ps_line.split("-Path '", 1)[1].split("' ", 1)[0]
+        assert path_arg.count("'") % 2 == 0, \
+            f"PowerShell -Path argument has unbalanced quotes: {path_arg!r}"
+
+    @patch('fam.app.get_data_dir')
+    def test_app_dir_with_ampersand_is_quoted(self, mock_data_dir, tmp_path):
+        """Batch treats & as command separator.  Because we wrap app_dir
+        in double quotes throughout, this must still parse cleanly."""
+        mock_data_dir.return_value = str(tmp_path)
+        app_dir = "C:\\Dept & Co\\FAM Manager"
+        zp = tmp_path / "u.zip"
+        _make_zip(zp, ["FAM Manager/FAM Manager.exe"])
+
+        script = generate_update_script(app_dir, str(zp))
+        content = open(script, 'r', encoding='utf-8').read()
+
+        # Every reference to app_dir should be inside double quotes
+        assert f'"{app_dir}\\*"' in content
+        assert f'"{app_dir}\\FAM Manager.exe"' in content
+
+
+# ── Tier 7: Pending-update verification ───────────────────────
+
+
+class TestPendingUpdateMarker:
+    """The pending-update marker turns silent updater failures into
+    loud, user-visible errors on the next launch.  The v1.9.3 bug was
+    silent for days — this is the circuit breaker."""
+
+    def test_write_marker_creates_file(self, tmp_path):
+        path = write_pending_update_marker("1.9.4", data_dir=str(tmp_path))
+        assert os.path.isfile(path)
+        assert path.endswith(PENDING_UPDATE_FILENAME)
+
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        assert data['target_version'] == "1.9.4"
+
+    def test_write_marker_strips_v_prefix(self, tmp_path):
+        path = write_pending_update_marker("v1.9.4", data_dir=str(tmp_path))
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        assert data['target_version'] == "1.9.4"
+
+    def test_check_no_marker_returns_none(self, tmp_path):
+        assert check_pending_update_result("1.9.4",
+                                           data_dir=str(tmp_path)) is None
+
+    def test_check_success_when_versions_match(self, tmp_path):
+        write_pending_update_marker("1.9.4", data_dir=str(tmp_path))
+        result = check_pending_update_result("1.9.4",
+                                             data_dir=str(tmp_path))
+        assert result == {'status': 'success', 'target_version': '1.9.4'}
+
+    def test_check_failure_when_versions_differ(self, tmp_path):
+        """The v1.9.3 bug: user clicks update, app restarts on same
+        version, no visible indication anything went wrong.  With the
+        marker in place, the mismatch is reported immediately."""
+        write_pending_update_marker("1.9.4", data_dir=str(tmp_path))
+        result = check_pending_update_result("1.9.3",
+                                             data_dir=str(tmp_path))
+        assert result == {
+            'status': 'failed',
+            'target_version': '1.9.4',
+            'actual_version': '1.9.3',
+        }
+
+    def test_marker_removed_after_check_success(self, tmp_path):
+        path = write_pending_update_marker("1.9.4", data_dir=str(tmp_path))
+        check_pending_update_result("1.9.4", data_dir=str(tmp_path))
+        assert not os.path.isfile(path), \
+            "marker must not persist — would re-fire on every launch"
+
+    def test_marker_removed_after_check_failure(self, tmp_path):
+        path = write_pending_update_marker("1.9.4", data_dir=str(tmp_path))
+        check_pending_update_result("1.9.3", data_dir=str(tmp_path))
+        assert not os.path.isfile(path)
+
+    def test_corrupt_marker_handled_gracefully(self, tmp_path):
+        """If the marker file is somehow malformed, treat as no marker
+        rather than crashing app startup."""
+        path = os.path.join(str(tmp_path), PENDING_UPDATE_FILENAME)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("this is not valid json {")
+        assert check_pending_update_result("1.9.4",
+                                           data_dir=str(tmp_path)) is None
+        # Corrupt marker should be cleaned up too
+        assert not os.path.isfile(path)
+
+    def test_check_ignores_v_prefix_in_current_version(self, tmp_path):
+        """Current __version__ might or might not have a 'v' prefix."""
+        write_pending_update_marker("1.9.4", data_dir=str(tmp_path))
+        result = check_pending_update_result("v1.9.4",
+                                             data_dir=str(tmp_path))
+        assert result['status'] == 'success'
