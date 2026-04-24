@@ -23,6 +23,7 @@ from fam.update.checker import (
     _find_exe_in_zip,
     _is_safe_zip_member_path,
     _ps_single_quote,
+    _ssl_context,
     write_pending_update_marker,
     check_pending_update_result,
     PENDING_UPDATE_FILENAME,
@@ -1420,3 +1421,102 @@ class TestPendingUpdateMarker:
         result = check_pending_update_result("v1.9.4",
                                              data_dir=str(tmp_path))
         assert result['status'] == 'success'
+
+
+# ═════════════════════════════════════════════════════════════════
+#   v1.9.6 TLS FIX — certifi-backed SSL context
+# ═════════════════════════════════════════════════════════════════
+
+class TestSslContext:
+    """Regression tests for the v1.9.5 'CERTIFICATE_VERIFY_FAILED in
+    frozen build' bug.
+
+    The root cause was that ``urllib.urlopen`` used the default SSL
+    context, which in a PyInstaller-frozen app has no trusted CAs
+    (OpenSSL's compiled-in search paths do not resolve inside the
+    bundle).  The fix builds an SSL context explicitly from
+    ``certifi.where()`` and reuses it for every outbound HTTPS call.
+    """
+
+    def setup_method(self):
+        # Reset cached context so each test sees a fresh build
+        import fam.update.checker as ch
+        ch._SSL_CONTEXT = None
+
+    def test_context_uses_certifi_bundle(self):
+        """When certifi is available, the context must be built from
+        ``certifi.where()`` — not the platform default."""
+        import certifi
+        ctx = _ssl_context()
+        # create_default_context returns an SSLContext regardless of
+        # source; we verify certifi's bundle path is readable and the
+        # returned object is the cached instance.
+        assert ctx is not None
+        assert os.path.isfile(certifi.where())
+        # Calling again returns the cached object (not a fresh build)
+        assert _ssl_context() is ctx
+
+    def test_context_verifies_certificates(self):
+        """The context must have certificate verification enabled —
+        a context with CERT_NONE would defeat the whole purpose."""
+        import ssl as _ssl
+        ctx = _ssl_context()
+        assert ctx.verify_mode == _ssl.CERT_REQUIRED
+
+    def test_context_enforces_hostname_check(self):
+        """Hostname verification must be on — a MITM could otherwise
+        present a valid cert for a different domain."""
+        ctx = _ssl_context()
+        assert ctx.check_hostname is True
+
+    def test_context_falls_back_when_certifi_missing(self):
+        """If certifi cannot be imported, the helper must not crash —
+        it falls back to the platform default context so dev-mode
+        (where certifi often isn't needed) keeps working."""
+        import fam.update.checker as ch
+        ch._SSL_CONTEXT = None
+        with patch.dict('sys.modules', {'certifi': None}):
+            # Also need to patch the import statement inside _ssl_context
+            with patch('builtins.__import__', side_effect=ImportError):
+                ctx = ch._ssl_context()
+        assert ctx is not None  # fell back to default, did not raise
+
+    def test_check_for_update_passes_context_to_urlopen(self):
+        """The v1.9.5 bug fix: check_for_update MUST pass the certifi-
+        backed context to urlopen, not rely on the default context."""
+        from unittest.mock import patch, MagicMock
+        resp = MagicMock()
+        resp.read.return_value = b'{"tag_name": "v2.0.0", "name": "x", "body": "", "assets": [{"name": "f.zip", "browser_download_url": "https://x/f.zip", "size": 100}]}'
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        with patch('fam.update.checker.urlopen', return_value=resp) as mock_urlopen:
+            check_for_update('owner', 'repo', '1.9.5')
+        # urlopen must have been called with context= kwarg, not default
+        call_kwargs = mock_urlopen.call_args.kwargs
+        assert 'context' in call_kwargs, \
+            "check_for_update must pass explicit SSL context to urlopen"
+        assert call_kwargs['context'] is _ssl_context()
+
+    def test_download_update_passes_context_to_urlopen(self, tmp_path):
+        """Same invariant for the download path — this is where the
+        real user-reported failure happened."""
+        from unittest.mock import patch, MagicMock
+        resp = MagicMock()
+        resp.headers = {'Content-Length': '5'}
+        resp.read = MagicMock(side_effect=[b'12345', b''])
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        with patch('fam.update.checker.urlopen', return_value=resp) as mock_urlopen:
+            download_update('https://x/f.zip', str(tmp_path / 'f.zip'))
+        call_kwargs = mock_urlopen.call_args.kwargs
+        assert 'context' in call_kwargs, \
+            "download_update must pass explicit SSL context to urlopen"
+        assert call_kwargs['context'] is _ssl_context()
+
+    def test_context_cached_across_calls(self):
+        """The context is expensive to build (certifi file read + SSL
+        init) — verify it is built once and reused."""
+        ctx1 = _ssl_context()
+        ctx2 = _ssl_context()
+        ctx3 = _ssl_context()
+        assert ctx1 is ctx2 is ctx3

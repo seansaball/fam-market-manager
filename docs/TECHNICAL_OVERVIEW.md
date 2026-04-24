@@ -1,6 +1,6 @@
 # FAM Market Manager — Technical Overview
 
-> **Version:** 1.9.5
+> **Version:** 1.9.6
 > **Last Updated:** April 2026
 > **Audience:** Developers, administrators, and stakeholders
 
@@ -116,7 +116,7 @@ The application runs as a standalone Windows desktop executable with local SQLit
 | Photo Upload | google-auth (AuthorizedSession) | Google Drive REST API |
 | Auto-Update | urllib.request (stdlib) | GitHub Releases API |
 | Packaging | PyInstaller | Standalone Windows executable |
-| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1540 tests) |
+| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1547 tests) |
 
 **Runtime Dependencies** (`requirements.txt`):
 - `PySide6 >= 6.5.0`
@@ -213,7 +213,7 @@ fam-market-manager/
 │   ├── test_payment_method_safety.py # 23 tests — payment method CRUD safety, deactivation guards
 │   └── conftest.py / __init__.py
 ├── releases/
-│   └── FAM_Manager_v1.9.5.zip # Distribution package
+│   └── FAM_Manager_v1.9.6.zip # Distribution package
 ├── fam_manager.spec            # PyInstaller build configuration
 ├── build.bat                   # Windows build script
 ├── requirements.txt
@@ -615,7 +615,7 @@ When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is
 
 ## 13. Testing
 
-**1540 tests** across 24 test files:
+**1547 tests** across 24 test files:
 
 | File | Tests | Coverage |
 |------|-------|----------|

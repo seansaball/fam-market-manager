@@ -1,13 +1,17 @@
 """Auto-update logic — GitHub Releases version check, download, and update script.
 
 Pure Python (no Qt dependency) so it can be tested independently.
-Uses only stdlib: urllib, json, re, os, zipfile.
+Uses only stdlib: urllib, json, re, os, ssl, zipfile.  Relies on the
+bundled ``certifi`` package for TLS root certificates when running as
+a PyInstaller-frozen build (where OpenSSL's default CA search paths do
+not resolve inside the one-file bundle).
 """
 
 import json
 import logging
 import os
 import re
+import ssl
 import sys
 import textwrap
 import zipfile
@@ -16,6 +20,51 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger('fam.update.checker')
+
+
+# ── TLS root certificate handling ────────────────────────────
+
+# Cached SSL context so we don't rebuild it on every call.  Built on
+# first access via :func:`_ssl_context`.
+_SSL_CONTEXT: Optional[ssl.SSLContext] = None
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Return a shared SSL context backed by certifi's CA bundle.
+
+    In PyInstaller-frozen builds, :func:`ssl.create_default_context`
+    produces a context with no trusted CAs because OpenSSL's compiled-
+    in default search paths do not exist inside the frozen bundle.
+    Connecting to GitHub's CDN then fails with
+    ``CERTIFICATE_VERIFY_FAILED`` — the bug that blocked auto-update
+    on v1.9.5 and earlier.
+
+    We explicitly build the context against :func:`certifi.where()`,
+    which returns the CA bundle bundled with our app (the PyInstaller
+    spec file includes ``collect_data_files('certifi')``).
+
+    If ``certifi`` cannot be imported for any reason (e.g. the dev
+    environment on a machine where it is not installed), we fall back
+    to the platform default — which works fine in non-frozen mode
+    because system Python picks up the OS certificate store.
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is not None:
+        return _SSL_CONTEXT
+
+    try:
+        import certifi
+        ca_path = certifi.where()
+        ctx = ssl.create_default_context(cafile=ca_path)
+        logger.info("TLS: using certifi CA bundle at %s", ca_path)
+    except Exception:
+        logger.exception(
+            "TLS: could not load certifi bundle, falling back to "
+            "platform default (may fail in frozen builds)")
+        ctx = ssl.create_default_context()
+
+    _SSL_CONTEXT = ctx
+    return ctx
 
 # ── URL parsing ───────────────────────────────────────────────
 
@@ -116,7 +165,7 @@ def check_for_update(owner: str, repo: str,
     })
 
     try:
-        with urlopen(req, timeout=10) as resp:
+        with urlopen(req, timeout=10, context=_ssl_context()) as resp:
             data = json.loads(resp.read().decode('utf-8'))
     except HTTPError as e:
         if e.code == 404:
@@ -186,7 +235,7 @@ def download_update(asset_url: str, dest_path: str,
     try:
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
-        with urlopen(req, timeout=120) as resp:
+        with urlopen(req, timeout=120, context=_ssl_context()) as resp:
             total = int(resp.headers.get('Content-Length', 0))
             downloaded = 0
 
