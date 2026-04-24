@@ -1,7 +1,7 @@
 # FAM Market Manager — User Guide
 
 > **For volunteers, coordinators, and market day staff**
-> Version 1.9.4
+> Version 1.9.5
 
 ---
 
@@ -353,6 +353,26 @@ One-way sync that uploads end-of-day reports to Google Sheets so coordinators an
 2. The app uploads the current day's data to the configured spreadsheet
 3. A progress indicator shows while the sync is running
 4. On success, the "Last Synced" timestamp updates
+
+**What the sync indicator in the sidebar means:**
+
+The small colored dot + label next to the "Sync to Cloud" button reflects the
+current state of cloud sync. It does **not** make a live internet speed test —
+it reports what the app knows for certain.
+
+| Dot color | Label | What it means |
+|-----------|-------|---------------|
+| Green | **Last sync OK** | Your most recent sync attempt succeeded |
+| Red | **Sync failed** | The most recent sync attempt hit an error |
+| Amber | **Syncing…** | A sync is currently in progress |
+| Amber | **Attention** | Last sync succeeded but one or more photos had issues |
+| Gray | **No network** | Windows reports the laptop is disconnected from the network |
+| Gray | **Not synced yet** | Sync is configured but no sync has run yet on this laptop |
+| (hidden) | | Sync is not configured |
+
+If you see "No network", your data is still safe — it is stored locally on
+this laptop and will sync automatically the next time the laptop reconnects
+and a sync is run.
 
 **Google Drive photo sync:**
 

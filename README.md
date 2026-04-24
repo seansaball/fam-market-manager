@@ -96,6 +96,7 @@ Output: `dist\FAM Manager\FAM Manager.exe`
 
 | Version | Summary |
 |---------|---------|
+| v1.9.5 | Hotfix: sync indicator no longer shows false green "Online" when the laptop is disconnected. Now uses Qt `QNetworkInformation` for OS-level reachability and relabels all indicator states to describe what the app actually knows ("Last sync OK", "Sync failed", "No network", "Not synced yet"). Disconnection repaints within a second. 14 new tests, 1540 tests across 24 files |
 | v1.9.4 | Auto-update hardening: nested-zip bug fixed via zip probe + hard-coded source path, update log file (`_fam_update.log`) for diagnosis, path-traversal guard on zip entries, PowerShell escaping for paths with apostrophes, pending-update marker so silent install failures surface as a visible error dialog on next launch, 36 new tests including runtime batch execution, 1518 tests across 24 files |
 | v1.9.3 | Hotfix: penny reconciliation in payment save path, match limit includes Adjusted transactions, 1473 tests across 24 files |
 | v1.9.2 | Production readiness release: exhaustive financial audit, 50 new end-to-end UI integration tests, three-way reconciliation verified, production readiness assessment for board review, 1470 tests across 24 files |

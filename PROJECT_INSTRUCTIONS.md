@@ -5,7 +5,7 @@
 > needs to understand, maintain, or extend the project **without** access to
 > previous conversation history. Keep this file up to date with every commit.
 >
-> **Last updated:** 2026-04-10 — v1.9.4
+> **Last updated:** 2026-04-24 — v1.9.5
 
 ---
 
@@ -28,7 +28,7 @@ dedicated Windows PC.
 | Packaging     | PyInstaller (Windows .exe)          |
 | Cloud Sync    | gspread + google-auth               |
 | Auto-Update   | urllib.request (stdlib)              |
-| Tests         | pytest + pytest-qt (1518 tests)     |
+| Tests         | pytest + pytest-qt (1540 tests)     |
 
 ---
 
@@ -37,7 +37,7 @@ dedicated Windows PC.
 ```
 fam-market-manager/
 ├── fam/                          # Application package
-│   ├── __init__.py               # __version__ = "1.9.4"
+│   ├── __init__.py               # __version__ = "1.9.5"
 │   ├── app.py                    # Qt app entry, data dir, exception handler
 │   ├── settings_io.py            # .fam file import/export
 │   ├── database/
@@ -378,6 +378,7 @@ Legacy data (v1.5.1 and earlier) auto-migrated from exe directory on first launc
 
 | Version | Date       | Summary |
 |---------|------------|---------|
+| v1.9.5  | 2026-04-24 | Hotfix: sync indicator no longer falsely displays green "Online" when the laptop is offline. The prior indicator was reading `last_sync_at` from the database and painting green whenever a past sync had succeeded, which misled volunteers into thinking they were connected at markets with no internet. Integrated Qt `QNetworkInformation` (Windows Network List Manager backend, no outbound probes) so the idle indicator reflects actual OS-reported reachability. Relabeled every state to describe what the app knows: "Last sync OK" / "Sync failed" / "Syncing…" / "Attention" / "No network" / "Not synced yet" — never the ambiguous "Online"/"Offline". Disconnection events now repaint within a second via Qt's `reachabilityChanged` signal. "No network" state includes reassurance text "data safe locally" so volunteers aren't alarmed. 14 new tests (indicator state labels + regression guard that "Online"/"Offline" never appear + OS-network helper + update-visibility state selection), 1540 tests across 24 files |
 | v1.9.4  | 2026-04-10 | Auto-update hardening release: (1) updater probes release zip to locate `FAM Manager.exe` and hard-codes the exact source path in the batch script, eliminating silent install failures with double-nested folder structures; (2) `_fam_update.log` in %APPDATA% for post-mortem diagnosis; (3) path-traversal guard rejects unsafe zip member entries; (4) PowerShell path escaping so installs under user paths with apostrophes (e.g. `C:\Users\O'Brien\…`) do not silently fail; (5) pending-update marker file written before batch launches, checked on next startup — version mismatch now surfaces a visible error dialog instead of silent no-op; (6) blocking `pause` statements removed from redirected batch script; 36 new tests including runtime batch execution against synthetic installs, 1518 tests across 24 files |
 | v1.9.3  | 2026-04-07 | Hotfix: penny reconciliation added to payment save path (receipt ±1¢ drift eliminated), match limit query includes Adjusted transactions (returning customer cap no longer bypassed after admin edit), 1473 tests across 24 files |
 | v1.9.2  | 2026-04-03 | Production readiness release: exhaustive financial audit (all money paths traced UI → DB → reports → ledger → sync), 50 new end-to-end UI integration tests, three-way reconciliation verified across all outputs, production readiness assessment for board review, 1470 tests across 24 files |

@@ -308,6 +308,13 @@ class MainWindow(QMainWindow):
         self._update_check_thread = None
         self._update_check_worker = None
 
+        # OS-level network reachability monitor (Qt 6 QNetworkInformation).
+        # Used so the sync indicator can honestly say "No network" when the
+        # laptop is disconnected, rather than painting a stale "Last sync OK"
+        # green based on a historical timestamp.
+        self._network_info = None
+        self._setup_network_monitor()
+
         # If a market day is already open at startup (e.g. after crash), start timers
         QTimer.singleShot(1000, self._update_backup_timer)
         QTimer.singleShot(1500, self._update_sync_visibility)
@@ -355,18 +362,84 @@ class MainWindow(QMainWindow):
         from fam.database.backup import create_backup
         create_backup(reason="auto")
 
+    # ── Network reachability monitor ────────────────────────────
+
+    def _setup_network_monitor(self):
+        """Load the Qt network-information backend so the sync indicator
+        can react to the laptop being disconnected.
+
+        This uses the OS's own reporting (Windows: Network List Manager)
+        and does *not* make outbound network requests.  If the backend
+        cannot load for any reason, we silently fall through — the
+        indicator will simply not show "No network" but every other
+        state continues to work as before.
+        """
+        try:
+            from PySide6.QtNetwork import QNetworkInformation
+            if QNetworkInformation.loadDefaultBackend():
+                info = QNetworkInformation.instance()
+                if info is not None:
+                    info.reachabilityChanged.connect(
+                        self._on_network_reachability_changed)
+                    self._network_info = info
+                    logger.info("Network monitor active: backend=%s reach=%s",
+                                info.backendName(), info.reachability())
+        except Exception:
+            logger.exception("Could not initialize network monitor")
+            self._network_info = None
+
+    def _os_network_connected(self) -> bool:
+        """Return True unless the OS explicitly reports no network.
+
+        Conservative by design: we only return False when reachability
+        is Disconnected.  Unknown / Local / Site / Online all count as
+        'probably ok' so that a missing or uncertain backend never
+        misleads the user with a false "No network" indicator.
+        """
+        if self._network_info is None:
+            return True
+        try:
+            from PySide6.QtNetwork import QNetworkInformation
+            reach = self._network_info.reachability()
+            return reach != QNetworkInformation.Reachability.Disconnected
+        except Exception:
+            return True
+
+    def _on_network_reachability_changed(self, _reachability):
+        """Qt slot: OS reported a change in network reachability.
+
+        Repaint the indicator so green/gray reflects the new reality
+        without waiting for the next user action.
+        """
+        logger.info("Network reachability changed: %s", _reachability)
+        # Only refresh the idle indicator — don't disturb an in-flight sync
+        if not (self._sync_thread and self._sync_thread.isRunning()):
+            self._update_sync_visibility()
+
     # ── Cloud sync ─────────────────────────────────────────────
 
     def _set_sync_indicator(self, state: str, detail: str = ""):
-        """Update the online/offline indicator.
+        """Update the sync-health / network indicator.
 
-        *state*: ``"online"``, ``"offline"``, ``"syncing"``, ``"warning"``,
-        or ``"error"``.
-        *detail*: optional extra text (e.g. timestamp or error summary).
+        Labels describe what the app actually knows — not a claim about
+        live connectivity we cannot prove.  Prior to v1.9.5 the states
+        were "Online" / "Offline" which misled users into thinking the
+        app had verified internet access; it had not.
+
+        *state*:
+            ``"online"``      — last sync attempt succeeded   (green)
+            ``"no_network"``  — OS reports no network         (gray)
+            ``"never"``       — configured, no sync yet       (gray)
+            ``"syncing"``     — sync in progress              (amber)
+            ``"warning"``     — last sync had photo issues    (amber)
+            ``"error"``       — last sync attempt failed      (red)
+            ``"offline"``     — legacy alias for "never"      (gray)
+        *detail*: optional extra text shown to the right (timestamp,
+        error summary, etc.).
         """
         if state == "online":
             color = PRIMARY_GREEN
-            label = "Online"
+            label = "Last sync OK"
         elif state == "syncing":
             color = "#F5A623"  # amber
             label = "Syncing…"
@@ -375,10 +448,14 @@ class MainWindow(QMainWindow):
             label = "Attention"
         elif state == "error":
             color = "#d32f2f"
-            label = "Sync Error"
-        else:
+            label = "Sync failed"
+        elif state == "no_network":
             color = SUBTITLE_GRAY
-            label = "Offline"
+            label = "No network"
+        else:
+            # "never" and legacy "offline" both land here
+            color = SUBTITLE_GRAY
+            label = "Not synced yet"
 
         text = f"<span style='color:{color}; font-size:14px;'>●</span>"
         text += f"&nbsp;<span style='color:{color}; font-weight:600; font-size:12px;'>{label}</span>"
@@ -388,23 +465,48 @@ class MainWindow(QMainWindow):
         self._sync_indicator.setStyleSheet("background: transparent; padding: 0 8px;")
 
     def _update_sync_visibility(self):
-        """Show/hide the sync button + indicator based on configuration."""
+        """Show/hide the sync button + indicator based on configuration.
+
+        Indicator priority (highest first):
+            OS network disconnected   -> "No network"           (gray)
+            Configured + never synced -> "Not synced yet"       (gray)
+            Configured + last sync ok -> "Last sync OK"         (green)
+            Not configured            -> indicator hidden
+        Live "Syncing…" and "Sync failed" states are set by the sync
+        completion handlers, not here; this method only paints the
+        idle-state indicator.
+        """
         try:
             from fam.utils.app_settings import is_sync_configured, get_last_sync_at
             configured = is_sync_configured()
             self._sync_btn.setVisible(configured)
             self._sync_indicator.setVisible(configured)
-            if configured:
+            if not configured:
+                self._set_sync_indicator("never")
+                return
+
+            # OS-level reachability takes priority — if the laptop is
+            # disconnected we don't want a stale "Last sync OK" green
+            # to imply the volunteer is currently online.  Their data
+            # is still safe locally; the detail tooltip makes that clear.
+            if not self._os_network_connected():
                 last = get_last_sync_at()
                 if last:
                     short = last[11:16] if len(last) > 16 else last
-                    self._set_sync_indicator("online", f"Last sync: {short}")
+                    self._set_sync_indicator(
+                        "no_network", f"Last sync: {short} (data safe locally)")
                 else:
-                    self._set_sync_indicator("offline")
+                    self._set_sync_indicator("no_network")
+                return
+
+            last = get_last_sync_at()
+            if last:
+                short = last[11:16] if len(last) > 16 else last
+                self._set_sync_indicator("online", f"Last sync: {short}")
             else:
-                self._set_sync_indicator("offline")
+                self._set_sync_indicator("never")
         except Exception:
-            pass
+            logger.exception("Could not refresh sync indicator")
 
     def _maybe_sync_on_close(self):
         """Trigger sync when market day closes, if enabled."""

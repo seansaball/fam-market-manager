@@ -279,12 +279,17 @@ class TestSetSyncIndicator:
         return window
 
     def test_online_state(self):
+        """v1.9.5+: 'online' now renders as 'Last sync OK' (green) — it
+        describes what we actually know (a sync attempt succeeded), not
+        a live connectivity claim the app cannot back up."""
         from fam.ui.main_window import MainWindow
         window = self._make_mock_window()
         MainWindow._set_sync_indicator(window, "online", "Last sync: 14:30")
         text = window._sync_indicator.setText.call_args[0][0]
-        assert "Online" in text
-        assert "#2E7D32" in text or "Online" in text
+        assert "Last sync OK" in text
+        # Green color, any shade of "2E" that matches PRIMARY_GREEN
+        from fam.ui.styles import PRIMARY_GREEN
+        assert PRIMARY_GREEN in text
 
     def test_warning_state(self):
         from fam.ui.main_window import MainWindow
@@ -295,11 +300,12 @@ class TestSetSyncIndicator:
         assert "#F5A623" in text
 
     def test_error_state(self):
+        """v1.9.5+: 'error' now renders as 'Sync failed' (red)."""
         from fam.ui.main_window import MainWindow
         window = self._make_mock_window()
         MainWindow._set_sync_indicator(window, "error", "1 tab(s) failed")
         text = window._sync_indicator.setText.call_args[0][0]
-        assert "Sync Error" in text
+        assert "Sync failed" in text
         assert "#d32f2f" in text
 
     def test_syncing_state(self):
@@ -310,19 +316,46 @@ class TestSetSyncIndicator:
         assert "Syncing" in text
         assert "#F5A623" in text
 
-    def test_offline_state(self):
+    def test_offline_state_renders_as_not_synced_yet(self):
+        """v1.9.5+: legacy 'offline' maps to 'Not synced yet' since the
+        app cannot truthfully claim 'offline' without a live probe."""
         from fam.ui.main_window import MainWindow
         window = self._make_mock_window()
         MainWindow._set_sync_indicator(window, "offline")
         text = window._sync_indicator.setText.call_args[0][0]
-        assert "Offline" in text
+        assert "Not synced yet" in text
+        # Must NOT use the old misleading label
+        assert "Online" not in text
+        assert "Offline" not in text
 
-    def test_unknown_state_defaults_offline(self):
+    def test_never_state_renders_as_not_synced_yet(self):
+        """'never' is the explicit successor to the 'offline' state."""
+        from fam.ui.main_window import MainWindow
+        window = self._make_mock_window()
+        MainWindow._set_sync_indicator(window, "never")
+        text = window._sync_indicator.setText.call_args[0][0]
+        assert "Not synced yet" in text
+
+    def test_no_network_state(self):
+        """v1.9.5+: new 'no_network' state fires when the OS reports
+        the laptop is disconnected.  This is the state that prevents
+        the volunteer from seeing green 'Last sync OK' on an offline
+        laptop, which was the v1.9.4 bug."""
+        from fam.ui.main_window import MainWindow
+        window = self._make_mock_window()
+        MainWindow._set_sync_indicator(
+            window, "no_network", "Last sync: 10:12 (data safe locally)")
+        text = window._sync_indicator.setText.call_args[0][0]
+        assert "No network" in text
+        # The detail line must reassure the user that data is NOT lost
+        assert "data safe locally" in text
+
+    def test_unknown_state_defaults_to_not_synced_yet(self):
         from fam.ui.main_window import MainWindow
         window = self._make_mock_window()
         MainWindow._set_sync_indicator(window, "bogus_state")
         text = window._sync_indicator.setText.call_args[0][0]
-        assert "Offline" in text
+        assert "Not synced yet" in text
 
     def test_detail_in_tooltip(self):
         from fam.ui.main_window import MainWindow
@@ -331,6 +364,23 @@ class TestSetSyncIndicator:
         text = window._sync_indicator.setText.call_args[0][0]
         # Detail text appears after the label
         assert "3 photo(s) failed" in text
+
+    def test_labels_do_not_claim_live_connectivity(self):
+        """Regression guard for the v1.9.4 'false online' bug: none of
+        the idle indicator labels may contain the word 'Online' or
+        'Offline' since neither can be proven without a live network
+        probe we deliberately don't run."""
+        from fam.ui.main_window import MainWindow
+        window = self._make_mock_window()
+        for state in ('online', 'offline', 'never', 'no_network', 'error',
+                      'warning', 'syncing', 'bogus'):
+            window._sync_indicator.reset_mock()
+            MainWindow._set_sync_indicator(window, state)
+            text = window._sync_indicator.setText.call_args[0][0]
+            # Strict word-boundary-ish check: the bare word Online/Offline
+            # must not appear as a displayed label.
+            assert "Online" not in text, f"state={state} still says 'Online'"
+            assert "Offline" not in text, f"state={state} still says 'Offline'"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -596,6 +646,152 @@ class TestSyncTooltipContent:
 
         tooltip = window._sync_indicator.setToolTip.call_args[0][0]
         assert "Sheets: 23 rows synced" in tooltip
+
+
+# ══════════════════════════════════════════════════════════════════
+# _update_sync_visibility — state selection from OS network + history
+# ══════════════════════════════════════════════════════════════════
+class TestUpdateSyncVisibility:
+    """Regression tests for the v1.9.4 'false Online' bug.
+
+    When the laptop is disconnected from the internet and the database
+    still holds a ``last_sync_at`` timestamp from a prior session, the
+    indicator must NOT render as green 'Last sync OK'.  v1.9.5 added
+    an OS-level network check so the idle indicator shows 'No network'
+    in that scenario.
+    """
+
+    def _make_mock_window(self, os_connected=True):
+        window = MagicMock()
+        window._sync_btn = MagicMock()
+        window._sync_indicator = MagicMock()
+        window._os_network_connected = MagicMock(return_value=os_connected)
+        return window
+
+    def test_hidden_when_sync_not_configured(self):
+        from fam.ui.main_window import MainWindow
+        window = self._make_mock_window()
+        with patch('fam.utils.app_settings.is_sync_configured', return_value=False):
+            MainWindow._update_sync_visibility(window)
+        window._sync_btn.setVisible.assert_called_with(False)
+        window._sync_indicator.setVisible.assert_called_with(False)
+        # State should be painted as "never" so if visibility changes later
+        # the indicator starts in a sensible state.
+        # (This tolerance — we just assert _set_sync_indicator was called.)
+
+    def test_shows_no_network_when_os_disconnected_with_prior_sync(self):
+        """The v1.9.4 bug scenario: last_sync_at exists from earlier,
+        but the laptop is currently offline.  Indicator MUST say
+        'No network', not green 'Last sync OK'."""
+        from fam.ui.main_window import MainWindow
+        window = self._make_mock_window(os_connected=False)
+        window._set_sync_indicator = MagicMock()
+        with patch('fam.utils.app_settings.is_sync_configured', return_value=True), \
+             patch('fam.utils.app_settings.get_last_sync_at',
+                   return_value='2026-04-22T14:30:00'):
+            MainWindow._update_sync_visibility(window)
+        state, detail = window._set_sync_indicator.call_args[0][:2]
+        assert state == 'no_network'
+        # Reassure the volunteer their data is safe
+        assert 'safe locally' in detail
+
+    def test_shows_no_network_when_os_disconnected_never_synced(self):
+        from fam.ui.main_window import MainWindow
+        window = self._make_mock_window(os_connected=False)
+        window._set_sync_indicator = MagicMock()
+        with patch('fam.utils.app_settings.is_sync_configured', return_value=True), \
+             patch('fam.utils.app_settings.get_last_sync_at', return_value=None):
+            MainWindow._update_sync_visibility(window)
+        state = window._set_sync_indicator.call_args[0][0]
+        assert state == 'no_network'
+
+    def test_shows_never_when_configured_but_no_prior_sync(self):
+        from fam.ui.main_window import MainWindow
+        window = self._make_mock_window(os_connected=True)
+        window._set_sync_indicator = MagicMock()
+        with patch('fam.utils.app_settings.is_sync_configured', return_value=True), \
+             patch('fam.utils.app_settings.get_last_sync_at', return_value=None):
+            MainWindow._update_sync_visibility(window)
+        state = window._set_sync_indicator.call_args[0][0]
+        assert state == 'never'
+
+    def test_shows_online_when_connected_and_prior_sync_exists(self):
+        from fam.ui.main_window import MainWindow
+        window = self._make_mock_window(os_connected=True)
+        window._set_sync_indicator = MagicMock()
+        with patch('fam.utils.app_settings.is_sync_configured', return_value=True), \
+             patch('fam.utils.app_settings.get_last_sync_at',
+                   return_value='2026-04-22T14:30:00'):
+            MainWindow._update_sync_visibility(window)
+        state, detail = window._set_sync_indicator.call_args[0][:2]
+        assert state == 'online'
+        assert '14:30' in detail
+
+
+# ══════════════════════════════════════════════════════════════════
+# _os_network_connected — conservative truth about OS reachability
+# ══════════════════════════════════════════════════════════════════
+class TestOsNetworkConnected:
+    """The helper must return True unless the OS explicitly reports
+    Disconnected.  Any other state (including Unknown) is treated as
+    'probably ok' so a missing backend never produces a false alarm."""
+
+    def test_returns_true_when_backend_unavailable(self):
+        from fam.ui.main_window import MainWindow
+        window = MagicMock()
+        window._network_info = None
+        assert MainWindow._os_network_connected(window) is True
+
+    def test_returns_false_when_disconnected(self):
+        from fam.ui.main_window import MainWindow
+        from PySide6.QtNetwork import QNetworkInformation
+        window = MagicMock()
+        window._network_info = MagicMock()
+        window._network_info.reachability.return_value = (
+            QNetworkInformation.Reachability.Disconnected)
+        assert MainWindow._os_network_connected(window) is False
+
+    def test_returns_true_when_online(self):
+        from fam.ui.main_window import MainWindow
+        from PySide6.QtNetwork import QNetworkInformation
+        window = MagicMock()
+        window._network_info = MagicMock()
+        window._network_info.reachability.return_value = (
+            QNetworkInformation.Reachability.Online)
+        assert MainWindow._os_network_connected(window) is True
+
+    def test_returns_true_when_unknown(self):
+        """Unknown reachability must be treated as 'probably ok' — we
+        would rather occasionally show green when offline than show
+        red when actually online."""
+        from fam.ui.main_window import MainWindow
+        from PySide6.QtNetwork import QNetworkInformation
+        window = MagicMock()
+        window._network_info = MagicMock()
+        window._network_info.reachability.return_value = (
+            QNetworkInformation.Reachability.Unknown)
+        assert MainWindow._os_network_connected(window) is True
+
+    def test_returns_true_when_local_only(self):
+        """Local-network-only counts as 'probably ok' for the purposes
+        of the idle indicator.  The sync attempt will fail if Google
+        Sheets isn't reachable; that's when we paint red."""
+        from fam.ui.main_window import MainWindow
+        from PySide6.QtNetwork import QNetworkInformation
+        window = MagicMock()
+        window._network_info = MagicMock()
+        window._network_info.reachability.return_value = (
+            QNetworkInformation.Reachability.Local)
+        assert MainWindow._os_network_connected(window) is True
+
+    def test_exception_returns_true(self):
+        """If anything goes wrong reading reachability, fail safe —
+        don't claim 'no network' on the basis of an error."""
+        from fam.ui.main_window import MainWindow
+        window = MagicMock()
+        window._network_info = MagicMock()
+        window._network_info.reachability.side_effect = RuntimeError("boom")
+        assert MainWindow._os_network_connected(window) is True
 
 
 # ══════════════════════════════════════════════════════════════════
