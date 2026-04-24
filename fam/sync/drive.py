@@ -10,6 +10,7 @@ import os
 import random
 import re
 import time as _time
+from enum import Enum
 from typing import Optional
 
 logger = logging.getLogger('fam.sync.drive')
@@ -23,6 +24,27 @@ DRIVE_API_BASE = "https://www.googleapis.com"
 
 # Maximum retries for transient Drive API errors
 _MAX_RETRIES = 3
+
+# How often the verification sweep may run.  Heavy-FMNP markets can
+# have hundreds of photo URLs to verify per cycle; running that every
+# 60 seconds consumes Drive API quota without catching anything new
+# (Drive deletions are rare events).  Throttle to once every 10 minutes
+# regardless of how many syncs fire.  New-photo upload is not throttled.
+_VERIFICATION_MIN_INTERVAL_SEC = 600
+
+
+class VerifyResult(Enum):
+    """Tri-state result of a Drive file verification.
+
+    Replaces the old boolean return that conflated "confirmed missing"
+    with "couldn't verify right now" — a transient DNS or auth hiccup
+    would cause the caller to CLEAR the URL from the DB, producing a
+    spurious re-upload on the next sync (the 'Drive re-upload storm').
+    """
+
+    EXISTS = 'exists'                      # verified present and not trashed
+    TRASHED_OR_MISSING = 'missing'         # verified 404 or trashed=true
+    UNKNOWN = 'unknown'                    # network/auth error — do not clear
 
 
 def _drive_retry(fn, max_retries=_MAX_RETRIES, label="Drive API"):
@@ -253,33 +275,93 @@ def _make_payment_filename(entry: dict, photo_index: int, total_photos: int,
 
 
 
-def _verify_file_in_drive(session, file_id: str) -> bool:
+def _verify_file_in_drive(session, file_id: str) -> VerifyResult:
     """Verify that a file exists in Drive and is not trashed.
 
-    Returns True if the file is accessible and not in Trash, False otherwise.
+    Returns one of:
+        VerifyResult.EXISTS             — confirmed present and not trashed
+        VerifyResult.TRASHED_OR_MISSING — 404 or trashed=true — clear URL
+        VerifyResult.UNKNOWN            — could not verify right now
+                                          (network, auth, rate limit, 5xx)
+                                          callers MUST NOT treat as missing
+
+    Critical invariant: UNKNOWN results must never cause a caller to clear
+    a URL from the database.  Treating a transient network failure as
+    "file missing" causes a re-upload storm on flaky Wi-Fi — the bug
+    that prompted this fix in v1.9.7.
     """
+    # Identify network errors precisely so we can log them quietly.
+    # A bare except for ImportError makes this work whether or not the
+    # requests/google-auth packages are importable at test time.
+    try:
+        import requests.exceptions as _rexc
+        _network_error_types: tuple = (_rexc.ConnectionError, _rexc.Timeout)
+    except ImportError:
+        _network_error_types = ()
+    try:
+        import google.auth.exceptions as _gauthexc
+        _network_error_types = _network_error_types + (_gauthexc.TransportError,)
+    except ImportError:
+        pass
+
     try:
         resp = session.get(
             f"{DRIVE_API_BASE}/drive/v3/files/{file_id}",
             params={'fields': 'id,name,size,trashed',
                     'supportsAllDrives': 'true'}
         )
-        if resp.status_code == 200:
-            info = resp.json()
-            if info.get('trashed'):
-                logger.warning("Drive file %s (%s) is in Trash — treating as deleted",
-                               file_id, info.get('name'))
-                return False
-            logger.info("Drive verification OK: %s (size=%s)",
-                        info.get('name'), info.get('size'))
-            return True
-        else:
-            logger.error("Drive verification FAILED: status %d for file %s — %s",
-                         resp.status_code, file_id, resp.text)
-            return False
+    except _network_error_types as e:
+        # Offline, DNS hiccup, IPv6 flap, handshake reset — quiet WARN,
+        # no traceback.  Caller will retry on the next cycle.
+        logger.warning(
+            "Drive verification skipped (network): file=%s error=%s",
+            file_id, type(e).__name__)
+        return VerifyResult.UNKNOWN
     except Exception:
-        logger.exception("Drive verification error for file %s", file_id)
-        return False
+        # Unexpected error class — keep the traceback at ERROR for
+        # diagnostic value, but still return UNKNOWN so the caller
+        # does not clear the URL.
+        logger.exception(
+            "Drive verification unexpected error for file %s", file_id)
+        return VerifyResult.UNKNOWN
+
+    if resp.status_code == 200:
+        info = resp.json()
+        if info.get('trashed'):
+            logger.warning(
+                "Drive file %s (%s) is in Trash — treating as deleted",
+                file_id, info.get('name'))
+            return VerifyResult.TRASHED_OR_MISSING
+        logger.info("Drive verification OK: %s (size=%s)",
+                    info.get('name'), info.get('size'))
+        return VerifyResult.EXISTS
+
+    if resp.status_code == 404:
+        logger.warning("Drive file %s not found (404) — treating as deleted",
+                       file_id)
+        return VerifyResult.TRASHED_OR_MISSING
+
+    if resp.status_code in (401, 403):
+        # Auth expired, scope changed, file access revoked.  Do NOT clear —
+        # if it's a transient auth issue a re-upload won't help, and if
+        # it's a permanent permission loss the operator needs to fix the
+        # service-account config, not silently re-upload.
+        logger.warning(
+            "Drive verification auth issue %d for file %s — skipping",
+            resp.status_code, file_id)
+        return VerifyResult.UNKNOWN
+
+    if resp.status_code == 429 or resp.status_code >= 500:
+        # Rate limited or Drive is having a bad day.  Retry next cycle.
+        logger.warning(
+            "Drive verification %d for file %s — will retry next cycle",
+            resp.status_code, file_id)
+        return VerifyResult.UNKNOWN
+
+    # Any other status — be conservative, do not clear.
+    logger.error("Drive verification unexpected status %d for file %s — %s",
+                 resp.status_code, file_id, resp.text[:200])
+    return VerifyResult.UNKNOWN
 
 
 def _verify_folder_access(session, folder_id: str) -> tuple[bool, str]:
@@ -412,11 +494,25 @@ def upload_photo(local_path: str, filename: str,
 
         # Files inherit the parent folder's sharing permissions.
 
-        # Post-upload verification — confirm file exists in Drive
-        if not _verify_file_in_drive(session, file_id):
-            logger.error("Upload appeared to succeed but verification failed "
-                         "for %s (file_id=%s)", filename, file_id)
+        # Post-upload verification — confirm file exists in Drive.
+        # Only EXISTS counts as successful upload; TRASHED_OR_MISSING means
+        # something actually went wrong with the upload.  UNKNOWN (network
+        # error verifying) is treated optimistically: the upload API said
+        # it succeeded, so we trust that and skip re-verification.  The
+        # next sync's verification pass will catch it if the upload was
+        # in fact corrupt.
+        post_result = _verify_file_in_drive(session, file_id)
+        if post_result == VerifyResult.TRASHED_OR_MISSING:
+            logger.error(
+                "Upload appeared to succeed but verification reports the "
+                "file missing/trashed for %s (file_id=%s)",
+                filename, file_id)
             return None
+        elif post_result == VerifyResult.UNKNOWN:
+            logger.warning(
+                "Post-upload verification inconclusive for %s (file_id=%s) — "
+                "upload API reported success; will re-verify on next sync",
+                filename, file_id)
 
         # Build shareable URL
         view_url = f"https://drive.google.com/file/d/{file_id}/view"
@@ -482,12 +578,62 @@ def _get_file_name_in_drive(session, file_id: str) -> Optional[str]:
         return None
 
 
-def _verify_and_clear_dead_urls(session) -> int:
-    """Check all entries with Drive URLs and clear any that point to deleted files.
+def _verification_throttled() -> bool:
+    """Return True if the verification sweep ran recently and should skip
+    this cycle.
 
-    Clearing the URL makes the photo "pending" again so it gets re-uploaded.
-    Returns the number of URLs cleared.
+    Verification is throttled to at most one pass per
+    ``_VERIFICATION_MIN_INTERVAL_SEC`` (default 10 minutes) because:
+
+    - Drive deletions / trash events are rare (hours/days between),
+      so 10-minute latency to detect them is fine.
+    - Heavy-FMNP markets can have 200+ photo URLs; verifying on every
+      60-second sync burns Drive API quota for no practical benefit.
+    - Upload of *new* photos is NOT throttled — that still runs every
+      sync so freshly-added receipts upload promptly.
     """
+    from fam.utils.app_settings import get_setting
+    raw = get_setting('drive_verification_last_run')
+    if not raw:
+        return False
+    try:
+        last = float(raw)
+    except (ValueError, TypeError):
+        return False
+    age = _time.time() - last
+    if age < _VERIFICATION_MIN_INTERVAL_SEC:
+        logger.info(
+            "Drive URL verification throttled — last run %.0fs ago "
+            "(interval=%ds); upload of new photos continues normally",
+            age, _VERIFICATION_MIN_INTERVAL_SEC)
+        return True
+    return False
+
+
+def _mark_verification_complete() -> None:
+    """Record that the verification sweep just finished so the throttle
+    can skip the next near-term call."""
+    from fam.utils.app_settings import set_setting
+    set_setting('drive_verification_last_run', str(_time.time()))
+
+
+def _verify_and_clear_dead_urls(session) -> int:
+    """Check all entries with Drive URLs and clear any that are confirmed
+    missing or trashed.
+
+    Critical correctness property: only ``TRASHED_OR_MISSING`` results
+    cause a URL to be cleared.  ``UNKNOWN`` (network, auth, 5xx) leaves
+    the URL in place so the next verification cycle can re-check — this
+    is the fix for the 'Drive re-upload storm' bug where a transient
+    DNS hiccup during verification would spuriously clear every URL in
+    its path and trigger mass re-uploads on the next sync.
+
+    Rate-limited via :func:`_verification_throttled`.  Returns the number
+    of URLs cleared; returns 0 when throttled.
+    """
+    if _verification_throttled():
+        return 0
+
     from fam.models.fmnp import (get_fmnp_entries_with_drive_urls,
                                   update_fmnp_photo_drive_url)
     from fam.models.transaction import (get_payment_items_with_drive_urls,
@@ -505,14 +651,28 @@ def _verify_and_clear_dead_urls(session) -> int:
         changed = False
         for url in urls:
             file_id = _extract_file_id(url)
-            if file_id and _verify_file_in_drive(session, file_id):
+            if not file_id:
+                # Malformed URL — drop it
+                logger.warning("FMNP entry %d: unparseable Drive URL %s — "
+                               "will re-upload", entry['id'], url)
+                delete_photo_hash_by_url(url)
+                changed = True
+                cleared += 1
+                continue
+            result = _verify_file_in_drive(session, file_id)
+            if result == VerifyResult.EXISTS:
                 live_urls.append(url)
-            else:
+            elif result == VerifyResult.TRASHED_OR_MISSING:
                 logger.warning("FMNP entry %d: Drive file missing for %s — "
                                "will re-upload", entry['id'], url)
                 delete_photo_hash_by_url(url)
                 changed = True
                 cleared += 1
+            else:
+                # UNKNOWN — preserve the URL, try again next cycle.  This
+                # is the critical branch: we MUST NOT clear on UNKNOWN or
+                # we'd re-upload every photo on every network flap.
+                live_urls.append(url)
         if changed:
             new_val = encode_photo_paths(live_urls) if live_urls else None
             update_fmnp_photo_drive_url(entry['id'], new_val)
@@ -525,20 +685,33 @@ def _verify_and_clear_dead_urls(session) -> int:
         changed = False
         for url in urls:
             file_id = _extract_file_id(url)
-            if file_id and _verify_file_in_drive(session, file_id):
+            if not file_id:
+                logger.warning("Payment item %d: unparseable Drive URL %s — "
+                               "will re-upload", item['id'], url)
+                delete_photo_hash_by_url(url)
+                changed = True
+                cleared += 1
+                continue
+            result = _verify_file_in_drive(session, file_id)
+            if result == VerifyResult.EXISTS:
                 live_urls.append(url)
-            else:
+            elif result == VerifyResult.TRASHED_OR_MISSING:
                 logger.warning("Payment item %d: Drive file missing for %s — "
                                "will re-upload", item['id'], url)
                 delete_photo_hash_by_url(url)
                 changed = True
                 cleared += 1
+            else:
+                # UNKNOWN — preserve the URL.  Same reasoning as FMNP.
+                live_urls.append(url)
         if changed:
             new_val = encode_photo_paths(live_urls) if live_urls else None
             update_payment_photo_drive_url(item['id'], new_val)
 
     if cleared:
         logger.info("Cleared %d dead Drive URLs (will re-upload)", cleared)
+    # Mark completion so the throttle can skip the next near-term call.
+    _mark_verification_complete()
     return cleared
 
 

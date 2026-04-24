@@ -724,6 +724,10 @@ class FMNPScreen(QWidget):
                 delete_fmnp_entry(entry_id, changed_by=entered_by)
                 write_ledger_backup()
                 self._load_entries()
+                # Deletion is a mutation — emit the same signal as save so
+                # the main window triggers a cloud sync.  The 60-second
+                # sync cooldown prevents any rapid-fire overload.
+                self.entry_saved.emit()
             except Exception as e:
                 logger.exception("Failed to delete FMNP entry %s", entry_id)
                 self._show_error(f"Error deleting entry: {e}")

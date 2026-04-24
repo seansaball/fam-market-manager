@@ -1246,16 +1246,22 @@ class TestVerifyAndClearDeadUrls:
     """Tests for _verify_and_clear_dead_urls."""
 
     def test_clears_dead_fmnp_url(self, fresh_db):
-        """Dead Drive URL should be cleared so photo gets re-uploaded."""
+        """Dead Drive URL should be cleared so photo gets re-uploaded.
+
+        v1.9.7: verification now returns a tri-state ``VerifyResult`` —
+        confirmed-missing requires ``TRASHED_OR_MISSING``, not just
+        any falsy value.  This prevents transient network errors from
+        spuriously clearing every URL in their path."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import (create_fmnp_entry, update_fmnp_photo_drive_url,
                                       get_fmnp_entry_by_id)
-        from fam.sync.drive import _verify_and_clear_dead_urls
+        from fam.sync.drive import _verify_and_clear_dead_urls, VerifyResult
 
         e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(e1, 'https://drive.google.com/file/d/DEAD/view')
 
-        with patch('fam.sync.drive._verify_file_in_drive', return_value=False):
+        with patch('fam.sync.drive._verify_file_in_drive',
+                   return_value=VerifyResult.TRASHED_OR_MISSING):
             cleared = _verify_and_clear_dead_urls('fake_session')
 
         assert cleared == 1
@@ -1267,13 +1273,14 @@ class TestVerifyAndClearDeadUrls:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import (create_fmnp_entry, update_fmnp_photo_drive_url,
                                       get_fmnp_entry_by_id)
-        from fam.sync.drive import _verify_and_clear_dead_urls
+        from fam.sync.drive import _verify_and_clear_dead_urls, VerifyResult
 
         e1 = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         url = 'https://drive.google.com/file/d/LIVE/view'
         update_fmnp_photo_drive_url(e1, url)
 
-        with patch('fam.sync.drive._verify_file_in_drive', return_value=True):
+        with patch('fam.sync.drive._verify_file_in_drive',
+                   return_value=VerifyResult.EXISTS):
             cleared = _verify_and_clear_dead_urls('fake_session')
 
         assert cleared == 0
@@ -1285,7 +1292,7 @@ class TestVerifyAndClearDeadUrls:
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import (create_fmnp_entry, update_fmnp_photo_drive_url,
                                       get_fmnp_entry_by_id)
-        from fam.sync.drive import _verify_and_clear_dead_urls
+        from fam.sync.drive import _verify_and_clear_dead_urls, VerifyResult
 
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg'])
         e1 = create_fmnp_entry(1, 1, 5000, 'Alice', photo_path=paths)
@@ -1296,7 +1303,8 @@ class TestVerifyAndClearDeadUrls:
         update_fmnp_photo_drive_url(e1, urls)
 
         def mock_verify(session, file_id):
-            return file_id == 'LIVE1'
+            return (VerifyResult.EXISTS if file_id == 'LIVE1'
+                    else VerifyResult.TRASHED_OR_MISSING)
 
         with patch('fam.sync.drive._verify_file_in_drive', side_effect=mock_verify):
             cleared = _verify_and_clear_dead_urls('fake_session')

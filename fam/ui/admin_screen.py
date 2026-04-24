@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QTextEdit, QDialog, QDialogButtonBox,
     QFormLayout
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from fam.database.connection import get_connection
 from fam.models.market_day import get_all_market_days, get_open_market_day
@@ -146,6 +146,30 @@ class AdjustmentDialog(QDialog):
         """)
         self.add_method_btn.clicked.connect(self._add_payment_row)
         pay_header.addWidget(self.add_method_btn)
+
+        # ── Auto-Distribute button (parity with payment screen) ──
+        # Mirrors PaymentScreen's ⚡ Auto-Distribute so a volunteer can
+        # change the receipt total and one-click redistribute across
+        # payment methods rather than hand-balancing each row.
+        self.auto_distribute_btn = QPushButton("⚡ Auto-Distribute")
+        self.auto_distribute_btn.setCursor(Qt.PointingHandCursor)
+        self.auto_distribute_btn.setToolTip(
+            "Reset non-denominated rows and redistribute the receipt total "
+            "across payment methods."
+        )
+        self.auto_distribute_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 4px 12px; min-height: 0px; font-size: 12px;
+                border: 1px solid {LIGHT_GRAY}; border-radius: 6px;
+                background-color: {WHITE}; color: {TEXT_COLOR};
+            }}
+            QPushButton:hover {{
+                background-color: #F0EFEB; color: {PRIMARY_GREEN};
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        self.auto_distribute_btn.clicked.connect(self._auto_distribute)
+        pay_header.addWidget(self.auto_distribute_btn)
         main_layout.addLayout(pay_header)
 
         # Payment rows container
@@ -202,6 +226,7 @@ class AdjustmentDialog(QDialog):
         self._payment_rows.append(row)
         self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
         self._refresh_method_choices()
+        self._update_row_caps()
         return row
 
     def _remove_payment_row(self, row):
@@ -213,6 +238,20 @@ class AdjustmentDialog(QDialog):
         row.deleteLater()
         self._refresh_method_choices()
         self._on_payment_changed()
+
+    def _update_row_caps(self):
+        """Cap every payment row's charge input at the current receipt total.
+
+        Mirrors the payment-screen behavior that prevented volunteers from
+        entering a single-row charge that exceeds the receipt.  Using the
+        receipt total as the cap (rather than 'receipt total - other rows')
+        keeps the UX simple: any row can independently absorb the entire
+        receipt, but none can exceed it.  Cross-row validation is handled
+        at save time by ``calculate_payment_breakdown``.
+        """
+        receipt_cents = dollars_to_cents(self.receipt_spin.value())
+        for row in self._payment_rows:
+            row.set_max_charge(receipt_cents)
 
     def _on_payment_changed(self):
         """Called when any payment row value changes."""
@@ -273,7 +312,88 @@ class AdjustmentDialog(QDialog):
                     row.amount_spin.setValue(cents_to_dollars(amt_cents))
                     row.amount_spin.blockSignals(False)
         self._last_receipt_total = new_total
+        # Re-cap every row against the NEW receipt total so the per-row
+        # maximum tracks the target.  Without this, changing the receipt
+        # would let a row exceed the new total until the user tabbed out.
+        self._update_row_caps()
         self._update_customer_impact()
+
+    # ── Auto-Distribute (parity with payment screen) ─────────────
+
+    def _auto_distribute(self):
+        """One-click redistribution of the receipt total across payment rows.
+
+        Volunteer flow: change the receipt total, click this button, rows
+        auto-fill based on each method's match percent and denomination.
+        Denominated rows with an existing charge are treated as locked
+        (they represent physical checks/tokens the customer handed over);
+        non-denominated rows are reset and refilled as absorbers.
+
+        Simpler than PaymentScreen's equivalent because the adjustment
+        flow does not need the "add overflow row" escape hatch — if the
+        user has no non-denominated row and can't absorb the remainder,
+        the existing save-time validator surfaces the mismatch so they
+        can add a row manually.
+        """
+        from fam.utils.calculations import (
+            smart_auto_distribute, charge_to_method_amount,
+        )
+
+        receipt_cents = dollars_to_cents(self.receipt_spin.value())
+        if receipt_cents <= 0 or not self._payment_rows:
+            return
+
+        # Build row descriptors for the algorithm.  Non-denominated rows
+        # are always reset to 0 (absorbers).  Denominated rows with a
+        # charge stay locked.
+        row_descriptors = []
+        for i, row in enumerate(self._payment_rows):
+            method = row.get_selected_method()
+            if not method:
+                continue
+            is_denom = (
+                method.get('denomination') and method['denomination'] > 0
+            )
+            charge = row._get_active_charge()
+            if not is_denom and charge > 0:
+                charge = 0   # absorber — let distributor refill
+            row_descriptors.append({
+                'index': i,
+                'match_pct': method['match_percent'],
+                'denomination': method.get('denomination'),
+                'sort_order': method.get('sort_order', 0),
+                'current_charge': charge,
+            })
+
+        if not row_descriptors:
+            return
+
+        assignments = smart_auto_distribute(receipt_cents, row_descriptors)
+
+        # Apply non-denominated reset first so the UI reflects the new
+        # state even for rows the distributor chose not to fill.
+        for desc in row_descriptors:
+            is_denom = (
+                desc.get('denomination') and desc['denomination'] > 0
+            )
+            if not is_denom and desc['current_charge'] == 0:
+                # Temporarily suppress change notifications while we
+                # bulk-update so we don't trigger N cascading recalcs.
+                row = self._payment_rows[desc['index']]
+                row.blockSignals(True)
+                row._set_active_charge(0)
+                row.blockSignals(False)
+
+        # Apply assignments from the distributor
+        for a in assignments:
+            row = self._payment_rows[a['index']]
+            row.blockSignals(True)
+            row._set_active_charge(a['charge'])
+            row.blockSignals(False)
+
+        # Re-cap and recompute the impact panel after all rows settle.
+        self._update_row_caps()
+        self._on_payment_changed()
 
     # ── Customer impact calculation ───────────────────────────
 
@@ -436,6 +556,10 @@ class AdjustmentDialog(QDialog):
 
 class AdminScreen(QWidget):
     """Admin Adjustments screen."""
+
+    # Fired on any CUD operation this screen performs (adjustment save,
+    # transaction void) so the main window can trigger a cloud sync.
+    data_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -695,6 +819,12 @@ class AdminScreen(QWidget):
             self._search()
             self._load_audit_log()
 
+            # Notify listeners (main window wires this to cloud sync) that
+            # transaction/payment data changed.  Fires on any successful
+            # adjustment, even if only the vendor or notes changed.
+            if anything_changed:
+                self.data_changed.emit()
+
             # Show customer impact message after save
             if payments_did_change and new_items:
                 old_customer = sum(
@@ -761,6 +891,8 @@ class AdminScreen(QWidget):
             write_ledger_backup()
             self._search()
             self._load_audit_log()
+            # Void is a data mutation — signal the main window to sync.
+            self.data_changed.emit()
 
     def _load_audit_log(self):
         entries = get_audit_log(limit=20)

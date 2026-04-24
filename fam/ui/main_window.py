@@ -266,9 +266,20 @@ class MainWindow(QMainWindow):
         # Connect signals
         self.market_day_screen.market_day_changed.connect(self._on_market_day_changed)
         self.receipt_intake_screen.customer_order_ready.connect(self._on_customer_order_ready)
-        self.payment_screen.payment_confirmed.connect(self._on_payment_confirmed)
+        # Navigation signals — move the volunteer to the right screen after
+        # specific UI actions.
+        self.payment_screen.return_to_intake_requested.connect(self._on_return_to_intake)
         self.payment_screen.draft_saved.connect(self._on_draft_saved)
+        # Sync triggers — every data mutation fires into _trigger_sync, which
+        # enforces a 60-second cooldown so rapid changes don't flood the
+        # Google Sheets API.  FMNP save/update/delete, payment confirm, draft
+        # save, admin adjust/void, and receipt-intake void all route here so
+        # the sync indicator reflects reality after any user action.
+        self.payment_screen.payment_confirmed.connect(self._trigger_sync)
+        self.payment_screen.draft_saved.connect(self._trigger_sync)
         self.fmnp_screen.entry_saved.connect(self._trigger_sync)
+        self.admin_screen.data_changed.connect(self._trigger_sync)
+        self.receipt_intake_screen.data_changed.connect(self._trigger_sync)
 
         # Select first screen
         first_btn = self.nav_group.button(0)
@@ -772,8 +783,10 @@ class MainWindow(QMainWindow):
         if btn:
             btn.setChecked(True)
 
-    def _on_payment_confirmed(self):
-        """After payment is confirmed, go back to receipt intake for next customer."""
+    def _on_return_to_intake(self):
+        """Volunteer chose to return to Receipt Intake after confirming
+        a payment.  Navigation-only; sync was already triggered by the
+        ``payment_confirmed`` signal."""
         self.receipt_intake_screen.start_fresh_after_payment()
         self.stack.setCurrentIndex(1)
         btn = self.nav_group.button(1)

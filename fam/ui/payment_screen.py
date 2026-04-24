@@ -37,8 +37,9 @@ from fam.ui.helpers import make_field_label, make_section_label, make_item, conf
 class PaymentScreen(QWidget):
     """Payment Processing screen — handles customer orders with multiple receipts."""
 
-    payment_confirmed = Signal()
-    draft_saved = Signal()
+    payment_confirmed = Signal()           # fires on every confirm (drives sync)
+    draft_saved = Signal()                  # fires on every draft save (drives sync)
+    return_to_intake_requested = Signal()   # fires only when volunteer clicks "Yes" to return to intake
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1267,6 +1268,11 @@ class PaymentScreen(QWidget):
         self.save_draft_btn.setEnabled(False)
         self.add_method_btn.setEnabled(False)
 
+        # payment_confirmed fires for every successful confirm so sync
+        # triggers regardless of the volunteer's navigation choice.  A
+        # separate return_to_intake_requested signal drives the screen
+        # switch only when the volunteer asks for it.
+        self.payment_confirmed.emit()
         answer = QMessageBox.question(
             self, "Payment Confirmed",
             f"All {len(self._order_transactions)} transaction(s) have been confirmed.\n\n"
@@ -1274,7 +1280,7 @@ class PaymentScreen(QWidget):
             QMessageBox.Yes | QMessageBox.No
         )
         if answer == QMessageBox.Yes:
-            self.payment_confirmed.emit()
+            self.return_to_intake_requested.emit()
 
     def _distribute_and_save_payments(self, items, order_total, commit=True):
         if not order_total or order_total <= 0:

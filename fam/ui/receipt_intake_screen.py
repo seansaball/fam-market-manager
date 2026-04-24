@@ -60,6 +60,10 @@ class ReceiptIntakeScreen(QWidget):
     """Receipt Intake screen with multi-receipt customer order tracking."""
 
     customer_order_ready = Signal(int)
+    # Fired on any data mutation this screen performs (void transaction or
+    # void customer order) so the main window triggers a cloud sync.  The
+    # 60-second sync cooldown prevents rapid-fire overload.
+    data_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -477,6 +481,7 @@ class ReceiptIntakeScreen(QWidget):
                 return
             if self._current_order_id:
                 void_customer_order(self._current_order_id)
+                self.data_changed.emit()
         self._reset_customer_session()
 
     # ------------------------------------------------------------------
@@ -645,6 +650,9 @@ class ReceiptIntakeScreen(QWidget):
         void_transaction(entry['txn_id'], voided_by="Intake")
         self._order_receipts.pop(index)
         self._refresh_receipts_table()
+        # Voiding an individual receipt changes transaction data — fire the
+        # sync signal so reports stay current.
+        self.data_changed.emit()
 
         if not self._order_receipts:
             self.receipts_frame.setVisible(False)
@@ -694,6 +702,7 @@ class ReceiptIntakeScreen(QWidget):
             return
         if self._current_order_id:
             void_customer_order(self._current_order_id)
+            self.data_changed.emit()
         self._reset_customer_session()
 
     def _proceed_to_payment(self):
@@ -794,6 +803,8 @@ class ReceiptIntakeScreen(QWidget):
         try:
             void_customer_order(order_id)
             self._refresh_pending_orders()
+            # Pending-order deletion is a data mutation — trigger sync.
+            self.data_changed.emit()
         except Exception as e:
             self._show_error(f"Error deleting order: {e}")
 
