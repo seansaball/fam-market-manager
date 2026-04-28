@@ -1,7 +1,7 @@
 # FAM Market Manager — User Guide
 
 > **For volunteers, coordinators, and market day staff**
-> Version 1.9.7
+> Version 1.9.8
 
 ---
 
@@ -191,16 +191,33 @@ Some markets set a maximum FAM match per customer per day. If a customer reaches
 
 **Where:** FMNP Entry screen
 
-Use this screen to record FMNP (Farmers Market Nutrition Program) checks received from vendors. These are tracked separately from regular transactions.
+Use this screen to record FMNP (Farmers Market Nutrition Program) checks
+that vendors took at the booth.  These are recorded separately from
+regular transactions because the **vendor applied the match themselves**
+at their booth (treating a $5 FMNP check as $10 worth of food).
+
+**How the reimbursement works:**
+
+- The vendor cashes the original FMNP check directly with the FMNP
+  program — they get the face value back ($5).
+- **FAM reimburses the same face value** ($5) at end-of-month so the
+  vendor is made whole on the match they gave away at the booth.
+- The amount logged here appears as **FMNP (External)** in the Vendor
+  Reimbursement report and **is included in the Total Due to Vendor**.
+- FAM does **not** add a match percentage on top — the vendor already
+  did at the booth.
 
 1. Select the **market day** from the dropdown
 2. Select the **vendor**
-3. Enter the **dollar amount**
+3. Enter the **dollar amount** (must be a multiple of $5 — the FMNP
+   denomination)
 4. Optionally enter the **check count** and any **notes**
 5. Enter **your name** in the Entered By field
 6. Click **"Add FMNP Entry"**
 
-The entry appears in the table below. You can **Edit** or **Delete** entries using the buttons in the Actions column.
+The entry appears in the table below. You can **Edit** or **Delete**
+entries using the buttons in the Actions column.  All edits and
+deletions are written to the audit log with old + new values.
 
 ### Attaching check photos
 
@@ -329,6 +346,8 @@ Use the Settings screen to manage the reference data used throughout the applica
 - **Edit:** Change the name or match percentage
 - **Reorder:** Use the up/down arrows to change the display order
 - **Activate/Deactivate:** Make a payment method available or unavailable
+
+> **About FMNP (v1.9.8+):** FMNP is now a togglable payment method like the others, **and it defaults to inactive on fresh installs / Load Defaults**.  When inactive, it does NOT appear in the Payment Screen's payment-method dropdown, but the dedicated **FMNP Entry** screen continues to work normally regardless.  Most markets leave FMNP inactive here because they handle FMNP exclusively through the FMNP Entry screen (vendor-matched at the booth).  Activate FMNP only if your market wants to record FMNP-as-a-payment-method on the customer's order at the FAM table.
 
 ### Preferences tab
 
@@ -517,6 +536,31 @@ To back up, copy the `fam_data.db` file from your data folder to a safe location
 3. Launch the new version — it will find your existing data automatically
 
 Your database, log file, and ledger backup are never inside the application folder, so upgrading is completely safe.
+
+---
+
+## In-App Help (the Help sidebar item)
+
+As of v1.9.8, the app has a built-in **Help** screen — click **Help** in
+the sidebar.  It has four tabs:
+
+- **Walkthrough** — an animated training overview ("Your Day at the
+  Market") that walks new volunteers through the entire market-day
+  cycle in five stages.  Loops in place; click **Next** to move on
+  when ready (the button gently pulses gold to remind you).
+- **Browse** — over 50 categorized help articles with live search.
+  Type any term ("FMNP", "returning customer", "sync") and the list
+  filters immediately.  Each article links to related articles.
+- **Troubleshooting** — symptom-based guides ("Sync is red", "Photo
+  isn't uploading", "App is slow") with step-by-step actions.
+- **System Status** — a live diagnostic snapshot of this laptop:
+  app version, last sync, disk usage, record counts, and a
+  **Copy Diagnostic Info** button that puts everything on your
+  clipboard so you can paste it into a coordinator email.
+
+If you're new to the app, start with the Walkthrough.  If you have a
+specific question, search the Browse tab.  If something seems broken,
+go straight to Troubleshooting.
 
 ---
 

@@ -1412,10 +1412,11 @@ class TestSchemaMigrationV16:
         assert 'app_version' in col_names
         assert 'device_id' in col_names
 
-    def test_schema_version_is_22(self):
-        """Current schema version should be 22."""
+    def test_schema_version_is_23(self):
+        """Current schema version should be 23 (v1.9.8 bumped from 22
+        to add the UNIQUE constraint on vendors.name)."""
         from fam.database.schema import CURRENT_SCHEMA_VERSION
-        assert CURRENT_SCHEMA_VERSION == 22
+        assert CURRENT_SCHEMA_VERSION == 23
 
 
 # ──────────────────────────────────────────────────────────────────

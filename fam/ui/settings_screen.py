@@ -2464,15 +2464,19 @@ class SettingsScreen(QWidget):
             down_btn.clicked.connect(lambda checked, mid=mid, so=sort_order: self._move_pm(mid, so, 1))
             al.addWidget(down_btn)
 
-            is_fmnp = (m['name'] == 'FMNP')
             toggle_btn = make_action_btn("Deactivate" if is_active else "Activate", 70)
-            if is_fmnp:
-                toggle_btn.setEnabled(False)
-                toggle_btn.setToolTip("FMNP is a system payment method and cannot be deactivated")
-            else:
-                toggle_btn.clicked.connect(
-                    lambda checked, mid=mid, active=is_active: self._toggle_pm(mid, active)
-                )
+            # FMNP can be deactivated to hide it from Receipt Intake / Payment
+            # Screen.  When deactivated, FMNP is still fully usable from the
+            # FMNP Entry screen — that screen looks up the payment method by
+            # name and does NOT filter on is_active, so denomination and
+            # photo-required settings continue working independently.
+            if m['name'] == 'FMNP':
+                toggle_btn.setToolTip(
+                    "Toggle FMNP for the Payment Screen.\n"
+                    "The FMNP Entry screen is not affected by this toggle.")
+            toggle_btn.clicked.connect(
+                lambda checked, mid=mid, active=is_active: self._toggle_pm(mid, active)
+            )
             al.addWidget(toggle_btn)
 
             self.pm_table.setCellWidget(i, 5, action_widget)
@@ -2644,7 +2648,10 @@ class SettingsScreen(QWidget):
             self._load_vendors()
         except Exception as e:
             logger.exception("Failed to add vendor '%s'", name)
-            QMessageBox.warning(self, "Error", f"Could not add vendor: {e}")
+            msg = str(e)
+            if 'UNIQUE' in msg.upper():
+                msg = f"A vendor with the name \"{name}\" already exists."
+            QMessageBox.warning(self, "Error", msg)
 
     def _edit_vendor(self, vendor_id):
         vendor = get_vendor_by_id(vendor_id)
@@ -2673,7 +2680,10 @@ class SettingsScreen(QWidget):
                 self._load_vendors()
             except Exception as e:
                 logger.exception("Failed to edit vendor %s", vendor_id)
-                QMessageBox.warning(self, "Error", f"Could not update vendor: {e}")
+                msg = str(e)
+                if 'UNIQUE' in msg.upper():
+                    msg = f"A vendor with the name \"{new_name}\" already exists."
+                QMessageBox.warning(self, "Error", msg)
 
     def _toggle_vendor(self, vid, current_active):
         update_vendor(vid, is_active=not current_active)
@@ -2755,14 +2765,9 @@ class SettingsScreen(QWidget):
         self._load_payment_methods()
 
     def _toggle_pm(self, mid, current_active):
-        from fam.models.payment_method import get_payment_method_by_id
-        method = get_payment_method_by_id(mid)
-        if method and method['name'] == 'FMNP':
-            QMessageBox.warning(
-                self, "Protected Method",
-                "FMNP is a system payment method and cannot be deactivated."
-            )
-            return
+        # FMNP is intentionally togglable as of v1.9.8 — when deactivated
+        # it disappears from Receipt Intake / Payment Screen but stays
+        # fully functional on the dedicated FMNP Entry screen.
         update_payment_method(mid, is_active=not current_active)
         self._load_payment_methods()
 
@@ -2859,7 +2864,8 @@ class SettingsScreen(QWidget):
             "  • All transactions and payment records\n"
             "  • All FMNP entries\n"
             "  • All audit log entries\n"
-            "  • All markets, vendors, and payment methods\n\n"
+            "  • All markets, vendors, and payment methods\n"
+            "  • The Error Log (fam_manager.log) and rotated backups\n\n"
             "The app will be completely empty after reset.\n"
             "You can re-configure via Settings or import a .fam file.\n\n"
             "This action CANNOT be undone!",
@@ -2895,12 +2901,37 @@ class SettingsScreen(QWidget):
             conn.execute("DELETE FROM markets")
             conn.commit()
 
+            # Also clear the rotating log file + backups so the Error
+            # Log tab doesn't keep showing pre-reset entries.  Best-
+            # effort: a locked/missing log file must NOT abort the
+            # successful database wipe above.
+            log_clear_failed = False
+            log_clear_msg = ''
+            try:
+                from fam.utils.logging_config import clear_log_files
+                ok, log_clear_msg = clear_log_files()
+                log_clear_failed = not ok
+            except Exception as log_err:
+                log_clear_failed = True
+                log_clear_msg = str(log_err)
+
             self.refresh()
-            QMessageBox.information(
-                self, "Reset Complete",
-                "All data has been cleared.\n\n"
-                "Use the Settings tabs to add new markets, vendors, and "
-                "payment methods, or import a .fam settings file."
-            )
+
+            if log_clear_failed:
+                QMessageBox.information(
+                    self, "Reset Complete",
+                    "All database data has been cleared.\n\n"
+                    "However, the error log file could not be fully "
+                    "cleared (it may be locked by another process). "
+                    "Restart the app to clear it.\n\n"
+                    f"Details: {log_clear_msg}"
+                )
+            else:
+                QMessageBox.information(
+                    self, "Reset Complete",
+                    "All data has been cleared.\n\n"
+                    "Use the Settings tabs to add new markets, vendors, and "
+                    "payment methods, or import a .fam settings file."
+                )
         except Exception as e:
             QMessageBox.critical(self, "Reset Error", f"Failed to reset: {str(e)}")

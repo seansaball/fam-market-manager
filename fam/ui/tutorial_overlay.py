@@ -376,28 +376,36 @@ TUTORIAL_STEPS = [
         ],
     ),
     TutorialStep(
-        title="Troubleshooting & Recovery",
+        title="Help is Always One Click Away",
         description=(
-            "If something goes wrong, you're covered:\n\n"
-            "\u2022 Backup Ledger \u2014 A plain-text file "
-            "(fam_ledger_backup.txt) is saved automatically "
-            "after every payment, adjustment, or market-day "
-            "close. Open it with Notepad to review "
-            "transactions even if the app won't start.\n\n"
-            "\u2022 Activity Log \u2014 Every action is recorded in "
-            "an append-only audit log. View it on the "
-            "Adjustments screen or export it from the "
-            "Reports \u2192 Transaction Log tab.\n\n"
-            "\u2022 Your Data \u2014 All data lives in:\n"
-            "   %APPDATA%\\FAM Market Manager\\\n"
-            "Back it up regularly by copying this folder "
-            "to a safe location. Upgrading the app will "
-            "never touch your data."
+            "When something is unclear or you need to look "
+            "something up mid-market, the Help sidebar item is "
+            "your first stop. Four tabs cover everything:\n\n"
+            "\u2022 Walkthrough \u2014 An animated overview of a "
+            "full market day. Great for new volunteers; loops "
+            "in place so you can watch each step at your own "
+            "pace.\n\n"
+            "\u2022 Browse \u2014 Over 50 articles grouped by "
+            "topic (during the market, FMNP, corrections, "
+            "reports, sync, and more). Type any keyword in the "
+            "search box to filter live.\n\n"
+            "\u2022 Troubleshooting \u2014 Symptom-based guides "
+            "(\u201csync is red\u201d, \u201cphoto isn\u2019t "
+            "uploading\u201d, \u201capp is slow\u201d) with "
+            "step-by-step actions.\n\n"
+            "\u2022 System Status \u2014 A live snapshot of this "
+            "laptop \u2014 app version, last sync, disk usage, "
+            "record counts. The \u201cCopy Diagnostic Info\u201d "
+            "button puts everything on your clipboard so you "
+            "can paste it into a coordinator email.\n\n"
+            "All your data is also kept safe in the background "
+            "via automatic backups and an audit log \u2014 see "
+            "the Help \u2192 Browse tab for the details."
         ),
-        widget_path="settings_screen",
+        widget_path="help_screen",
         position="right",
-        screen_index=6,
-        nav_index=6,
+        screen_index=7,
+        nav_index=7,
         padding=0,
     ),
     TutorialStep(
@@ -405,7 +413,7 @@ TUTORIAL_STEPS = [
         description=(
             "Would you like to load FAM's default configuration?\n\n"
             "This adds 3 markets (Bethel Park, Bellevue, "
-            "Cranberry), 23 vendors, and 6 payment methods "
+            "Test Market), 23 vendors, and 6 payment methods "
             "so you can start right away.\n\n"
             "You can always add, edit, or remove items later "
             "in Settings."

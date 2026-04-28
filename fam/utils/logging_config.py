@@ -68,3 +68,81 @@ def get_log_path():
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         )
     return os.path.join(log_dir, 'fam_manager.log')
+
+
+def clear_log_files() -> tuple[bool, str]:
+    """Truncate the active log file and delete any rotated backups.
+
+    Called from Settings → Reset to Defaults so the Error Log tab
+    doesn't keep showing pre-reset entries after the user wipes their
+    data.  Best-effort: failures are reported in the return tuple but
+    never raised — Reset itself must still succeed even if the log
+    file is locked or missing.
+
+    Returns
+    -------
+    (ok, message) : tuple
+        ``ok`` is True if the active log file was successfully cleared
+        (rotated-backup deletion is best-effort and doesn't affect
+        ``ok``).  ``message`` is a human-readable status string for
+        diagnostics — empty on success.
+    """
+    log_path = get_log_path()
+    if not log_path:
+        return True, ''
+
+    # Release any FileHandler streams attached to the ``fam`` logger so
+    # the OS unlocks the file on Windows.  We deliberately keep the
+    # handler attached to the logger — the next ``emit`` call will
+    # transparently reopen ``self.stream`` (mode='a' on a freshly
+    # truncated file starts at byte 0).
+    fam_logger = logging.getLogger('fam')
+    for handler in list(fam_logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            try:
+                handler.acquire()
+                try:
+                    handler.flush()
+                    if handler.stream is not None:
+                        try:
+                            handler.stream.close()
+                        except Exception:
+                            pass
+                        handler.stream = None
+                finally:
+                    handler.release()
+            except Exception:
+                # Don't let a stuck handler block the rest of the
+                # cleanup — we'll still try to truncate / delete files.
+                pass
+
+    # Truncate the active log file.
+    truncated = False
+    if os.path.exists(log_path):
+        try:
+            with open(log_path, 'w', encoding='utf-8'):
+                pass
+            truncated = True
+        except OSError as e:
+            return False, f"Could not truncate {log_path}: {e}"
+    else:
+        truncated = True  # nothing to truncate is fine
+
+    # Delete rotated backups.  Default backupCount is 3, but be generous
+    # in case it was raised in the past — anything missing is harmless.
+    deleted = 0
+    skipped = 0
+    for i in range(1, 10):
+        rotated = f"{log_path}.{i}"
+        if os.path.exists(rotated):
+            try:
+                os.remove(rotated)
+                deleted += 1
+            except OSError:
+                skipped += 1
+
+    msg = ''
+    if not truncated or skipped:
+        msg = (f"truncated={truncated} backups_deleted={deleted}"
+               f" backups_skipped={skipped}")
+    return truncated, msg

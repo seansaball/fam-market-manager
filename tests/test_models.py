@@ -1102,7 +1102,7 @@ class TestProductionReadiness:
         from fam.utils.app_settings import derive_market_code
         names = [
             "Bethel Park Farmers Market",
-            "Cranberry Farmers Market",
+            "Test Market",
             "Bellevue Farmers Market",
         ]
         codes = [derive_market_code(n) for n in names]

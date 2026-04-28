@@ -34,13 +34,25 @@ def seed_sample_data():
     if cursor.fetchone()[0] > 0:
         return False  # Already has data
 
-    # Markets
+    # Markets.  daily_match_limit is set explicitly to 10000 (cents = $100)
+    # rather than relying on the column default — on databases that migrated
+    # forward from v4, the column default is still the pre-v22 REAL `100.00`
+    # (which the integer-cents engine reads as 100 cents → $1.00).  Always
+    # passing the value explicitly makes Reset to Defaults produce the same
+    # $100 cap on fresh installs and migrated installs alike.
     markets = [
-        ("Bethel Park Farmers Market", "30 Corrigan Dr, Bethel Park, PA 15102"),
-        ("Bellevue Farmers Market", "34 North Balph Ave., Bellevue, PA 15202"),
-        ("Cranberry Farmers Market", "2525 Rochester Road, Cranberry Township, PA 16066"),
+        ("Bethel Park Farmers Market",
+         "30 Corrigan Dr, Bethel Park, PA 15102", 10000, 1),
+        ("Bellevue Farmers Market",
+         "34 North Balph Ave., Bellevue, PA 15202", 10000, 1),
+        ("Test Market",
+         "123 Test Lane, Test Township, PA 15000", 10000, 1),
     ]
-    cursor.executemany("INSERT INTO markets (name, address) VALUES (?, ?)", markets)
+    cursor.executemany(
+        "INSERT INTO markets (name, address, daily_match_limit,"
+        " match_limit_active) VALUES (?, ?, ?, ?)",
+        markets,
+    )
 
     # Vendors
     vendors = [
@@ -70,10 +82,15 @@ def seed_sample_data():
     ]
     cursor.executemany("INSERT INTO vendors (name, contact_info) VALUES (?, ?)", vendors)
 
-    # Payment Methods
+    # Payment Methods.  FMNP defaults to is_active=0 so it does NOT appear
+    # in Receipt Intake / Payment Screen on a fresh "Load Defaults" run.
+    # The dedicated FMNP Entry screen continues to work regardless of
+    # is_active (it looks up the payment method by name without filtering).
+    # Coordinators who want FMNP available as a payment-row option simply
+    # toggle it on from Settings → Payment Methods.
     payment_methods = [
         ("SNAP", 100.0, 1, 1, None, None),
-        ("FMNP", 100.0, 1, 2, 500, 'Optional'),
+        ("FMNP", 100.0, 0, 2, 500, 'Optional'),
         ("Food RX", 100.0, 1, 3, None, None),
         ("JH Food Bucks", 100.0, 1, 4, None, None),
         ("JH Tokens", 100.0, 1, 5, None, None),

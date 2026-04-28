@@ -1,6 +1,6 @@
 # FAM Market Manager — Technical Overview
 
-> **Version:** 1.9.7
+> **Version:** 1.9.8
 > **Last Updated:** April 2026
 > **Audience:** Developers, administrators, and stakeholders
 
@@ -116,7 +116,7 @@ The application runs as a standalone Windows desktop executable with local SQLit
 | Photo Upload | google-auth (AuthorizedSession) | Google Drive REST API |
 | Auto-Update | urllib.request (stdlib) | GitHub Releases API |
 | Packaging | PyInstaller | Standalone Windows executable |
-| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1591 tests) |
+| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1822 tests) |
 
 **Runtime Dependencies** (`requirements.txt`):
 - `PySide6 >= 6.5.0`
@@ -158,15 +158,22 @@ fam-market-manager/
 │   │   ├── receipt_intake_screen.py
 │   │   ├── payment_screen.py   # Includes receipt printing + charge-based denomination input + receipt photos
 │   │   ├── fmnp_screen.py      # Multi-photo FMNP with dynamic slots and scrollable container
-│   │   ├── admin_screen.py
+│   │   ├── admin_screen.py     # Adjustments + voids + ⚡ Auto-Distribute (parity with PaymentScreen as of v1.9.7)
 │   │   ├── reports_screen.py   # Resizable report table columns (auto-fit to content)
-│   │   ├── settings_screen.py  # Includes ImportPreviewDialog, Cloud Sync, Updates tabs
+│   │   ├── settings_screen.py  # Includes ImportPreviewDialog, Cloud Sync, Updates tabs; FMNP toggle (v1.9.8)
+│   │   ├── help_screen.py      # In-app Help — Walkthrough + Browse + Troubleshooting + System Status (v1.9.8)
+│   │   ├── help_walkthrough.py # 5-stage animated walkthrough widget — looping animation + Next-button pulse (v1.9.8)
+│   │   ├── help_icons.py       # 18 hand-painted FlatIcon QPainter pictograms + SceneCard + StepBadge (v1.9.8)
 │   │   ├── tutorial_overlay.py # Guided tutorial + auto-configure prompt
 │   │   ├── styles.py           # Color palette + global stylesheet
 │   │   ├── helpers.py          # Shared widgets + table utilities
 │   │   └── widgets/
 │   │       ├── payment_row.py  # Payment method entry widget + denomination validation
 │   │       └── summary_card.py # Metric display cards
+│   ├── help/                   # Structured help library — single source of truth (v1.9.8)
+│   │   ├── content.py          # Categories + 51 articles + 10 troubleshooting flows + accessors
+│   │   ├── search.py           # Ranked substring search across articles + flows
+│   │   └── system_status.py    # Live diagnostic snapshot (never raises) + clipboard format
 │   ├── sync/
 │   │   ├── base.py             # SyncResult dataclass + SyncBackend ABC
 │   │   ├── manager.py          # SyncManager orchestration + Agent Tracker
@@ -186,34 +193,40 @@ fam-market-manager/
 │       ├── log_reader.py       # Log file parser for Error Log sync tab
 │       ├── photo_storage.py    # Photo storage in {data_dir}/photos/ with SHA-256 hashing + resize
 │       └── photo_paths.py      # JSON encode/decode for multi-photo pipe-separated paths
-├── tests/
-│   ├── test_match_formula.py       # 98 tests — core formula verification
-│   ├── test_match_limit.py         # 28 tests — daily cap logic
-│   ├── test_returning_customer.py  # 23 tests + DB integration
-│   ├── test_adjustments.py         # 71 tests — adjustments, voids, ledger
-│   ├── test_fmnp_reports.py        # 38 tests — FMNP entries and reports
-│   ├── test_models.py              # 130 tests — model CRUD operations, photo queries
-│   ├── test_market_code.py         # 44 tests — market code, device ID, exports
-│   ├── test_backup.py              # 21 tests — backup creation + retention
-│   ├── test_schema.py              # 40 tests — migrations v1–v21, triggers, indexes
-│   ├── test_settings_io.py         # 54 tests — import/export round-trip
-│   ├── test_sync.py                # 124 tests — cloud sync, data collection, Google Sheets
-│   ├── test_update.py              # 122 tests — URL parsing, version comparison, update flow, zip probe, runtime script execution, path safety, PowerShell escaping, pending-update verification
-│   ├── test_denomination.py        # 43 tests — denomination constraints, charge conversion
-│   ├── test_charge_conversion.py   # 52 tests — charge-to-amount conversion edge cases
-│   ├── test_auto_distribute.py     # 71 tests — multi-receipt payment distribution, max-cap math
-│   ├── test_multi_photo.py         # 112 tests — multi-photo storage, dedup, Drive upload
-│   ├── test_cloud_sync_ux.py       # 151 tests — sync UX flows, Drive integration, Agent Tracker
-│   ├── test_money_boundaries.py    # 63 tests — integer-cents boundaries, float accumulation, FMNP check splitting, penny reconciliation
-│   ├── test_reconciliation.py      # 25 tests — three-way reconciliation (DB == Ledger == Sheets)
-│   ├── test_ui_payment.py          # 37 tests — automated UI: PaymentScreen widget behavior
-│   ├── test_ui_workflows.py        # 31 tests — end-to-end market day simulation, cap workflows
-│   ├── test_ui_guards.py           # 66 tests — max-cap clamping, lifecycle guards, match-cap-aware charge
-│   ├── test_ui_expanded.py         # 51 tests — production readiness E2E: payment pipelines, void exclusion, reconciliation
-│   ├── test_payment_method_safety.py # 23 tests — payment method CRUD safety, deactivation guards
+├── tests/                          # 1822 tests across 32 files
+│   ├── test_match_formula.py       # Core formula verification
+│   ├── test_match_limit.py         # Daily cap logic
+│   ├── test_returning_customer.py  # Multi-visit tracking
+│   ├── test_adjustments.py         # Adjustments, voids, ledger
+│   ├── test_fmnp_reports.py        # FMNP entries and reports
+│   ├── test_fmnp_payment_method_toggle.py # FMNP-as-payment-method toggle (v1.9.8 default-inactive) + Entry-screen independence
+│   ├── test_models.py              # Model CRUD operations, photo queries
+│   ├── test_market_code.py         # Market code, device ID, exports
+│   ├── test_backup.py              # Backup creation + retention
+│   ├── test_schema.py              # Migrations v1–v22, triggers, indexes
+│   ├── test_settings_io.py         # Import/export round-trip
+│   ├── test_sync.py                # Cloud sync, data collection, Google Sheets
+│   ├── test_sync_signal_coverage.py # Mutation paths trigger sync (v1.9.7)
+│   ├── test_update.py              # URL parsing, version comparison, update flow, zip probe, runtime script execution, certifi TLS context
+│   ├── test_drive_verification.py  # Tri-state Drive verification + URL preservation on UNKNOWN + 10-min throttle (v1.9.7)
+│   ├── test_denomination.py        # Denomination constraints, charge conversion
+│   ├── test_charge_conversion.py   # Charge-to-amount conversion edge cases
+│   ├── test_auto_distribute.py     # Multi-receipt payment distribution, max-cap math
+│   ├── test_multi_photo.py         # Multi-photo storage, dedup, Drive upload
+│   ├── test_cloud_sync_ux.py       # Sync UX flows, Drive integration, Agent Tracker, indicator state machine
+│   ├── test_money_boundaries.py    # Integer-cents boundaries, float accumulation, FMNP check splitting, penny reconciliation
+│   ├── test_reconciliation.py      # Three-way reconciliation (DB == Ledger == Sheets)
+│   ├── test_ui_payment.py          # Automated UI: PaymentScreen widget behavior
+│   ├── test_ui_workflows.py        # End-to-end market day simulation, cap workflows
+│   ├── test_ui_guards.py           # Max-cap clamping, lifecycle guards, match-cap-aware charge
+│   ├── test_ui_expanded.py         # Production readiness E2E: payment pipelines, void exclusion, reconciliation
+│   ├── test_payment_method_safety.py # Payment method CRUD safety, deactivation guards
+│   ├── test_help_content.py        # Help library structural integrity (v1.9.8)
+│   ├── test_help_walkthrough.py    # Walkthrough widget + looping animation + Next-button flash (v1.9.8)
+│   ├── test_help_icons.py          # Custom flat-icon library — instantiation + paint output (v1.9.8)
 │   └── conftest.py / __init__.py
 ├── releases/
-│   └── FAM_Manager_v1.9.7.zip # Distribution package
+│   └── FAM_Manager_v1.9.8.zip # Distribution package
 ├── fam_manager.spec            # PyInstaller build configuration
 ├── build.bat                   # Windows build script
 ├── requirements.txt
@@ -615,7 +628,7 @@ When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is
 
 ## 13. Testing
 
-**1591 tests** across 24 test files:
+**1822 tests** across 32 test files:
 
 | File | Tests | Coverage |
 |------|-------|----------|
@@ -643,6 +656,12 @@ When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is
 | `test_ui_guards.py` | 66 | Max-cap clamping, market day lifecycle guards, adjustment edge cases, match-cap-aware charge input |
 | `test_ui_expanded.py` | 51 | Production readiness: payment confirm E2E (DB/sync/ledger), draft save/resume, returning customer match limits, void-after-confirm exclusion, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent pipeline, high-volume reconciliation (30 txns), report state changes |
 | `test_payment_method_safety.py` | 23 | Payment method CRUD safety, market assignment, deactivation guards, Reports FMNP separation |
+| `test_fmnp_payment_method_toggle.py` | 13 | v1.9.8: FMNP toggleable from Settings, defaults inactive on Load Defaults; FMNP Entry screen unaffected by toggle state; reports preserve historical FMNP data after deactivation |
+| `test_sync_signal_coverage.py` | 20 | v1.9.7: every mutation path emits a sync trigger (FMNP delete, payment confirm, admin adjust/void, intake voids); AdjustmentDialog cap + Auto-Distribute parity |
+| `test_drive_verification.py` | 24 | v1.9.7: Drive verification tri-state (EXISTS / TRASHED_OR_MISSING / UNKNOWN); URL preservation on UNKNOWN; 10-min throttle; quiet network-error logging |
+| `test_help_content.py` | 41 | v1.9.8: help library structural integrity (no duplicate ids, broken cross-refs, empty stubs); coverage canaries for FMNP dual-path, sync, market lifecycle, corrections, data location |
+| `test_help_walkthrough.py` | 55 | v1.9.8: walkthrough widget behavior, looping animation, Next-button flash logic, Stage 4 FMNP reimbursement language correctness, source-level integration guards |
+| `test_help_icons.py` | 99 | v1.9.8: custom flat-icon library — 17 standard icons + ArrowIcon directions + SceneCard composition + StepBadge — instantiation, sizing, color override, paint output produces visible pixels |
 
 **Run:** `python -m pytest tests/ -v`
 

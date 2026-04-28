@@ -5,7 +5,34 @@
 > needs to understand, maintain, or extend the project **without** access to
 > previous conversation history. Keep this file up to date with every commit.
 >
-> **Last updated:** 2026-04-24 — v1.9.7
+> **Last updated:** 2026-04-27 — v1.9.8
+
+---
+
+## 0. Where We Left Off (handoff note)
+
+If you are a fresh AI session opening this repo, read this first:
+
+- `fam/__init__.py` reports `__version__ = "1.9.8"`.
+- The most recent **committed** release is `e339148` v1.9.7.  Everything
+  for v1.9.8 (Help system + FMNP toggle + tutorial step 10 redirect +
+  doc updates) is **staged but uncommitted** in the working tree.
+- Modified tracked files: `PROJECT_INSTRUCTIONS.md`, `README.md`,
+  `docs/FAM_Production_Readiness_Report.html`, `docs/TECHNICAL_OVERVIEW.md`,
+  `docs/USER_GUIDE.md`, `fam/__init__.py`, `fam/database/seed.py`,
+  `fam/ui/main_window.py`, `fam/ui/settings_screen.py`,
+  `fam/ui/tutorial_overlay.py`.
+- Untracked v1.9.8 additions: `fam/help/` (package with `content.py`,
+  `search.py`, `system_status.py`), `fam/ui/help_icons.py`,
+  `fam/ui/help_screen.py`, `fam/ui/help_walkthrough.py`,
+  `tests/test_fmnp_payment_method_toggle.py`, `tests/test_help_content.py`,
+  `tests/test_help_icons.py`, `tests/test_help_walkthrough.py`.
+- All version refs to `v1.9.7`, `v1.9.6`, `v1.9.5` etc. inside code
+  comments, test docstrings, and in-app Help articles are intentional
+  **historical markers** — do not "update" them to v1.9.8.
+- Before committing: run `python -m pytest tests/ -v` and confirm
+  1822 tests pass.  Build a local distro via `build.bat` and have
+  the user code-sign before tagging the v1.9.8 release.
 
 ---
 
@@ -28,7 +55,7 @@ dedicated Windows PC.
 | Packaging     | PyInstaller (Windows .exe)          |
 | Cloud Sync    | gspread + google-auth               |
 | Auto-Update   | urllib.request (stdlib)              |
-| Tests         | pytest + pytest-qt (1591 tests)     |
+| Tests         | pytest + pytest-qt (1822 tests)     |
 
 ---
 
@@ -37,7 +64,7 @@ dedicated Windows PC.
 ```
 fam-market-manager/
 ├── fam/                          # Application package
-│   ├── __init__.py               # __version__ = "1.9.7"
+│   ├── __init__.py               # __version__ = "1.9.8"
 │   ├── app.py                    # Qt app entry, data dir, exception handler
 │   ├── settings_io.py            # .fam file import/export
 │   ├── database/
@@ -63,21 +90,28 @@ fam-market-manager/
 │   │   ├── admin_screen.py       # Screen 4 — Adjustments & voids
 │   │   ├── reports_screen.py     # Screen 5 — Reports & exports
 │   │   ├── settings_screen.py    # Screen 6 — Config + import/export + cloud sync + updates
+│   │   ├── help_screen.py        # Screen 7 — Help (Walkthrough + Browse + Troubleshooting + System Status)
+│   │   ├── help_walkthrough.py   # 5-stage animated walkthrough widget for the Help splash tab
+│   │   ├── help_icons.py         # Custom flat-icon library (18 hand-painted pictograms via QPainter)
 │   │   ├── tutorial_overlay.py   # Guided tutorial + auto-configure
 │   │   ├── styles.py             # Global QSS + brand colours
 │   │   ├── helpers.py            # Reusable widgets & helpers
 │   │   └── widgets/
 │   │       ├── payment_row.py    # Payment method entry row
 │   │       └── summary_card.py   # Summary display cards
+│   ├── help/                     # Structured in-app help library (no AI involvement)
+│   │   ├── content.py            # Categories, articles, troubleshooting flows (single source of truth)
+│   │   ├── search.py             # Ranked substring search across articles + flows
+│   │   └── system_status.py      # Live diagnostic snapshot — never raises
 │   ├── sync/
 │   │   ├── base.py               # SyncResult dataclass
 │   │   ├── manager.py            # SyncManager orchestration + agent tracker
 │   │   ├── gsheets.py            # Google Sheets backend via gspread
 │   │   ├── data_collector.py     # Collects report data + photo URLs for sync
-│   │   ├── drive.py              # Google Drive photo upload (REST API)
+│   │   ├── drive.py              # Google Drive photo upload (REST API) + tri-state verification + 10-min throttle
 │   │   └── worker.py             # QThread worker for background sync
 │   ├── update/
-│   │   ├── checker.py            # GitHub API, version comparison, download, batch script
+│   │   ├── checker.py            # GitHub API, version comparison, download, batch script + certifi-backed TLS context + zip-probe + pending-update marker
 │   │   └── worker.py             # QThread workers for check + download
 │   └── utils/
 │       ├── app_settings.py       # Market code, device ID, sync/update settings, key-value store
@@ -87,31 +121,37 @@ fam-market-manager/
 │       ├── logging_config.py     # Rotating file logger
 │       ├── photo_storage.py      # Photo copy/resize, SHA-256 hashing, local registry
 │       └── photo_paths.py        # Multi-photo JSON encode/decode
-├── tests/
-│   ├── test_match_formula.py         # 98 tests — formula validation, edge cases, real-world scenarios
-│   ├── test_match_limit.py           # 28 tests — daily cap logic, proportional reduction, penny reconciliation under cap, cap=0/1¢ boundaries
-│   ├── test_returning_customer.py    # 23 tests — multi-visit tracking
-│   ├── test_adjustments.py           # 71 tests — adjustments, voids, ledger
-│   ├── test_fmnp_reports.py          # 38 tests — FMNP entries and reports
-│   ├── test_models.py                # 130 tests — model CRUD operations
-│   ├── test_market_code.py           # 44 tests — market code, device ID
-│   ├── test_backup.py                # 21 tests — backup creation + retention
-│   ├── test_schema.py                # 40 tests — migrations, triggers, indexes
-│   ├── test_settings_io.py           # 54 tests — import/export round-trip
-│   ├── test_sync.py                  # 124 tests — cloud sync, data collection, FMNP dual-source, agent tracker
-│   ├── test_update.py                # 77 tests — URL parsing, version comparison, update flow
-│   ├── test_charge_conversion.py     # 52 tests — charge ↔ method_amount conversion
-│   ├── test_auto_distribute.py       # 71 tests — auto-distribute payment allocation, max-cap math, cap reconciliation
-│   ├── test_denomination.py          # 43 tests — denomination constraint validation
-│   ├── test_multi_photo.py           # 112 tests — multi-photo storage, encoding, drive upload
-│   ├── test_cloud_sync_ux.py         # 151 tests — sync UX, photo dedup (within + cross-txn), hash model
-│   ├── test_money_boundaries.py      # 63 tests — integer-cents boundaries, float accumulation, FMNP check splitting, penny reconciliation
-│   ├── test_reconciliation.py        # 25 tests — three-way reconciliation (DB == Ledger == Sheets)
-│   ├── test_ui_payment.py            # 37 tests — payment screen UI (pytest-qt): summary cards, multi-method, stepper, auto-distribute
-│   ├── test_ui_workflows.py          # 31 tests — end-to-end market day simulation, returning customer cap workflows, void exclusion
-│   ├── test_ui_guards.py             # 66 tests — max-cap clamping, market day lifecycle guards, adjustment edge cases, match-cap-aware charge input
-│   ├── test_ui_expanded.py           # 51 tests — production readiness: payment confirm E2E, draft save/resume, returning customer match limits, void-after-confirm, adjustment propagation, multi-receipt mixed vendors, denomination overage/forfeit, odd-cent pipeline, high-volume reconciliation, report state changes
-│   └── test_payment_method_safety.py # 23 tests — payment method CRUD, deactivation safety, FMNP/FAM report separation
+├── tests/                            # 1822 tests across 32 files
+│   ├── test_match_formula.py         # Formula validation, edge cases, real-world scenarios
+│   ├── test_match_limit.py           # Daily cap logic, proportional reduction, penny reconciliation under cap
+│   ├── test_returning_customer.py    # Multi-visit tracking
+│   ├── test_adjustments.py           # Adjustments, voids, ledger
+│   ├── test_fmnp_reports.py          # FMNP entries and reports
+│   ├── test_fmnp_payment_method_toggle.py # FMNP-as-payment-method toggle (default inactive in v1.9.8+) and Entry-screen independence
+│   ├── test_models.py                # Model CRUD operations
+│   ├── test_market_code.py           # Market code, device ID
+│   ├── test_backup.py                # Backup creation + retention
+│   ├── test_schema.py                # Migrations, triggers, indexes
+│   ├── test_settings_io.py           # Import/export round-trip
+│   ├── test_sync.py                  # Cloud sync, data collection, FMNP dual-source, agent tracker
+│   ├── test_sync_signal_coverage.py  # Every mutation path emits a sync trigger (FMNP delete, payment confirm, admin adjust/void, intake voids)
+│   ├── test_update.py                # URL parsing, version comparison, update flow, runtime batch execution, certifi TLS context
+│   ├── test_drive_verification.py    # VerifyResult tri-state, URL preservation on UNKNOWN, 10-min throttle
+│   ├── test_charge_conversion.py     # Charge ↔ method_amount conversion
+│   ├── test_auto_distribute.py       # Auto-distribute payment allocation, max-cap math, cap reconciliation
+│   ├── test_denomination.py          # Denomination constraint validation
+│   ├── test_multi_photo.py           # Multi-photo storage, encoding, drive upload
+│   ├── test_cloud_sync_ux.py         # Sync UX, photo dedup, hash model, sync indicator state machine
+│   ├── test_money_boundaries.py      # Integer-cents boundaries, FMNP check splitting, penny reconciliation
+│   ├── test_reconciliation.py        # Three-way reconciliation (DB == Ledger == Sheets)
+│   ├── test_ui_payment.py            # Payment screen UI: summary cards, multi-method, stepper, auto-distribute
+│   ├── test_ui_workflows.py          # End-to-end market day simulation
+│   ├── test_ui_guards.py             # Max-cap clamping, market day lifecycle guards, adjustment edge cases
+│   ├── test_ui_expanded.py           # Production readiness E2E: payment confirm, draft save/resume, returning customer caps, void/adjustment propagation
+│   ├── test_payment_method_safety.py # Payment method CRUD, deactivation safety, FMNP/FAM report separation
+│   ├── test_help_content.py          # Help library structural integrity (article ids, cross-references, coverage canaries)
+│   ├── test_help_walkthrough.py      # Walkthrough scene data + widget behavior + looping animation + Next-button flash
+│   └── test_help_icons.py            # Custom flat-icon library (instantiation, paint output, scene cards)
 ├── releases/
 │   └── (zip files on GitHub Releases)
 ├── requirements.txt
@@ -238,6 +278,7 @@ When a customer's total match exceeds the cap, all match amounts are
 | v19→v20 | Added entered_by to fmnp_entries; FMNP entry audit fields |
 | v20→v21 | Added performance indexes: transactions(customer_order_id), market_days(market_id, date), audit_log(table_name, record_id) |
 | v21→v22 | Converted all monetary REAL columns to INTEGER cents (markets.daily_match_limit, payment_methods.denomination, transactions.receipt_total, payment_line_items.method_amount/match_amount/customer_charged, fmnp_entries.amount). Uses ROUND() before CAST to avoid float truncation. |
+| v22→v23 | Enforced UNIQUE on vendors.name (matching markets and payment_methods).  Existing duplicate vendor names are auto-renamed with " (2)", " (3)" suffixes on the higher-id rows so vendor IDs and every FK relationship stay intact; the older record keeps the canonical name.  Implemented as a UNIQUE INDEX (`idx_vendors_name_unique`) since SQLite cannot add a UNIQUE column constraint via ALTER TABLE. |
 
 ---
 
@@ -334,6 +375,90 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 - Device Identity display (read-only market code + device ID)
 - Cloud Sync tab — One-way sync to Google Sheets (credentials, spreadsheet ID, sync now)
 - Updates tab — GitHub repo URL, check for updates, download & install, auto-check toggle
+- **FMNP payment method is togglable** as of v1.9.8.  Defaults to inactive on fresh install / Load Defaults.  When inactive it does NOT appear as a payment-row option on the Payment Screen, but the FMNP Entry screen continues to function regardless (it looks up the FMNP method by name without filtering on `is_active`).  Coordinators activate FMNP for the Payment Screen only when their market wants in-app FMNP-as-payment-method (rare — most markets use the FMNP Entry screen exclusively for vendor-matched FMNP).
+
+### Screen 7 — Help
+- **Four tabs**, in order: **Walkthrough** (default — animated training overview), **Browse** (categorized articles + live search), **Troubleshooting** (symptom-based decision-tree flows), **System Status** (live diagnostic snapshot with **Copy Diagnostic Info** button)
+- Walkthrough auto-plays on first activation per session.  Each of the 5 stages loops its animation in place; the volunteer clicks **Next** when ready (the button pulses gold after the first iteration finishes).  Pause / Prev / Restart / Skip Tour controls.
+- Walkthrough scenes are composed from `SceneCard` widgets containing `FlatIcon` pictograms — 18 hand-painted icons in `fam/ui/help_icons.py` (Person, VendorStall, Receipt, Laptop, Card, Check, Cash, Runner, Box, Stamp, Cloud, File, Envelope, Manager, Clipboard, Table, Arrow, Checkmark).  All vector via QPainter — crisp at any DPI, FAM brand colors, no external dependencies.
+- Content lives in `fam/help/content.py` as structured Python data (Categories, Articles, TroubleshootingFlows).  v1.9.8 ships **51 articles across 8 categories** and **10 troubleshooting flows**.
+- Article bodies are Markdown rendered to HTML by Qt's `QTextBrowser` via a small in-house renderer in `fam/ui/help_screen.py`
+- Search ranks title hits over body hits via `fam/help/search.py`
+- System Status pulls from `fam/help/system_status.py`'s `collect_status()` — never raises, safe to call any time.  Reports app version, sync state, disk usage (DB / photos / backups / log / ledger backup), record counts (transactions, FMNP, audit log).  Copy Diagnostic Info button serializes the snapshot for paste into a coordinator email.
+- **No AI / LLM involvement** — all answers are curated text written by the engineer who shipped the corresponding code change
+
+---
+
+## 8a. Help Content Discipline
+
+The Help screen is the volunteer's first stop when something is unclear.
+Stale or missing help content erodes their trust in the system more than
+the underlying defect it's trying to explain.
+
+**The rule:** any change to the user-facing surface MUST update the
+matching article in `fam/help/content.py` in the **same commit**.
+
+User-facing surface includes:
+
+- New screens, tabs, or top-level navigation items
+- New buttons, dropdowns, or input controls volunteers will see
+- Changes to existing button labels or workflow ordering
+- New error conditions / dialogs / warnings
+- New sync states or indicator labels
+- Changes to default behavior (e.g. v1.9.8 making FMNP inactive by default)
+- Changes to where data is stored on disk
+- Changes to backup retention policy
+- New file types in the data directory
+
+For each change, ask: *what would a volunteer in front of this for the
+first time need to know?* Then update or add the matching article.
+
+### Mechanical guards (`tests/test_help_content.py`)
+
+The test suite enforces structural correctness:
+
+- Every article has required fields (id, title, body, category)
+- All `related_articles` cross-references resolve to real article ids
+- No duplicate ids across articles or troubleshooting flows
+- Every category has at least one article
+- Coverage canaries: required articles for FMNP dual-path, sync,
+  market lifecycle, corrections, and data location must always exist
+- Source-level guards that the Help screen is registered in
+  `main_window.py` nav and stack
+
+### What the tests do NOT catch
+
+- "You added a feature but forgot to write a help article" — that's
+  a human discipline failure, not a structural one
+- Out-of-date prose ("v1.7.0 added X" still in the article when X is
+  long since reworked)
+- Confusing writing or wrong information
+
+These require human review at edit time. When merging a PR that
+touches UI, the reviewer's checklist should include "did the help
+content get updated?"
+
+### Authoring conventions
+
+- **Article id**: kebab-case slug (e.g. `fmnp-via-tracking`)
+- **Body**: Markdown subset — `## headings`, `**bold**`, `*italic*`,
+  `` `inline code` ``, `- bullets`, `| tables |`, ```` ``` code blocks ``` ````
+- **Keywords**: lowercase terms a volunteer might type into search
+- **Related articles**: 2-5 cross-references max — too many becomes noise
+- **Tone**: direct and action-oriented. Lead with what to do, then why.
+- **Length**: 100-2000 chars per article. Stub articles (under 100
+  chars) fail the structural test.
+
+### Troubleshooting flows
+
+For symptom-based help (e.g. "sync indicator is red"), use a
+`TroubleshootingFlow` instead of an article. Format:
+
+- `id` starts with `ts-`
+- `title` phrased as the symptom (the volunteer's own words)
+- `symptom` is a one-line restatement
+- `steps` is an ordered list — each step a single concrete action
+- Cross-reference articles via `related_articles` for deeper reading
 
 ---
 
@@ -341,7 +466,7 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 
 **Run:** `python -m pytest tests/ -v` from project root
 
-**1473 total tests across 24 files** — all must pass before committing.
+**1799 total tests across 30 files** — all must pass before committing.
 
 ---
 
@@ -378,6 +503,7 @@ Legacy data (v1.5.1 and earlier) auto-migrated from exe directory on first launc
 
 | Version | Date       | Summary |
 |---------|------------|---------|
+| v1.9.8  | 2026-04-24 | **In-app Help system + FMNP payment-method toggle**.  New Help sidebar item with four tabs: (1) **Walkthrough** — animated 5-stage workflow training ("Your Day at the Market") with custom-painted flat-icon pictograms (18 hand-drawn QPainter icons), looping animation per stage, Next-button pulse after first iteration, manual prev/next/restart/pause/skip-tour controls; (2) **Browse** — 51 curated articles across 8 categories with live keyword search; (3) **Troubleshooting** — 10 symptom-based decision-tree flows; (4) **System Status** — live diagnostic snapshot with Copy Diagnostic Info button.  No AI involvement — all answers are curated text.  PROJECT_INSTRUCTIONS §8a Help Content Discipline rule added: any user-facing change updates the matching help article in the same commit.  **FMNP payment method is now togglable** from Settings → Payment Methods (previously locked) — defaults to inactive on fresh installs / Load Defaults so it does not appear as a payment-row option on the Payment Screen.  The dedicated FMNP Entry screen continues to function independently of this toggle.  All FMNP help content corrected to accurately describe the reimbursement model: vendor matches at 2× face value at the booth, vendor cashes the original check, FAM reimburses face value at end-of-month so the vendor is made whole; FMNP (External) is included in "Total Due to Vendor". 231 new tests (Help library structural integrity, walkthrough widget behavior, looping + flash logic, custom icon library, FMNP toggle independence, Reset-to-Defaults log file clearing, vendors.name UNIQUE migration v22→v23). 1822 tests across 32 files. |
 | v1.9.7  | 2026-04-24 | Sync + Drive reliability bundle, sized for the upcoming heavy-FMNP market. **Sync-signal coverage:** (1) FMNP entry deletion now triggers a cloud sync. (2) Payment confirmation fires the sync signal regardless of whether the volunteer returns to Receipt Intake; split `payment_confirmed` (always, drives sync) from new `return_to_intake_requested` (conditional, drives navigation). (3) AdminScreen gained `data_changed` emitted on successful adjustments and voids. (4) ReceiptIntake gained `data_changed` emitted on individual-receipt void, customer-session abandon, and pending-order delete. All new sync triggers ride the existing 60-second cooldown. **AdjustmentDialog parity:** Row charges now capped at receipt total (previously unlimited) and new `⚡ Auto-Distribute` button mirrors Payment Screen — reset non-denominated rows and redistribute respecting denominations/match percents; denominated rows with charges stay locked. **Drive verification correctness fix (the critical one for heavy FMNP):** `_verify_file_in_drive` returned `bool` where `False` conflated "confirmed missing" with "couldn't verify right now", so a transient DNS hiccup during verification would clear every in-flight URL and trigger a mass re-upload on the next sync (the "Drive re-upload storm" bug). Introduced `VerifyResult` tri-state enum (`EXISTS` / `TRASHED_OR_MISSING` / `UNKNOWN`); callers only clear URLs on confirmed `TRASHED_OR_MISSING`; network/auth/5xx errors return `UNKNOWN` and preserve the URL for retry next cycle. Network errors now log a single-line WARN instead of a full traceback. **Verification throttle:** the full URL sweep runs at most once per 10 minutes regardless of how many syncs fire in between — reduces Drive API load 10× at heavy-FMNP markets without affecting new-photo upload responsiveness (uploads still run every sync). 44 new tests total: 20 for sync-signal coverage with source-level integration guards, 24 for Drive tri-state verification + throttle + URL preservation on network error. 1591 tests across 26 files |
 | v1.9.6  | 2026-04-24 | Critical hotfix: auto-update downloads failed with `CERTIFICATE_VERIFY_FAILED` on every production laptop because `urllib` in the PyInstaller-frozen build had no trusted CAs — OpenSSL's compiled-in search paths do not resolve inside the bundle, so `ssl.create_default_context()` returned an empty trust store and every HTTPS request failed verification. Fix builds an explicit SSL context from `certifi.where()` (the CA bundle is already packaged via `collect_data_files('certifi')` in the spec) and reuses it across every outbound call in `check_for_update` and `download_update`. Cached so it's only built once per process. Conservative fallback to platform default if certifi is unavailable (dev-mode safety). 7 new tests verifying the context uses certifi, enforces certificate and hostname verification, is cached across calls, and is explicitly passed to every `urlopen`. Regression guard prevents any future caller from relying on the default context. Without this fix, auto-update was entirely non-functional in production. 1547 tests across 24 files |
 | v1.9.5  | 2026-04-24 | Hotfix: sync indicator no longer falsely displays green "Online" when the laptop is offline. The prior indicator was reading `last_sync_at` from the database and painting green whenever a past sync had succeeded, which misled volunteers into thinking they were connected at markets with no internet. Integrated Qt `QNetworkInformation` (Windows Network List Manager backend, no outbound probes) so the idle indicator reflects actual OS-reported reachability. Relabeled every state to describe what the app knows: "Last sync OK" / "Sync failed" / "Syncing…" / "Attention" / "No network" / "Not synced yet" — never the ambiguous "Online"/"Offline". Disconnection events now repaint within a second via Qt's `reachabilityChanged` signal. "No network" state includes reassurance text "data safe locally" so volunteers aren't alarmed. 14 new tests (indicator state labels + regression guard that "Online"/"Offline" never appear + OS-network helper + update-visibility state selection), 1540 tests across 24 files |

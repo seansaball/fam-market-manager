@@ -9,7 +9,7 @@ from .connection import get_connection, get_db_path
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 23
 
 TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS markets (
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS markets (
 
 CREATE TABLE IF NOT EXISTS vendors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
+    name TEXT NOT NULL UNIQUE,
     contact_info TEXT,
     is_active BOOLEAN DEFAULT 1,
     check_payable_to TEXT,
@@ -682,6 +682,95 @@ def _migrate_v21_to_v22(conn):
     logger.info("Migration v21->v22 complete: all monetary values converted to integer cents")
 
 
+def _migrate_v22_to_v23(conn):
+    """Enforce UNIQUE on vendors.name to match markets and payment_methods.
+
+    The original ``vendors`` table allowed duplicate names — the only
+    constraint was ``NOT NULL``.  Markets and payment_methods both
+    enforce uniqueness at the DB level, so the UI's "name already
+    exists" guard worked there but not for vendors, letting two
+    "Acme Farm" rows coexist with confusing reporting downstream.
+
+    This migration:
+
+    1. Detects any existing duplicate vendor names (case-sensitive,
+       matching the existing market/payment-method comparison rules).
+    2. Renames duplicates by appending ``" (2)"``, ``" (3)"`` … on the
+       higher-id rows so the older record keeps the canonical name.
+       Vendor IDs are not touched — every foreign key (transactions,
+       fmnp_entries, market_vendors) stays intact.
+    3. Creates a ``UNIQUE INDEX`` on ``vendors(name)``.  SQLite cannot
+       add a UNIQUE column constraint via ALTER TABLE, but a UNIQUE
+       INDEX enforces the same INSERT/UPDATE behaviour and produces
+       the same ``UNIQUE constraint failed`` error string the UI
+       already pattern-matches.
+
+    The fresh-install schema in ``TABLES_SQL`` was updated in lockstep
+    with this migration so new databases bake the UNIQUE constraint
+    into the column itself.
+    """
+    logger.info("Running migration v22 to v23: vendors.name UNIQUE")
+
+    # ── Step 1: discover and resolve duplicates ────────────────────
+    rows = conn.execute(
+        "SELECT id, name FROM vendors ORDER BY name, id"
+    ).fetchall()
+
+    # Build a set of all currently-used names so the suffixed names we
+    # invent don't collide with an unrelated existing vendor (rare but
+    # possible: vendor list contains "Acme", "Acme", and "Acme (2)").
+    existing_names = {r['name'] for r in rows}
+
+    # Group by name, keep the lowest-id row's name unchanged, rename
+    # the rest with " (N)" suffixes.
+    by_name: dict[str, list[int]] = {}
+    for r in rows:
+        by_name.setdefault(r['name'], []).append(r['id'])
+
+    renamed = 0
+    for original_name, ids in by_name.items():
+        if len(ids) <= 1:
+            continue  # no duplicates for this name
+        # Lowest id keeps the name; later ids get suffixed.
+        for vendor_id in ids[1:]:
+            n = 2
+            while True:
+                candidate = f"{original_name} ({n})"
+                if candidate not in existing_names:
+                    break
+                n += 1
+            conn.execute(
+                "UPDATE vendors SET name = ? WHERE id = ?",
+                (candidate, vendor_id),
+            )
+            existing_names.add(candidate)
+            logger.warning(
+                "Renamed duplicate vendor id=%s '%s' -> '%s'",
+                vendor_id, original_name, candidate,
+            )
+            renamed += 1
+
+    # ── Step 2: enforce uniqueness going forward ────────────────────
+    # Use IF NOT EXISTS so a fresh install (which already has the
+    # column-level UNIQUE) doesn't error if this migration somehow
+    # runs against it — the column-level UNIQUE auto-creates an
+    # internal sqlite_autoindex which won't conflict by name.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_vendors_name_unique"
+        " ON vendors(name)"
+    )
+    conn.commit()
+
+    if renamed:
+        logger.info(
+            "Migration v22->v23 complete: vendors.name UNIQUE enforced "
+            "(%d duplicate row(s) renamed)", renamed)
+    else:
+        logger.info(
+            "Migration v22->v23 complete: vendors.name UNIQUE enforced "
+            "(no duplicates found)")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -817,6 +906,10 @@ def initialize_database():
     if current_version < 22:
         _migrate_v21_to_v22(conn)
         current_version = 22
+
+    if current_version < 23:
+        _migrate_v22_to_v23(conn)
+        current_version = 23
 
     # Record the final version (avoid duplicate if already at this version)
     existing = conn.execute(

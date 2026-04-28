@@ -1973,9 +1973,13 @@ class TestSchemaMigrationV18:
         col_names = {r['name'] for r in rows}
         assert col_names == {'content_hash', 'relative_path', 'created_at'}
 
-    def test_version_is_22(self):
+    def test_version_is_23(self):
+        """Schema version bumped 22 → 23 in v1.9.8 to add the UNIQUE
+        constraint on vendors.name (matching markets and payment_methods).
+        Update this snapshot whenever the version bumps so the test
+        continues to act as a 'someone bumped the schema' tripwire."""
         from fam.database.schema import CURRENT_SCHEMA_VERSION
-        assert CURRENT_SCHEMA_VERSION == 22
+        assert CURRENT_SCHEMA_VERSION == 23
 
 
 # ══════════════════════════════════════════════════════════════════

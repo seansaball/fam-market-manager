@@ -60,6 +60,7 @@ from fam.ui.fmnp_screen import FMNPScreen
 from fam.ui.admin_screen import AdminScreen
 from fam.ui.reports_screen import ReportsScreen
 from fam.ui.settings_screen import SettingsScreen
+from fam.ui.help_screen import HelpScreen
 
 
 class MainWindow(QMainWindow):
@@ -130,6 +131,7 @@ class MainWindow(QMainWindow):
             ("FMNP Entry", 4),
             ("Reports", 5),
             ("Settings", 6),
+            ("Help", 7),
         ]
 
         for label, idx in nav_items:
@@ -251,6 +253,7 @@ class MainWindow(QMainWindow):
         self.admin_screen = AdminScreen()
         self.reports_screen = ReportsScreen()
         self.settings_screen = SettingsScreen()
+        self.help_screen = HelpScreen()
 
         self.stack.addWidget(self.market_day_screen)   # 0
         self.stack.addWidget(self.receipt_intake_screen) # 1
@@ -259,6 +262,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.fmnp_screen)           # 4
         self.stack.addWidget(self.reports_screen)        # 5
         self.stack.addWidget(self.settings_screen)       # 6
+        self.stack.addWidget(self.help_screen)           # 7
 
         # Connect navigation
         self.nav_group.idClicked.connect(self._navigate)
