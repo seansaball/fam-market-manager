@@ -396,13 +396,24 @@ class Stage3Scene(WalkthroughScene):
 
     Beat 1: receipts → laptop (data entry)
     Beat 2: payment methods appear (card, check, cash)
-    Beat 3: two parallel paths — food runner OR stamp
+    Beat 3: two parallel paths — food runner OR stamp-and-collect
+
+    All three beats live on a single horizontal row.  Earlier
+    revisions stacked beat 3 below beats 1 + 2; that produced a
+    second row that got clipped in windowed mode at lower
+    resolutions.  The single-row layout uses compact cards in
+    beat 3 (smaller width, shorter captions) so the dual-path
+    visual fits alongside the larger beat-1 / beat-2 cards.
     """
 
-    SCENE_HEIGHT = 240
+    SCENE_HEIGHT = 130
 
     def _build(self):
         # ── Beat 1: receipts → laptop ──────────────────────────
+        # Slightly compressed from the original 80×80 cards (now
+        # 70×76) to free horizontal room for the dual-path
+        # beat 3 on the same row.  The captions ("Receipts",
+        # "FAM App") still fit comfortably at 70 px wide.
         self._step1_badge = StepBadge(1, parent=self)
         self._step1_badge.move(20, 14)
         self._step1_label = _caption_label('Enter receipts', parent=self)
@@ -413,109 +424,121 @@ class Stage3Scene(WalkthroughScene):
         self._step1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self._receipts_card = SceneCard(
-            ReceiptIcon(size=40), caption='Receipts',
-            card_width=80, card_height=80, parent=self)
-        self._receipts_card.move(40, 38)
+            ReceiptIcon(size=36), caption='Receipts',
+            card_width=70, card_height=76, parent=self)
+        self._receipts_card.move(34, 38)
 
-        self._arrow_1 = ArrowIcon(direction='right', size=40, parent=self)
-        self._arrow_1.move(122, 60)
+        self._arrow_1 = ArrowIcon(direction='right', size=28, parent=self)
+        self._arrow_1.move(108, 60)
         _make_opacity_effect(self._arrow_1, initial=0.0)
 
         self._laptop_card = SceneCard(
-            LaptopIcon(size=40), caption='FAM App',
-            card_width=80, card_height=80, parent=self)
-        self._laptop_card.move(170, 38)
+            LaptopIcon(size=36), caption='FAM App',
+            card_width=70, card_height=76, parent=self)
+        self._laptop_card.move(140, 38)
 
-        # ── Beat 2: payment methods (cluster on the right) ─────
+        # ── Beat 2: payment methods (centred cluster) ──────────
         self._step2_badge = StepBadge(2, parent=self)
-        self._step2_badge.move(290, 14)
+        self._step2_badge.move(228, 14)
         self._step2_label = _caption_label('Collect payment', parent=self)
         self._step2_label.setStyleSheet(
             f'background:transparent;color:{TEXT_COLOR};'
             f'font-size:11px;font-weight:bold;')
-        self._step2_label.setGeometry(316, 12, 200, 18)
+        self._step2_label.setGeometry(254, 12, 180, 18)
         self._step2_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self._snap_card = SceneCard(
-            CardIcon(size=40), caption='SNAP',
+            CardIcon(size=36), caption='SNAP',
             sub_caption='via EBT terminal',
-            card_width=98, card_height=84, parent=self)
-        self._snap_card.move(290, 38)
+            card_width=84, card_height=80, parent=self)
+        self._snap_card.move(228, 38)
 
         self._fmnp_card = SceneCard(
-            CheckIcon(size=40), caption='FMNP',
-            card_width=84, card_height=84, parent=self)
-        self._fmnp_card.move(396, 38)
+            CheckIcon(size=36), caption='FMNP',
+            card_width=60, card_height=80, parent=self)
+        self._fmnp_card.move(316, 38)
 
         self._cash_card = SceneCard(
-            CashIcon(size=40), caption='Cash',
-            card_width=84, card_height=84, parent=self)
-        self._cash_card.move(488, 38)
+            CashIcon(size=36), caption='Cash',
+            card_width=60, card_height=80, parent=self)
+        self._cash_card.move(380, 38)
 
         for w in (self._snap_card, self._fmnp_card, self._cash_card):
             _make_opacity_effect(w, initial=0.0)
 
-        # ── Beat 3: two paths ──────────────────────────────────
+        # ── Beat 3: get the customer their food (dual path) ────
+        # Card widths chosen to fit each caption text at
+        # ``font-size:11px;font-weight:bold;`` (~7px per glyph
+        # plus the 12px internal margin).  Earlier compression
+        # had clipped "Food runner", "Stamp receipts", and
+        # "Customer collects" — fixed by sizing each card to its
+        # caption length:
+        #   - "Food runner"       11 chars → 84 px
+        #   - "Customer"           8 chars → 70 px
+        #   - "Stamp receipts"    14 chars → 96 px
+        #   - "Paid mark"          9 chars → 76 px
+        #   - "Customer collects" 17 chars → 102 px
+        # Total beat 3: ~518 px including arrows + the OR
+        # divider.  Total scene: ~970 px (fits any window
+        # 1024+ px wide).
         self._step3_badge = StepBadge(3, parent=self)
-        self._step3_badge.move(20, 132)
+        self._step3_badge.move(456, 14)
         self._step3_label = _caption_label('Get them their food', parent=self)
         self._step3_label.setStyleSheet(
             f'background:transparent;color:{TEXT_COLOR};'
             f'font-size:11px;font-weight:bold;')
-        self._step3_label.setGeometry(46, 130, 200, 18)
+        self._step3_label.setGeometry(482, 12, 200, 18)
         self._step3_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        path_y = 156
-
-        # Path A: Food runner → box
+        # Path A: food runner → customer
         self._runner_card = SceneCard(
-            RunnerIcon(size=40), caption='Food runner',
-            card_width=98, card_height=80, parent=self)
-        self._runner_card.move(40, path_y)
+            RunnerIcon(size=34), caption='Food runner',
+            card_width=84, card_height=76, parent=self)
+        self._runner_card.move(456, 38)
 
-        self._runner_arrow = ArrowIcon(direction='right', size=32, parent=self)
-        self._runner_arrow.move(140, path_y + 22)
+        self._runner_arrow = ArrowIcon(direction='right', size=24, parent=self)
+        self._runner_arrow.move(542, 60)
 
         self._box_card = SceneCard(
-            BoxIcon(size=40), caption='Customer',
-            card_width=84, card_height=80, parent=self)
-        self._box_card.move(178, path_y)
+            BoxIcon(size=34), caption='Customer',
+            card_width=70, card_height=76, parent=self)
+        self._box_card.move(568, 38)
 
         for w in (self._runner_card, self._runner_arrow, self._box_card):
             _make_opacity_effect(w, initial=0.0)
 
-        # OR divider
+        # OR divider — italic separator between the two paths
         self._or = QLabel('or', parent=self)
         self._or.setStyleSheet(
             f'background:transparent;color:{MEDIUM_GRAY};'
             f'font-weight:bold;font-size:11px;font-style:italic;')
-        self._or.setGeometry(280, path_y + 30, 30, 16)
+        self._or.setGeometry(640, 60, 22, 16)
         self._or.setAlignment(Qt.AlignCenter)
         _make_opacity_effect(self._or, initial=0.0)
 
-        # Path B: Stamp → stamped receipts → customer collects
+        # Path B: stamp → paid mark → customer collects
         self._stamp_card = SceneCard(
-            StampIcon(size=40), caption='Stamp receipts',
-            card_width=98, card_height=80, parent=self)
-        self._stamp_card.move(320, path_y)
+            StampIcon(size=34), caption='Stamp receipts',
+            card_width=96, card_height=76, parent=self)
+        self._stamp_card.move(664, 38)
 
-        self._stamp_arrow = ArrowIcon(direction='right', size=32, parent=self)
-        self._stamp_arrow.move(420, path_y + 22)
+        self._stamp_arrow = ArrowIcon(direction='right', size=24, parent=self)
+        self._stamp_arrow.move(762, 60)
 
         self._stamped_card = SceneCard(
-            CheckmarkIcon(size=40, primary=ACCENT_GREEN),
+            CheckmarkIcon(size=34, primary=ACCENT_GREEN),
             caption='Paid mark',
-            card_width=84, card_height=80, parent=self)
-        self._stamped_card.move(458, path_y)
+            card_width=76, card_height=76, parent=self)
+        self._stamped_card.move(788, 38)
 
-        self._stamp_arrow2 = ArrowIcon(direction='right', size=32, parent=self)
-        self._stamp_arrow2.move(544, path_y + 22)
+        self._stamp_arrow2 = ArrowIcon(direction='right', size=24, parent=self)
+        self._stamp_arrow2.move(866, 60)
 
         self._customer_collects = SceneCard(
-            PersonIcon(size=40, primary=PRIMARY_GREEN),
+            PersonIcon(size=34, primary=PRIMARY_GREEN),
             caption='Customer collects',
-            card_width=98, card_height=80, parent=self)
-        self._customer_collects.move(578, path_y)
+            card_width=102, card_height=76, parent=self)
+        self._customer_collects.move(892, 38)
 
         for w in (self._stamp_card, self._stamp_arrow,
                    self._stamped_card, self._stamp_arrow2,

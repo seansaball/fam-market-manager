@@ -357,7 +357,14 @@ def write_pending_update_marker(target_version: str, data_dir: Optional[str] = N
     or failure.
 
     Returns the path to the marker file.
+
+    v2.0.1: write atomically (tempfile + ``os.replace``) so a power
+    loss during the ~1 ms write window can't leave a 0-byte or
+    truncated marker.  A corrupt marker is silently treated as "no
+    marker" by ``check_pending_update_result``, defeating the
+    silent-failure visibility the marker exists to provide.
     """
+    import tempfile
     if data_dir is None:
         from fam.app import get_data_dir
         data_dir = get_data_dir()
@@ -365,8 +372,26 @@ def write_pending_update_marker(target_version: str, data_dir: Optional[str] = N
     payload = {
         'target_version': target_version.lstrip('vV'),
     }
-    with open(marker_path, 'w', encoding='utf-8') as f:
-        json.dump(payload, f)
+    # Write to a sibling tempfile, fsync, then atomic rename.
+    fd, tmp_path = tempfile.mkstemp(
+        prefix='_pending_update.', suffix='.tmp', dir=data_dir,
+    )
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass  # fsync isn't critical; replace is what matters
+        os.replace(tmp_path, marker_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
     logger.info("Pending-update marker written: target=%s (%s)",
                 target_version, marker_path)
     return marker_path
@@ -458,6 +483,69 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
         source_dir = os.path.join(temp_dir, inner_win) if inner_win else temp_dir
         logger.info("Update source dir inside zip: %r → %s", inner_path, source_dir)
 
+    # v2.0.2 fix (B-H5): on xcopy failure, automatically restore from
+    # ``_update_backup`` rather than just printing "Your backup is at
+    # ..." and exiting.
+    #
+    # v2.0.3 fix (CRIT-SEC-1): hash-pin the backup before rolling back.
+    # Pre-fix, the rollback xcopy'd from a directory in %APPDATA% (data
+    # dir, attacker-writable in the threat model).  An attacker with
+    # FS write to data_dir could plant a malicious ``FAM Manager.exe``
+    # in ``_update_backup\``, then either wait for or force an update
+    # failure (e.g. by chmod'ing the install dir read-only).  The
+    # auto-rollback would silently restore attacker code into the
+    # install directory — escalating data-dir-write to install-dir-RCE.
+    #
+    # Defense: at backup time we write a SHA-256 manifest to
+    # ``app_dir\_update_manifest.sha256`` (the install dir, NOT the
+    # data dir, so it shares the install_dir's trust boundary).  At
+    # rollback time we recompute the hash of the backup's
+    # ``FAM Manager.exe`` via PowerShell and compare against the
+    # trusted manifest BEFORE copying.  Mismatch ⇒ refuse rollback,
+    # show a security warning, and tell the user to recover manually.
+    #
+    # IMPLEMENTATION NOTE: The rollback uses ``goto :ROLLBACK_AND_EXIT``
+    # (and the failure-path ``call`` below) instead of inlining the
+    # rollback inside the failure ``if (...)`` blocks, because batch
+    # syntax forbids ``goto`` labels inside parenthesised compound
+    # statements.  A subroutine-style ``call :DO_ROLLBACK`` would also
+    # work but ``goto`` keeps the control flow flat.
+    rollback_label_block = f"""
+        :ROLLBACK_AND_EXIT
+        echo Attempting automatic rollback from backup...
+        if not exist "{backup_dir}\\FAM Manager.exe" (
+            echo WARNING: No usable backup at {backup_dir}; skipping rollback.
+            exit /b 1
+        )
+        if not exist "{app_dir}\\_update_manifest.sha256" (
+            echo WARNING: No trusted backup manifest found at "{app_dir}\\_update_manifest.sha256".
+            echo This usually means the backup pre-dates v2.0.3 hardening.
+            echo Refusing automatic rollback for safety.  Recover manually:
+            echo   copy "{backup_dir}\\*" "{app_dir}\\"
+            exit /b 1
+        )
+        powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $expected = (Get-Content -Raw '{_ps_single_quote(os.path.join(app_dir, '_update_manifest.sha256'))}').Trim().ToLower(); $actual = (Get-FileHash -Algorithm SHA256 '{_ps_single_quote(os.path.join(backup_dir, 'FAM Manager.exe'))}').Hash.ToLower(); if ($expected -ne $actual) {{ Write-Error ('Backup hash mismatch: expected=' + $expected + ' actual=' + $actual); exit 1 }}"
+        if %ERRORLEVEL% NEQ 0 (
+            echo SECURITY WARNING: Backup hash MISMATCH.  The backup at
+            echo "{backup_dir}" does not match the trusted manifest.
+            echo This may indicate tampering.  Refusing automatic rollback.
+            echo Manual recovery:
+            echo   1. Investigate "{backup_dir}" for unexpected files.
+            echo   2. If you trust it, copy contents to "{app_dir}" by hand.
+            echo   3. Otherwise reinstall FAM Manager from the official release page.
+            exit /b 1
+        )
+        echo Backup hash verified.  Restoring...
+        xcopy /E /I /Q /Y "{backup_dir}\\*" "{app_dir}\\"
+        if %ERRORLEVEL% EQU 0 (
+            echo Rollback complete.  Your previous version has been restored.
+        ) else (
+            echo WARNING: Automatic rollback FAILED at xcopy.  Manual recovery required.
+            echo Your backup is at "{backup_dir}" -- copy it back to "{app_dir}" by hand.
+        )
+        exit /b 1
+"""
+
     if source_dir is not None:
         # Known source path — direct copy.  No ``pause`` here: the whole
         # script's stdout/stderr is redirected to a log file, so a pause
@@ -468,24 +556,33 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
         if not exist "{source_dir}\\FAM Manager.exe" (
             echo ERROR: Expected FAM Manager.exe not found in extracted zip.
             echo Looked in: {source_dir}
-            exit /b 1
+            goto ROLLBACK_AND_EXIT
         )
         xcopy /E /I /Q /Y "{source_dir}\\*" "{app_dir}\\"
         if %ERRORLEVEL% NEQ 0 (
-            echo ERROR: Failed to copy update files. Your backup is at {backup_dir}
-            exit /b 1
+            echo ERROR: Failed to copy update files.
+            goto ROLLBACK_AND_EXIT
         )
 """
     else:
-        # Legacy fallback — first top-level folder
+        # Legacy fallback — first top-level folder.  v2.0.2 fix
+        # (Build-H4): require at least one file to be copied before
+        # the loop is considered successful, AND attempt automatic
+        # rollback if the loop finished without copying anything.
         install_block = f"""\
         REM ── Copy extracted files over app directory (fallback) ──
         echo Installing update (legacy fallback)...
+        set FAM_FALLBACK_COPIED=0
         for /D %%d in ("{temp_dir}\\*") do (
             xcopy /E /I /Q /Y "%%d\\*" "{app_dir}\\"
+            if %ERRORLEVEL% EQU 0 set FAM_FALLBACK_COPIED=1
             goto DONE_COPY
         )
         :DONE_COPY
+        if "%FAM_FALLBACK_COPIED%"=="0" (
+            echo ERROR: Legacy fallback did not copy any files.
+            goto ROLLBACK_AND_EXIT
+        )
 """
 
     # Escape paths for batch script (double backslashes not needed
@@ -533,16 +630,35 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
         if %ERRORLEVEL% NEQ 0 (
             echo WARNING: Backup may be incomplete, but continuing with update.
         )
+        REM v2.0.3 (CRIT-SEC-1): write a SHA-256 manifest to app_dir
+        REM (NOT data_dir / backup_dir).  Rollback verifies the backup's
+        REM hash against this manifest before copying — preventing an
+        REM attacker who can write to data_dir from planting a malicious
+        REM exe in _update_backup\ and waiting for an update to fail.
+        REM The manifest lives in app_dir, which shares the install
+        REM directory's trust boundary; an attacker with install-dir
+        REM write doesn't need this exploit anyway.
+        powershell -NoProfile -Command "$ErrorActionPreference='Stop'; (Get-FileHash -Algorithm SHA256 '{_ps_single_quote(os.path.join(app_dir, 'FAM Manager.exe'))}').Hash.ToLower() | Set-Content -NoNewline '{_ps_single_quote(os.path.join(app_dir, '_update_manifest.sha256'))}'"
+        if %ERRORLEVEL% NEQ 0 (
+            echo WARNING: Could not write rollback manifest. Continuing without it.
+            echo Auto-rollback will be DISABLED if the install fails.
+        )
         echo Backup complete.
 
         REM ── Extract new version ──
         echo Extracting update...
         if exist "{temp_dir}" rmdir /s /q "{temp_dir}"
         mkdir "{temp_dir}"
-        powershell -NoProfile -Command "Expand-Archive -Path '{_ps_single_quote(zip_path)}' -DestinationPath '{_ps_single_quote(temp_dir)}' -Force"
+        REM v2.0.2 fix (Build-H4): -ErrorAction Stop forces PowerShell
+        REM to surface a non-zero exit code on errors that would
+        REM otherwise produce a non-terminating warning.
+        powershell -NoProfile -Command "$ErrorActionPreference='Stop'; Expand-Archive -Path '{_ps_single_quote(zip_path)}' -DestinationPath '{_ps_single_quote(temp_dir)}' -Force"
         if %ERRORLEVEL% NEQ 0 (
             echo.
-            echo ERROR: Failed to extract update. Your current version is unchanged.
+            echo ERROR: Failed to extract update.
+            REM Extraction failed before any install-dir overwrite — the
+            REM current version is still intact, no rollback needed.
+            echo Your current version is unchanged.
             echo The previous version backup is at: {backup_dir}
             exit /b 1
         )
@@ -566,6 +682,7 @@ def generate_update_script(app_dir: str, zip_path: str) -> str:
         REM ── Self-delete ──
         (goto) 2>NUL & del "%~f0"
         exit /b 0
+{rollback_label_block}
     """)
 
     with open(script_path, 'w', encoding='utf-8') as f:

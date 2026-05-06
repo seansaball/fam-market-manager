@@ -518,11 +518,24 @@ class TestUpdateSettings:
     """Tests for update-related app_settings helpers."""
 
     def test_get_set_repo_url(self):
+        # v2.0.2: set_update_repo_url enforces an allow-list, so the
+        # only URL that round-trips is the official release channel.
         from fam.utils.app_settings import (
-            get_update_repo_url, set_update_repo_url,
+            DEFAULT_REPO_URL,
+            get_update_repo_url,
+            set_update_repo_url,
         )
-        set_update_repo_url("https://github.com/owner/repo")
-        assert get_update_repo_url() == "https://github.com/owner/repo"
+        set_update_repo_url(DEFAULT_REPO_URL)
+        assert get_update_repo_url() == DEFAULT_REPO_URL
+
+    def test_repo_url_rejects_non_allow_listed(self):
+        """v2.0.2: a non-official URL must be refused.  Tests the
+        same path that defeats the auto-update RCE-as-installer
+        attack."""
+        import pytest
+        from fam.utils.app_settings import set_update_repo_url
+        with pytest.raises(ValueError):
+            set_update_repo_url("https://github.com/owner/repo")
 
     def test_auto_check_default_enabled(self):
         from fam.utils.app_settings import is_auto_update_check_enabled
@@ -546,11 +559,15 @@ class TestUpdateSettings:
         assert get_last_update_check() == "2026-03-09T14:30:00"
 
     def test_repo_url_strips_whitespace(self):
+        """v2.0.2: leading/trailing whitespace is still stripped, AND
+        the cleaned URL is checked against the allow-list."""
         from fam.utils.app_settings import (
-            get_update_repo_url, set_update_repo_url,
+            DEFAULT_REPO_URL,
+            get_update_repo_url,
+            set_update_repo_url,
         )
-        set_update_repo_url("  https://github.com/o/r  ")
-        assert get_update_repo_url() == "https://github.com/o/r"
+        set_update_repo_url("  " + DEFAULT_REPO_URL + "  ")
+        assert get_update_repo_url() == DEFAULT_REPO_URL
 
 
 # ── Edge Cases ────────────────────────────────────────────────

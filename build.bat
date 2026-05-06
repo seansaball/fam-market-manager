@@ -1,12 +1,26 @@
 @echo off
 REM ============================================================
-REM  FAM Market Manager — Build standalone .exe
+REM  FAM Market Manager - Build standalone .exe
 REM  Run this script from the project root directory.
+REM
+REM  RELEASE GATE REMINDER
+REM  ---------------------
+REM  Before tagging and distributing this build, the full
+REM  Release Audit Gate MUST pass:
+REM
+REM      scripts\run_release_audit.bat
+REM
+REM  See docs\RELEASE_AUDIT_PROCEDURE.md.  Three gates run in
+REM  ~90 seconds total.  If you skipped them, stop now and run
+REM  them.  A clean build is not a substitute for clean audits.
+REM
+REM  Pass /skip-audit-prompt to suppress the interactive prompt
+REM  in CI scenarios where the audit was already gated upstream.
 REM ============================================================
 
 echo.
 echo ========================================
-echo  FAM Market Manager — Build Script
+echo  FAM Market Manager - Build Script
 echo ========================================
 echo.
 
@@ -18,6 +32,31 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+
+REM ------------------------------------------------------------
+REM Release-gate reminder (interactive unless suppressed)
+REM ------------------------------------------------------------
+if /I "%~1"=="/skip-audit-prompt" goto :skip_audit_prompt
+echo.
+echo ============================================================
+echo  RELEASE AUDIT GATE REMINDER
+echo ============================================================
+echo  Have you run the full Release Audit Gate against this
+echo  source tree?
+echo.
+echo      scripts\run_release_audit.bat
+echo.
+echo  This is mandatory for every release.  See
+echo  docs\RELEASE_AUDIT_PROCEDURE.md.
+echo ============================================================
+set /p _AUDIT_OK="  Audit passed? (Y to continue, N to abort): "
+if /I not "%_AUDIT_OK%"=="Y" (
+    echo.
+    echo  Build aborted.  Run scripts\run_release_audit.bat first.
+    exit /b 1
+)
+:skip_audit_prompt
+echo.
 
 echo [1/4] Creating build virtual environment...
 if not exist "build_venv" (

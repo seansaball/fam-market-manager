@@ -1,5 +1,7 @@
 """Screen B: Receipt Intake — multi-receipt customer order flow."""
 
+import logging
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
     QPushButton, QFrame, QMessageBox, QTableWidget,
@@ -14,7 +16,8 @@ from fam.models.transaction import create_transaction, void_transaction
 from fam.models.customer_order import (
     create_customer_order, get_customer_order, get_order_transactions,
     get_order_total, void_customer_order, get_draft_orders_for_market_day,
-    get_confirmed_customers_for_market_day, update_customer_order_zip_code
+    get_confirmed_customers_for_market_day, update_customer_order_zip_code,
+    update_customer_order_status,
 )
 from fam.database.connection import get_connection
 from fam.ui.styles import (
@@ -27,6 +30,8 @@ from fam.ui.helpers import (
     configure_table, NoScrollDoubleSpinBox, NoScrollComboBox
 )
 from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
+
+logger = logging.getLogger(__name__)
 
 # 3-digit prefixes not assigned by USPS — rejects obviously invalid zips
 # without requiring a full database or API call.
@@ -296,8 +301,13 @@ class ReceiptIntakeScreen(QWidget):
         )
         configure_table(self.receipts_table, actions_col=4, actions_width=80)
         self.receipts_table.setMinimumHeight(90)
-        self.receipts_table.setMaximumHeight(300)
-        receipts_inner.addWidget(self.receipts_table)
+        # No setMaximumHeight: the parent receipts_frame is given a
+        # vertical stretch factor below so the table grows to fill
+        # whatever screen space is available, showing more receipts
+        # at a glance on larger displays without a hard 4-row cap.
+        # The table's own scrollbar still kicks in if the receipt
+        # count exceeds even the resized viewport.
+        receipts_inner.addWidget(self.receipts_table, 1)
 
         # Running total + action buttons in one row
         action_row = QHBoxLayout()
@@ -324,7 +334,12 @@ class ReceiptIntakeScreen(QWidget):
         receipts_inner.addLayout(action_row)
 
         self.receipts_frame.setVisible(False)
-        layout.addWidget(self.receipts_frame)
+        # Stretch factor 1 → when visible, this frame absorbs all
+        # available vertical space in the screen so the embedded
+        # receipts table grows with the window.  When hidden (no
+        # customer selected), Qt skips it for layout and the trailing
+        # ``layout.addStretch()`` claims the space instead.
+        layout.addWidget(self.receipts_frame, 1)
 
         # ── Pending Orders table ──────────────────────────────────
         self.pending_frame = QFrame()
@@ -388,7 +403,12 @@ class ReceiptIntakeScreen(QWidget):
         from PySide6.QtCore import QEvent as _QE
         if obj is self.receipt_total_spin.lineEdit() and event.type() == _QE.FocusIn:
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, self.receipt_total_spin.selectAll)
+            from fam.ui.helpers import _safe_select_all
+            # Guard against the spinbox being deleted between focus-in
+            # and the timer firing (see helpers._safe_select_all docstring
+            # for the 2026-04-30 onsite-finding bug this prevents).
+            QTimer.singleShot(
+                0, lambda: _safe_select_all(self.receipt_total_spin))
         return super().eventFilter(obj, event)
 
     def _update_market_status(self):
@@ -647,11 +667,62 @@ class ReceiptIntakeScreen(QWidget):
         if index < 0 or index >= len(self._order_receipts):
             return
         entry = self._order_receipts[index]
-        void_transaction(entry['txn_id'], voided_by="Intake")
+        # v2.0.2 fix (UF-H2): bundle the void + parent-order
+        # status flip into a single atomic transaction.  Pre-fix
+        # ``void_transaction`` committed before the parent-order
+        # query ran — a transient ``database is locked`` between
+        # them would leave the txn voided but the order still
+        # Draft with 0 receipts (a small DB leak).  Now both
+        # writes commit or roll back together.
+        conn = get_connection()
+        order_id = getattr(self, '_current_order_id', None)
+        try:
+            void_transaction(entry['txn_id'], voided_by="Intake",
+                             commit=False)
+
+            # Determine if the parent customer_order should also be
+            # voided (last non-voided txn just removed AND order is
+            # still in Draft).  Use a fresh count from the DB so we
+            # don't have to trust the in-memory ``_order_receipts``
+            # state — the just-voided txn has already been written
+            # by ``void_transaction`` above.
+            should_void_order = False
+            if order_id is not None and len(self._order_receipts) <= 1:
+                # ``_order_receipts`` still includes the row we're
+                # removing because we haven't ``.pop()``-ed yet.
+                co = get_customer_order(order_id)
+                if co and co.get('status') == 'Draft':
+                    remaining = conn.execute(
+                        "SELECT COUNT(*) FROM transactions "
+                        "WHERE customer_order_id=? AND status != 'Voided'",
+                        (order_id,)
+                    ).fetchone()[0]
+                    if remaining == 0:
+                        should_void_order = True
+
+            if should_void_order:
+                update_customer_order_status(
+                    order_id, 'Voided',
+                    changed_by='Intake', commit=False)
+                logger.info(
+                    "Voided empty Draft customer_order %s after "
+                    "removing last receipt", order_id)
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.exception(
+                "Failed to remove receipt %s; transaction rolled back",
+                entry.get('txn_id'))
+            self._show_error(
+                "Could not remove the receipt.  No changes were saved.")
+            return
+
+        # DB writes succeeded — update the in-memory state and UI.
         self._order_receipts.pop(index)
         self._refresh_receipts_table()
-        # Voiding an individual receipt changes transaction data — fire the
-        # sync signal so reports stay current.
+        # Voiding an individual receipt changes transaction data —
+        # fire the sync signal so reports stay current.
         self.data_changed.emit()
 
         if not self._order_receipts:

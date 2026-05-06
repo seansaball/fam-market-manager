@@ -335,23 +335,25 @@ TUTORIAL_STEPS = [
             ),
             TutorialHint(
                 "Cloud Sync",
-                "One-way sync that uploads your end-of-day "
-                "reports to Google Sheets and FMNP check photos "
-                "to Google Drive so coordinators and the finance "
-                "team can view data remotely.\n\n"
-                "To set up:\n"
-                "1. Obtain a Google service account credentials "
-                "file (JSON) from your coordinator\n"
-                "2. Click \u201cLoad Credentials\u201d to import it\n"
-                "3. Enter the Spreadsheet ID from your Google "
-                "Sheet URL\n"
-                "4. Paste your Google Drive folder URL for "
-                "check photos\n"
-                "5. Click \u201cSave Sync Settings\u201d\n\n"
+                "Optional one-way sync that uploads your reports "
+                "to Google Sheets and FMNP check photos to Google "
+                "Drive so coordinators and the finance team can "
+                "view data remotely.\n\n"
+                "To set up (3 steps):\n"
+                "1. Get the Google service-account credentials "
+                "file (a .json file) from your coordinator\n"
+                "2. Click \u201cLoad Credentials\u201d and pick "
+                "the file\n"
+                "3. Paste the Spreadsheet ID from the shared "
+                "Google Sheet URL, then click \u201cSave Sync "
+                "Settings\u201d\n\n"
+                "Drive setup is automatic \u2014 the same "
+                "credentials handle both Sheets and Drive. The "
+                "app finds or creates a folder for photos on "
+                "first sync.\n\n"
                 "Then click \u201cSync to Cloud\u201d any time to "
-                "upload data and photos. Sync requires an "
-                "internet connection \u2014 your local data is "
-                "never affected if it fails.",
+                "push data and photos. Sync needs internet \u2014 "
+                "if it fails, your local data is never affected.",
                 "settings_screen.cloud_sync_tab",
             ),
             TutorialHint(

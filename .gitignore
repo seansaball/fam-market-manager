@@ -53,10 +53,12 @@ releases/
 # Log files
 *.log
 
-# Runtime artifacts (ledger backups, pytest)
+# Runtime artifacts (ledger backups, pytest, local locks/scripts)
 fam_ledger_backup*.txt
 fam_*_ledger_backup*.txt
 .pytest_cache/
+.fam_instance.lock
+_fam_update.bat
 
 # Photos (local runtime data — synced to Google Drive, not git)
 photos/

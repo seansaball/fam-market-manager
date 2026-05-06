@@ -84,10 +84,15 @@ class TestClearActiveLog:
         """If the log file doesn't exist yet, clear_log_files succeeds
         silently — there's nothing to do and that's fine."""
         log_path = isolated_logger
-        # Detach handlers and remove the file before clearing
-        for h in list(logging.getLogger('fam').handlers):
-            h.close()
-            logging.getLogger('fam').removeHandler(h)
+        # v2.0.1: detach handlers from BOTH fam AND root so the
+        # rotating file handle is released on Windows.  Pre-v2.0.1
+        # the handler was on fam; v2.0.1 moved it to root.
+        for logger_name in ('fam', ''):
+            target = logging.getLogger(logger_name)
+            for h in list(target.handlers):
+                if isinstance(h, logging.FileHandler):
+                    h.close()
+                    target.removeHandler(h)
         if log_path.exists():
             log_path.unlink()
 

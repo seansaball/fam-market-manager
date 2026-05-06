@@ -186,6 +186,14 @@ def calculate_payment_breakdown(receipt_total: int, payment_entries: list,
         payment_entries: List of dicts, each with:
             - method_amount (int): amount allocated in cents
             - match_percent (float): 0-999, e.g. 100 = 1:1 match, 200 = 2:1
+            - denomination (int, optional): denomination in cents.  When
+              present and > 0, the row is treated as **denominated** —
+              its ``customer_charged`` is FIXED by the physical
+              instruments handed over (N × denomination) and will not
+              be inflated by cap-aware deficit redistribution.  The
+              cap deficit is absorbed entirely by non-denominated
+              rows in that case.  Omit (or set None/0) for non-
+              denominated rows whose customer can flex.
         match_limit: Optional per-customer daily match cap in cents.
 
     Returns:
@@ -223,6 +231,8 @@ def calculate_payment_breakdown(receipt_total: int, payment_entries: list,
     for entry in payment_entries:
         method_amount = entry.get('method_amount', 0)
         match_percent = entry.get('match_percent', 0.0)
+        denomination = entry.get('denomination') or 0
+        is_denom = denomination > 0
 
         if method_amount < 0:
             errors.append(
@@ -240,6 +250,7 @@ def calculate_payment_breakdown(receipt_total: int, payment_entries: list,
             'match_percent': match_percent,
             'match_amount': match_amount,
             'customer_charged': customer_charged,
+            '_is_denom': is_denom,
         })
 
     # ── Apply match-limit cap ────────────────────────────────────
@@ -248,21 +259,156 @@ def calculate_payment_breakdown(receipt_total: int, payment_entries: list,
 
     if match_limit is not None and uncapped_total > match_limit >= 0:
         match_was_capped = True
-        cap_ratio = match_limit / uncapped_total
-        for li in line_items:
-            li['match_amount'] = round(li['match_amount'] * cap_ratio)
-            li['customer_charged'] = li['method_amount'] - li['match_amount']
 
-        # Cent adjustment: fix rounding drift so sum of match == cap exactly
+        # v1.9.10 onsite-finding fix: denominated rows have FIXED
+        # customer_charged (= physical units × denomination).  The
+        # naive proportional cap (``match_amount = uncapped × cap_ratio``
+        # for every row, then ``customer = method - match``) inflates
+        # customer_charged on denom rows when cap kicks in — but the
+        # customer didn't hand over more physical units, so the
+        # spinbox can't mirror that value, Layer 2A then blocks the
+        # confirm with a "row mismatch" error, and the volunteer is
+        # stuck.  Fix: when total denom uncapped match ≤ cap,
+        # absorb the cap deficit ENTIRELY on non-denom rows, leaving
+        # denom rows' customer_charged intact.  Falls back to the
+        # legacy proportional reduction only when denom matches alone
+        # already exceed the cap (rare; volunteer must reduce a
+        # denom row).
+        denom_uncapped = sum(li['match_amount']
+                              for li in line_items if li['_is_denom'])
+        non_denom_uncapped = uncapped_total - denom_uncapped
+
+        if denom_uncapped <= match_limit and non_denom_uncapped > 0:
+            # Common path: cap deficit fits within non-denom flex.
+            available_for_non_denom = match_limit - denom_uncapped
+            non_denom_cap_ratio = (
+                available_for_non_denom / non_denom_uncapped)
+            for li in line_items:
+                if li['_is_denom']:
+                    # Denom: customer_charged FIXED, match unchanged
+                    # at uncapped.  Method may need to reduce later
+                    # via denomination-forfeit if it over-allocates
+                    # the bound vendor; that's not the cap's job.
+                    pass
+                else:
+                    li['match_amount'] = round(
+                        li['match_amount'] * non_denom_cap_ratio)
+                    li['customer_charged'] = (
+                        li['method_amount'] - li['match_amount'])
+        else:
+            # Fallback: denom uncapped match alone meets/exceeds cap.
+            # v1.9.10 onsite-finding fix: previously this did a
+            # naive proportional reduction across ALL rows, which
+            # inflated ``customer_charged`` on denom rows (because
+            # the formula computed customer = method - reduced_match
+            # without recognizing that denom customer is FIXED at
+            # ``unit_count × denomination``).  Layer 2A then blocked
+            # confirm with "row mismatch" — the user's screen
+            # showed FB Bucks $6 but engine wanted $10.31, with no
+            # way forward (Auto-Distribute didn't fix it).
+            #
+            # Correct behaviour: snap each denom row's customer
+            # back to its FIXED value, reduce match (and method) by
+            # the cap ratio, then inflate non-denom rows' method to
+            # cover the receipt-balance gap.  Non-denom rows absorb
+            # the residual cap budget (likely near zero).  After
+            # forfeit + cap-aware give-back run downstream, the
+            # final state has correct denom-multiple customers and
+            # full cap utilization.
+            if denom_uncapped > 0:
+                denom_cap_ratio = min(1.0, match_limit / denom_uncapped)
+            else:
+                denom_cap_ratio = 0.0
+
+            denom_method_reduction = 0
+            denom_new_match_total = 0
+            for li in line_items:
+                if li['_is_denom']:
+                    # Recover the original (fixed) customer charge
+                    # before any cap math.
+                    fixed_customer = (
+                        li['method_amount'] - li['match_amount'])
+                    new_match = round(
+                        li['match_amount'] * denom_cap_ratio)
+                    old_method = li['method_amount']
+                    li['match_amount'] = new_match
+                    li['method_amount'] = fixed_customer + new_match
+                    # customer_charged stays at fixed_customer (=
+                    # unit_count × denomination).  Set explicitly so
+                    # downstream callers don't have to re-derive.
+                    li['customer_charged'] = fixed_customer
+                    denom_method_reduction += (
+                        old_method - li['method_amount'])
+                    denom_new_match_total += new_match
+
+            # Inflate non-denom row methods to absorb the denom
+            # method shrinkage so the engine's allocated_total stays
+            # equal to the input total.  Distributes proportionally
+            # to existing non-denom method weights so multi-method
+            # orders share the absorption fairly.
+            non_denom_lis = [
+                li for li in line_items if not li['_is_denom']]
+            if non_denom_lis and denom_method_reduction > 0:
+                nd_method_sum = sum(
+                    li['method_amount'] for li in non_denom_lis)
+                if nd_method_sum > 0:
+                    running = 0
+                    for k, li in enumerate(non_denom_lis):
+                        if k == len(non_denom_lis) - 1:
+                            inflate = (
+                                denom_method_reduction - running)
+                        else:
+                            inflate = round(
+                                denom_method_reduction
+                                * li['method_amount']
+                                / nd_method_sum)
+                            running += inflate
+                        li['method_amount'] += inflate
+
+            # Distribute the remaining cap budget across non-denom
+            # rows proportional to their (possibly inflated) method.
+            # Customer = method - new_match.
+            non_denom_budget = max(
+                0, match_limit - denom_new_match_total)
+            if non_denom_lis:
+                nd_method_sum_post = sum(
+                    li['method_amount'] for li in non_denom_lis)
+                running_match = 0
+                for k, li in enumerate(non_denom_lis):
+                    if k == len(non_denom_lis) - 1:
+                        new_match = non_denom_budget - running_match
+                    elif nd_method_sum_post > 0:
+                        new_match = round(
+                            non_denom_budget
+                            * li['method_amount']
+                            / nd_method_sum_post)
+                        running_match += new_match
+                    else:
+                        new_match = 0
+                    li['match_amount'] = new_match
+                    li['customer_charged'] = (
+                        li['method_amount'] - new_match)
+
+        # Cent adjustment: fix rounding drift so sum of match == cap exactly.
+        # Prefer adjusting a non-denom row to keep denom customer_charged
+        # untouched.  Falls back to any matched line if no non-denom
+        # candidate exists.
         capped_sum = sum(li['match_amount'] for li in line_items)
         cent_diff = match_limit - capped_sum
         if cent_diff != 0:
-            # Adjust the line item with the largest match (least % impact)
-            target = max(
-                (li for li in line_items if li['match_amount'] > 0),
-                key=lambda li: li['match_amount'],
-                default=None,
-            )
+            non_denom_matched = [
+                li for li in line_items
+                if li['match_amount'] > 0 and not li['_is_denom']
+            ]
+            if non_denom_matched:
+                target = max(non_denom_matched,
+                              key=lambda li: li['match_amount'])
+            else:
+                target = max(
+                    (li for li in line_items if li['match_amount'] > 0),
+                    key=lambda li: li['match_amount'],
+                    default=None,
+                )
             if target:
                 target['match_amount'] += cent_diff
                 target['customer_charged'] = (
@@ -294,8 +440,20 @@ def calculate_payment_breakdown(receipt_total: int, payment_entries: list,
             else:
                 target['method_amount'] += allocation_remaining
                 target['customer_charged'] += allocation_remaining
-            # Recalculate totals after adjustment
+            # Recalculate ALL totals after adjustment.
+            #
+            # v2.0.2 fix (F-H1): the negative-match-guard branch
+            # mutates ``target['customer_charged']``, so
+            # ``customer_total_paid`` must also be recomputed
+            # alongside ``allocated_total`` and ``fam_subsidy_total``
+            # — otherwise the returned dict carries a stale
+            # ``customer_total_paid`` and the downstream validation
+            # at line 458 ("customer + match == receipt") spuriously
+            # reports is_valid=False.  This was a 1¢ drift visible
+            # to the user in the summary card / confirmation dialog.
             allocated_total = sum(li['method_amount'] for li in line_items)
+            customer_total_paid = sum(
+                li['customer_charged'] for li in line_items)
             fam_subsidy_total = sum(li['match_amount'] for li in line_items)
             allocation_remaining = receipt_total - allocated_total
 
@@ -318,6 +476,11 @@ def calculate_payment_breakdown(receipt_total: int, payment_entries: list,
 
     is_valid = len(errors) == 0
 
+    # Strip internal flag before returning (callers shouldn't depend
+    # on this implementation detail).
+    for li in line_items:
+        li.pop('_is_denom', None)
+
     return {
         'line_items': line_items,
         'customer_total_paid': customer_total_paid,
@@ -329,3 +492,117 @@ def calculate_payment_breakdown(receipt_total: int, payment_entries: list,
         'match_was_capped': match_was_capped,
         'uncapped_fam_subsidy_total': uncapped_total,
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# Canonical payment-state resolver (Phase 6 engine consolidation)
+# ════════════════════════════════════════════════════════════════════
+#
+# Single source of truth for the post-cap-aware-fallback-with-
+# forfeit-and-give-back state.  All UI surfaces, save paths, and
+# reports should call this — not the lower-level
+# ``calculate_payment_breakdown`` and not their own private cap math.
+#
+# The function takes:
+#
+#   receipt_total   — vendor reimbursement target (cents)
+#   items           — list of item dicts (typically PaymentRow.get_data()
+#                     output): each must carry method_amount, match_percent,
+#                     denomination, and ideally bound_vendor_id +
+#                     method_name_snapshot.  Mutated IN PLACE so callers
+#                     can pass items directly through to the save path.
+#   match_limit     — remaining cap available for THIS resolution.
+#                     Caller is responsible for subtracting prior
+#                     consumption (see ``get_customer_prior_match`` /
+#                     ``_customer_prior_match_excluding_txn``).
+#
+# Returns the canonical engine result dict (same shape as
+# ``calculate_payment_breakdown`` plus a ``denom_overage_cents``
+# field) AFTER:
+#
+#   1. cap-aware match reduction (with proper denom-customer-fixed
+#      handling on both common and fallback paths)
+#   2. denomination forfeit reduction (per-vendor when bindings
+#      provided, else order-level)
+#   3. cap-aware Pass 4 give-back to non-denom rows
+#   4. items[] mutated to reflect the final cap-aware state (method,
+#      match, customer_charged all consistent with result.line_items)
+#
+# Bug classes this consolidation eliminates:
+#
+#   * Engine cap fallback inflating denom customer (#5, #17 from
+#     onsite findings)
+#   * _collect_line_items capping method without updating match /
+#     customer (drift between items and result.line_items)
+#   * Save path's own cap step diverging from engine cap step (#9, #18)
+#   * AdjustmentDialog's parallel cap implementation drifting (#13, #14)
+#
+# The function is additive — existing callers can keep using
+# ``calculate_payment_breakdown`` directly.  Migration is per-call-site.
+
+def resolve_payment_state(
+    receipt_total: int,
+    items: list,
+    match_limit: int | None = None,
+    apply_denomination_forfeit_fn=None,
+) -> dict:
+    """Compute the canonical post-cap, post-forfeit, post-give-back
+    payment state.  See module-level comment for full contract.
+
+    The forfeit step requires per-vendor binding awareness which
+    lives in ``PaymentScreen._apply_denomination_forfeit``.  Since
+    ``calculations.py`` doesn't know about vendors, the caller
+    passes the forfeit function as a parameter (typically the
+    bound method ``screen._apply_denomination_forfeit``).  When
+    ``apply_denomination_forfeit_fn`` is None, the order-level
+    denom-overage detection runs but no per-vendor reduction
+    happens — appropriate for engine-only test contexts.
+    """
+    if not items:
+        return calculate_payment_breakdown(
+            receipt_total, [], match_limit=match_limit)
+
+    # Build engine entries from items — passing through method_amount,
+    # match_percent, and denomination so the engine's denom-aware
+    # cap path engages correctly.
+    entries = [
+        {'method_amount': it['method_amount'],
+         'match_percent': it['match_percent'],
+         'denomination': it.get('denomination')}
+        for it in items
+    ]
+    result = calculate_payment_breakdown(
+        receipt_total, entries, match_limit=match_limit)
+
+    # Detect denomination overage (allocated > receipt by ≤ one
+    # effective unit per denom row).
+    allocated = result.get('allocated_total', 0)
+    overage = allocated - receipt_total
+    denom_overage = 0
+    if overage > 0:
+        effective_denom_sum = 0
+        for it in items:
+            denom = it.get('denomination')
+            if denom and denom > 0:
+                effective_denom_sum += charge_to_method_amount(
+                    denom, it['match_percent'])
+        if effective_denom_sum > 0 and overage <= effective_denom_sum:
+            denom_overage = overage
+
+    if denom_overage > 0 and apply_denomination_forfeit_fn is not None:
+        apply_denomination_forfeit_fn(result, items, denom_overage)
+
+    # Sync items from result.line_items so downstream callers (save
+    # path, Layer 2C, reports) see the final cap-aware state.
+    # ``_apply_denomination_forfeit`` updates items for denom rows
+    # AND non-denom rows in Pass 4, but doesn't propagate the
+    # engine's cap-fallback non-denom-method INFLATION (which only
+    # exists on result.line_items).
+    for i, li in enumerate(result['line_items']):
+        if i < len(items):
+            items[i]['method_amount'] = li['method_amount']
+            items[i]['match_amount'] = li['match_amount']
+            items[i]['customer_charged'] = li['customer_charged']
+
+    result['denom_overage_cents'] = denom_overage
+    return result

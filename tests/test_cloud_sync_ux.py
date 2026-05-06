@@ -1973,13 +1973,35 @@ class TestSchemaMigrationV18:
         col_names = {r['name'] for r in rows}
         assert col_names == {'content_hash', 'relative_path', 'created_at'}
 
-    def test_version_is_23(self):
-        """Schema version bumped 22 → 23 in v1.9.8 to add the UNIQUE
-        constraint on vendors.name (matching markets and payment_methods).
+    def test_version_is_27(self):
+        """Schema version bumped:
+          v22 → v23 (v1.9.8) — UNIQUE on vendors.name
+          v23 → v24 (v1.9.9) — vendor_payment_methods junction
+          v24 → v25 (v1.9.9) — payment_methods.is_system + Unallocated
+                                Funds seed for the Adjustments
+                                'customer gone' recovery path
+          v25 → v27 (v1.9.9) — defensive DROP of an abandoned v26
+                                UNIQUE INDEX on (market_day_id,
+                                customer_label).  v26 was a
+                                short-lived intermediate build of the
+                                device-tagged customer label feature
+                                that broke returning-customer reuse;
+                                v27 is the canonical successor to
+                                v25 and cleans up after the in-flight
+                                detour.
+
         Update this snapshot whenever the version bumps so the test
         continues to act as a 'someone bumped the schema' tripwire."""
         from fam.database.schema import CURRENT_SCHEMA_VERSION
-        assert CURRENT_SCHEMA_VERSION == 23
+        # v29 (2026-04-30): added reward_rules table.
+        # v30 (2026-04-30 follow-up): added generated_rewards
+        # snapshot table — switched rewards from derived-on-demand
+        # to write-once history so prior transactions are not
+        # retroactively rewarded when a rule is added.
+        # v1.9.10 follow-up (2026-05-01): v30 → v31 added
+        # defense-in-depth triggers; pinned by ``>= 30`` so future
+        # bumps don't false-trigger.
+        assert CURRENT_SCHEMA_VERSION >= 30
 
 
 # ══════════════════════════════════════════════════════════════════

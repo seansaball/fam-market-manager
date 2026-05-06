@@ -52,12 +52,28 @@ def _drive_retry(fn, max_retries=_MAX_RETRIES, label="Drive API"):
 
     Handles HTTP 429 (rate limit), 500/502/503 (server errors),
     and network-level failures (ConnectionError, TimeoutError).
+
+    v2.0.1 fix: explicitly refuse to retry on 4xx client errors
+    (other than 429).  ``requests.HTTPError`` inherits from
+    ``OSError`` (via ``IOError`` aliasing in the requests package),
+    so without this guard the ``isinstance(exc, OSError)`` branch
+    below would silently retry permanent 400 / 401 / 403 / 404
+    failures three times — wasting ~5-10 seconds AND producing
+    a misleading "transient error" log line for what is actually
+    a permanent malformed-request bug.  The Sean's-Test-Market
+    apostrophe-in-folder-name 400 was the user-reported case.
     """
     for attempt in range(max_retries):
         try:
             return fn()
         except Exception as exc:
             status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            # Permanent client error → never retry.  Re-raise so the
+            # caller sees the real error message and we don't log a
+            # misleading "transient error" warning.
+            if (status is not None and 400 <= status < 500
+                    and status != 429):
+                raise
             is_retryable = (
                 status in (429, 500, 502, 503)
                 or isinstance(exc, (ConnectionError, TimeoutError, OSError))
@@ -73,6 +89,23 @@ def _drive_retry(fn, max_retries=_MAX_RETRIES, label="Drive API"):
                 _time.sleep(wait)
             else:
                 raise
+
+
+def _escape_drive_query_string(s: str) -> str:
+    """Escape ``\\`` and ``'`` for safe use inside a Drive ``q=``
+    single-quoted string literal.
+
+    Per Drive API docs (Search for files and folders → Escape special
+    characters), single quotes inside a literal must be backslash-
+    escaped, and any literal backslash itself must be doubled first.
+    Without this, a folder name like "Sean's Test Market" terminates
+    the query's single-quoted literal early and Drive returns 400
+    Bad Request — which is exactly the user-reported v2.0.1 bug.
+
+    Order matters: escape ``\\`` first, then ``'``.  Reversing would
+    over-escape any newly-introduced backslashes.
+    """
+    return s.replace('\\', '\\\\').replace("'", "\\'")
 
 
 def get_drive_folder_name() -> str:
@@ -127,8 +160,12 @@ def validate_drive_connection() -> tuple[bool, str]:
 
 def _get_or_create_folder(session, folder_name: str) -> str:
     """Find or create a Drive folder. Returns the folder ID."""
-    # Search for existing folder
-    query = (f"name = '{folder_name}' and "
+    # Search for existing folder.  v2.0.1: escape apostrophes /
+    # backslashes so folder names with literal ``'`` characters
+    # (e.g. "Sean's Test Market") don't blow up the Drive query
+    # parser with a 400 Bad Request.
+    escaped = _escape_drive_query_string(folder_name)
+    query = (f"name = '{escaped}' and "
              f"mimeType = 'application/vnd.google-apps.folder' and "
              f"trashed = false")
 
@@ -179,8 +216,14 @@ def _get_or_create_subfolder(session, parent_id: str, folder_name: str) -> str:
     """Find or create a subfolder within a specific parent. Returns folder ID."""
     safe_name = _sanitize_drive_name(folder_name)
 
-    query = (f"name = '{safe_name}' and "
-             f"'{parent_id}' in parents and "
+    # v2.0.1: escape apostrophes / backslashes in the name before
+    # interpolating into the Drive q= parameter (parent_id is a
+    # Drive file ID and never contains either character, so it
+    # doesn't need escaping — but escape defensively anyway).
+    escaped_name = _escape_drive_query_string(safe_name)
+    escaped_parent = _escape_drive_query_string(parent_id)
+    query = (f"name = '{escaped_name}' and "
+             f"'{escaped_parent}' in parents and "
              f"mimeType = 'application/vnd.google-apps.folder' and "
              f"trashed = false")
 
@@ -822,6 +865,22 @@ def _upload_entries(entries, update_fn, source_label: str,
         all_urls = list(existing_urls)
         for idx, rel_path in enumerate(local_paths[already_done:],
                                        start=already_done):
+            # v2.0.3 fix (CRIT-SEC-2): explicitly reject unsafe paths
+            # BEFORE the upload pipeline.  ``photo_exists`` and
+            # ``get_photo_full_path`` both validate, but doing the
+            # check here gives a clear, security-flavored log line
+            # so operators can spot tampered DB rows quickly.
+            from fam.utils.photo_storage import (
+                UnsafePhotoPathError, _validate_relative_photo_path,
+            )
+            try:
+                _validate_relative_photo_path(rel_path)
+            except UnsafePhotoPathError as e:
+                logger.error(
+                    "[%s] Entry %d: refusing unsafe photo path %r: %s",
+                    source_label, entry['id'], rel_path, e)
+                failed += 1
+                continue
             if not photo_exists(rel_path):
                 logger.warning("[%s] Photo file missing for entry %d: %s",
                                source_label, entry['id'], rel_path)

@@ -541,10 +541,19 @@ class HelpScreen(QWidget):
         try:
             status = collect_status()
             text = format_status_for_clipboard(status)
-            # Render as <pre> for monospace alignment
+            # v2.0.3 fix (MED-SEC-2 / MED-SEC-5): use ``html.escape``
+            # with ``quote=True`` to escape ``& < > " '`` rather than
+            # only ``< >``.  Pre-fix, an ``&amp;`` sequence in the
+            # input text (or a vendor name carrying an HTML payload
+            # like ``Foo & Bar`` followed by the rest of an injection)
+            # could survive intact and re-render as ``&`` downstream
+            # if the diagnostic was pasted into another HTML-rendering
+            # surface (chat client, etc.).  The QTextBrowser used
+            # here doesn't execute JS, but defense-in-depth.
+            import html as _html
             self.status_view.setHtml(
                 f'<pre style="margin:0;color:{TEXT_COLOR};">'
-                f'{text.replace("<", "&lt;").replace(">", "&gt;")}</pre>')
+                f'{_html.escape(text, quote=True)}</pre>')
             self._status_cached_text = text
         except Exception:
             logger.exception("Could not refresh system status")

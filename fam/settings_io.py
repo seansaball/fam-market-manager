@@ -41,6 +41,7 @@ class ImportMarket:
     address: str
     daily_match_limit: float
     limit_active: bool
+    is_active: bool = True  # v2.0.1 — preserved across .fam round-trip
 
 
 @dataclass
@@ -53,6 +54,7 @@ class ImportVendor:
     state: str = ''
     zip_code: str = ''
     ach_enabled: bool = False
+    is_active: bool = True  # v2.0.1
 
 
 @dataclass
@@ -61,12 +63,21 @@ class ImportPaymentMethod:
     match_percent: float
     sort_order: int
     denomination: float | None = None
+    is_active: bool = True       # v2.0.1
+    photo_required: bool = False # v2.0.1 — compliance setting
 
 
 @dataclass
 class ImportAssignment:
     market_name: str
     entity_name: str  # vendor or payment method name
+
+
+@dataclass
+class ImportVendorPmAssignment:
+    """Vendor-level payment-method eligibility (schema v24+)."""
+    vendor_name: str
+    pm_name: str
 
 
 @dataclass
@@ -77,6 +88,7 @@ class ImportResult:
     payment_methods: list[ImportPaymentMethod] = field(default_factory=list)
     vendor_assignments: list[ImportAssignment] = field(default_factory=list)
     pm_assignments: list[ImportAssignment] = field(default_factory=list)
+    vpm_assignments: list[ImportVendorPmAssignment] = field(default_factory=list)
 
     # Sets of names that already exist in the database
     existing_market_names: set = field(default_factory=set)
@@ -112,7 +124,8 @@ class ImportResult:
     @property
     def has_new_data(self):
         return bool(self.new_markets or self.new_vendors or self.new_payment_methods
-                     or self.vendor_assignments or self.pm_assignments)
+                     or self.vendor_assignments or self.pm_assignments
+                     or self.vpm_assignments)
 
 
 # ---------------------------------------------------------------------------
@@ -134,8 +147,15 @@ def export_settings(filepath: str) -> str:
         "SELECT * FROM vendors ORDER BY name"
     ).fetchall()]
 
+    # Skip system-managed methods (schema v25+) — those are seeded
+    # by migrations on every install, so re-importing them would
+    # either no-op (INSERT OR IGNORE) or risk conflict with the
+    # locked seed.  Coordinators should never see Unallocated Funds
+    # on an export they hand to another market either.
     methods = [dict(r) for r in conn.execute(
-        "SELECT * FROM payment_methods ORDER BY sort_order, name"
+        "SELECT * FROM payment_methods"
+        " WHERE COALESCE(is_system, 0) = 0"
+        " ORDER BY sort_order, name"
     ).fetchall()]
 
     # Market-vendor assignments
@@ -156,6 +176,15 @@ def export_settings(filepath: str) -> str:
         ORDER BY m.name, pm.sort_order, pm.name
     """).fetchall()
 
+    # Vendor-payment method assignments (schema v24+)
+    vpm_rows = conn.execute("""
+        SELECT v.name AS vendor_name, pm.name AS pm_name
+        FROM vendor_payment_methods vpm
+        JOIN vendors v ON v.id = vpm.vendor_id
+        JOIN payment_methods pm ON pm.id = vpm.payment_method_id
+        ORDER BY v.name, pm.sort_order, pm.name
+    """).fetchall()
+
     from fam.utils.app_settings import get_market_code, get_device_id
     _code = get_market_code() or 'Not Set'
     _device = get_device_id() or 'Unknown'
@@ -173,19 +202,25 @@ def export_settings(filepath: str) -> str:
     lines.append("")
 
     # Markets
+    # v2.0.1: trailing "Active" field is backward-compatible —
+    # older .fam files default to active when re-imported.
     lines.append("=== Markets ===")
-    lines.append("Name | Address | Daily Match Limit | Limit Active")
+    lines.append("Name | Address | Daily Match Limit | Limit Active | Active")
     for m in markets:
         addr = m.get('address') or ''
         limit_cents = m.get('daily_match_limit') or 10000
         limit_dollars = limit_cents / 100.0
-        active = "Yes" if m.get('match_limit_active', 1) else "No"
-        lines.append(f"{m['name']} | {addr} | {limit_dollars:.2f} | {active}")
+        limit_active = "Yes" if m.get('match_limit_active', 1) else "No"
+        is_active = "Yes" if m.get('is_active', 1) else "No"
+        lines.append(f"{m['name']} | {addr} | {limit_dollars:.2f} | "
+                     f"{limit_active} | {is_active}")
     lines.append("")
 
     # Vendors
+    # v2.0.1: trailing "Active" field is backward-compatible.
     lines.append("=== Vendors ===")
-    lines.append("Name | Contact Info | Check Payable To | Street | City | State | Zip | ACH")
+    lines.append("Name | Contact Info | Check Payable To | Street | "
+                 "City | State | Zip | ACH | Active")
     for v in vendors:
         contact = v.get('contact_info') or ''
         payable = v.get('check_payable_to') or ''
@@ -194,16 +229,28 @@ def export_settings(filepath: str) -> str:
         state = v.get('state') or ''
         zipcode = v.get('zip_code') or ''
         ach = 'Yes' if v.get('ach_enabled') else ''
-        lines.append(f"{v['name']} | {contact} | {payable} | {street} | {city} | {state} | {zipcode} | {ach}")
+        is_active = 'Yes' if v.get('is_active', 1) else 'No'
+        lines.append(
+            f"{v['name']} | {contact} | {payable} | {street} | "
+            f"{city} | {state} | {zipcode} | {ach} | {is_active}")
     lines.append("")
 
     # Payment Methods
+    # v2.0.1: trailing "Active" and "Photo Required" fields preserve
+    # method state (notably whether SNAP is photo-required —
+    # compliance regression risk if lost on re-import).
     lines.append("=== Payment Methods ===")
-    lines.append("Name | Match % | Sort Order | Denomination")
+    lines.append("Name | Match % | Sort Order | Denomination | "
+                 "Active | Photo Required")
     for pm in methods:
         denom_cents = pm.get('denomination')
         denom_str = str(denom_cents / 100.0) if denom_cents else ''
-        lines.append(f"{pm['name']} | {pm['match_percent']} | {pm['sort_order']} | {denom_str}")
+        is_active = 'Yes' if pm.get('is_active', 1) else 'No'
+        photo_req = 'Yes' if pm.get('photo_required') else 'No'
+        lines.append(
+            f"{pm['name']} | {pm['match_percent']} | "
+            f"{pm['sort_order']} | {denom_str} | "
+            f"{is_active} | {photo_req}")
     lines.append("")
 
     # Market-Vendor assignments
@@ -218,6 +265,16 @@ def export_settings(filepath: str) -> str:
     lines.append("Market | Payment Method")
     for r in mpm_rows:
         lines.append(f"{r['market_name']} | {r['pm_name']}")
+    lines.append("")
+
+    # Vendor-Payment Method eligibility (v24+)
+    # Determines which vendors can accept which methods on the Payment
+    # screen — used to populate the vendor dropdown when a denominated
+    # method is selected.
+    lines.append("=== Vendor Payment Methods ===")
+    lines.append("Vendor | Payment Method")
+    for r in vpm_rows:
+        lines.append(f"{r['vendor_name']} | {r['pm_name']}")
     lines.append("")
 
     with open(filepath, 'w', encoding='utf-8') as f:
@@ -302,9 +359,14 @@ def parse_settings_file(filepath: str) -> ImportResult:
                         result.errors.append(f"Line {line_num}: Invalid match limit '{parts[2]}'")
                         limit = 100.00
                     limit_active = True
-                    if len(parts) > 3:
+                    if len(parts) > 3 and parts[3]:
                         limit_active = parts[3].lower() in ('yes', 'true', '1', 'on')
-                    result.markets.append(ImportMarket(name, address, limit, limit_active))
+                    # v2.0.1: optional trailing "Active" field
+                    is_active = True
+                    if len(parts) > 4 and parts[4]:
+                        is_active = parts[4].lower() in ('yes', 'true', '1', 'on')
+                    result.markets.append(ImportMarket(
+                        name, address, limit, limit_active, is_active))
 
                 elif current_section == 'Vendors':
                     if len(parts) < 1:
@@ -329,8 +391,13 @@ def parse_settings_file(filepath: str) -> ImportResult:
                     zipcode = _sanitize_text(parts[6])[:10] if len(parts) > 6 else ''
                     ach_str = _sanitize_text(parts[7]) if len(parts) > 7 else ''
                     ach = ach_str.lower() in ('yes', 'true', '1', 'on')
+                    # v2.0.1: optional trailing "Active" field
+                    is_active = True
+                    if len(parts) > 8 and parts[8]:
+                        is_active = parts[8].lower() in ('yes', 'true', '1', 'on')
                     result.vendors.append(ImportVendor(
-                        name, contact, payable, street, city, state, zipcode, ach))
+                        name, contact, payable, street, city, state,
+                        zipcode, ach, is_active))
 
                 elif current_section == 'Payment Methods':
                     if len(parts) < 1:
@@ -368,8 +435,17 @@ def parse_settings_file(filepath: str) -> ImportResult:
                             result.errors.append(
                                 f"Line {line_num}: Invalid denomination '{parts[3]}'"
                             )
+                    # v2.0.1: optional trailing "Active" + "Photo Required"
+                    is_active = True
+                    if len(parts) > 4 and parts[4]:
+                        is_active = parts[4].lower() in ('yes', 'true', '1', 'on')
+                    photo_required = False
+                    if len(parts) > 5 and parts[5]:
+                        photo_required = parts[5].lower() in ('yes', 'true', '1', 'on')
                     result.payment_methods.append(
-                        ImportPaymentMethod(name, match_pct, sort_order, denomination)
+                        ImportPaymentMethod(
+                            name, match_pct, sort_order, denomination,
+                            is_active, photo_required)
                     )
 
                 elif current_section == 'Market Vendors':
@@ -392,6 +468,18 @@ def parse_settings_file(filepath: str) -> ImportResult:
                     if market_name and pm_name:
                         result.pm_assignments.append(
                             ImportAssignment(market_name, pm_name)
+                        )
+
+                elif current_section == 'Vendor Payment Methods':
+                    if len(parts) < 2:
+                        result.errors.append(
+                            f"Line {line_num}: Assignment needs Vendor | Method")
+                        continue
+                    vendor_name = _sanitize_text(parts[0])
+                    pm_name = _sanitize_text(parts[1])
+                    if vendor_name and pm_name:
+                        result.vpm_assignments.append(
+                            ImportVendorPmAssignment(vendor_name, pm_name)
                         )
 
             except Exception as e:
@@ -440,16 +528,22 @@ def apply_import(result: ImportResult) -> dict:
         'payment_methods_added': 0,
         'vendor_assignments_added': 0,
         'pm_assignments_added': 0,
+        'vpm_assignments_added': 0,
     }
 
     # Insert new markets
+    # v2.0.1: import preserves ``is_active`` and (for payment methods)
+    # ``photo_required`` so a settings export → import round-trip
+    # doesn't silently re-activate deactivated rows or drop the
+    # photo-required compliance flag.
     for m in result.new_markets:
         try:
             limit_cents = int(round(m.daily_match_limit * 100))
             conn.execute(
-                "INSERT INTO markets (name, address, daily_match_limit, match_limit_active) "
-                "VALUES (?, ?, ?, ?)",
-                (m.name, m.address or None, limit_cents, int(m.limit_active))
+                "INSERT INTO markets (name, address, daily_match_limit, "
+                "match_limit_active, is_active) VALUES (?, ?, ?, ?, ?)",
+                (m.name, m.address or None, limit_cents,
+                 int(m.limit_active), int(m.is_active))
             )
             counts['markets_added'] += 1
         except Exception as e:
@@ -460,13 +554,13 @@ def apply_import(result: ImportResult) -> dict:
         try:
             conn.execute(
                 "INSERT INTO vendors (name, contact_info, check_payable_to,"
-                " street, city, state, zip_code, ach_enabled)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " street, city, state, zip_code, ach_enabled, is_active)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (v.name, v.contact_info or None,
                  v.check_payable_to or None,
                  v.street or None, v.city or None,
                  v.state or None, v.zip_code or None,
-                 int(v.ach_enabled))
+                 int(v.ach_enabled), int(v.is_active))
             )
             counts['vendors_added'] += 1
         except Exception as e:
@@ -477,9 +571,11 @@ def apply_import(result: ImportResult) -> dict:
         try:
             denom_cents = int(round(pm.denomination * 100)) if pm.denomination else None
             conn.execute(
-                "INSERT INTO payment_methods (name, match_percent, sort_order, denomination)"
-                " VALUES (?, ?, ?, ?)",
-                (pm.name, pm.match_percent, pm.sort_order, denom_cents)
+                "INSERT INTO payment_methods (name, match_percent, "
+                "sort_order, denomination, is_active, photo_required)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (pm.name, pm.match_percent, pm.sort_order, denom_cents,
+                 int(pm.is_active), int(pm.photo_required))
             )
             counts['payment_methods_added'] += 1
         except Exception as e:
@@ -531,6 +627,23 @@ def apply_import(result: ImportResult) -> dict:
             except Exception as e:
                 logger.warning("Could not assign method '%s' to market '%s': %s",
                                a.entity_name, a.market_name, e)
+
+    # Vendor-payment method eligibility (v24+)
+    for a in result.vpm_assignments:
+        vid = vendor_name_to_id.get(a.vendor_name)
+        pid = pm_name_to_id.get(a.pm_name)
+        if vid and pid:
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO vendor_payment_methods "
+                    "(vendor_id, payment_method_id) VALUES (?, ?)",
+                    (vid, pid)
+                )
+                counts['vpm_assignments_added'] += 1
+            except Exception as e:
+                logger.warning(
+                    "Could not assign method '%s' to vendor '%s': %s",
+                    a.pm_name, a.vendor_name, e)
 
     conn.commit()
 

@@ -88,11 +88,17 @@ def seed_sample_data():
     # is_active (it looks up the payment method by name without filtering).
     # Coordinators who want FMNP available as a payment-row option simply
     # toggle it on from Settings → Payment Methods.
+    # Denominations (integer cents):
+    #   FMNP = $5  (500c)  — physical paper checks
+    #   Food RX = $10 (1000c)  — physical paper checks
+    #   JH Food Bucks = $2 (200c)  — physical tokens
+    # Non-denominated methods (SNAP, JH Tokens, Cash) pass NULL so
+    # the volunteer can enter any cents amount.
     payment_methods = [
         ("SNAP", 100.0, 1, 1, None, None),
         ("FMNP", 100.0, 0, 2, 500, 'Optional'),
-        ("Food RX", 100.0, 1, 3, None, None),
-        ("JH Food Bucks", 100.0, 1, 4, None, None),
+        ("Food RX", 100.0, 1, 3, 1000, None),
+        ("JH Food Bucks", 100.0, 1, 4, 200, None),
         ("JH Tokens", 100.0, 1, 5, None, None),
         ("Cash", 0.0, 1, 6, None, None),
     ]
@@ -102,7 +108,11 @@ def seed_sample_data():
         payment_methods
     )
 
-    # Assign all vendors and payment methods to all markets by default
+    # Assign all vendors and payment methods to all markets by default,
+    # and permissively register every vendor for every payment method.
+    # Coordinators tighten vendor-level eligibility per market reality
+    # via Settings → Vendors → Eligible Payment Methods (e.g. Food Bucks
+    # only on produce vendors).
     cursor.execute("SELECT id FROM markets")
     market_ids = [r[0] for r in cursor.fetchall()]
     cursor.execute("SELECT id FROM vendors")
@@ -122,6 +132,38 @@ def seed_sample_data():
                 " (market_id, payment_method_id) VALUES (?, ?)",
                 (mid, pid)
             )
+    for vid in vendor_ids:
+        for pid in pm_ids:
+            cursor.execute(
+                "INSERT OR IGNORE INTO vendor_payment_methods"
+                " (vendor_id, payment_method_id) VALUES (?, ?)",
+                (vid, pid)
+            )
+
+    # ── Rewards program (v1.9.10+) ──────────────────────────────
+    # Default rule: for every $5 of SNAP customer_charged in a
+    # confirmed customer order, the FAM rep hands the customer one
+    # $2 JH Food Bucks token.  Active by default — coordinators can
+    # disable via Settings → Rewards if their market doesn't run
+    # this loyalty program.
+    #
+    # Rewards are NEVER stored against transactions — they are
+    # config + on-demand derivation.  See ``fam/utils/rewards.py``
+    # and ``docs/FINANCIAL_FORMULA.md § Rewards``.
+    snap_id = cursor.execute(
+        "SELECT id FROM payment_methods WHERE name = 'SNAP'"
+    ).fetchone()
+    fb_id = cursor.execute(
+        "SELECT id FROM payment_methods WHERE name = 'JH Food Bucks'"
+    ).fetchone()
+    if snap_id and fb_id:
+        cursor.execute(
+            "INSERT INTO reward_rules"
+            " (source_method_id, threshold_cents, reward_method_id,"
+            "  reward_unit_cents, is_active)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (snap_id[0], 500, fb_id[0], 200, 1)
+        )
 
     conn.commit()
     return True

@@ -10,11 +10,53 @@ from fam.utils.timezone import eastern_now
 logger = logging.getLogger(__name__)
 
 
+# ── CSV / Excel formula-injection escape ─────────────────────────
+#
+# CSV files exported here are emailed by market coordinators to FAM
+# finance, who open them in Excel.  Excel evaluates any cell whose
+# *post-CSV-parse value* starts with ``=``, ``+``, ``-``, ``@``, or
+# a tab as a formula — meaning a vendor named ``=CMD("calc.exe",0)``
+# would execute code on the finance team's machine the moment they
+# open the file.  Pandas' ``to_csv`` does NOT prevent this; CSV
+# double-quote wrapping does NOT prevent this; only PREFIX-escaping
+# (prepending a tab so the cell still displays the original text but
+# does not start with a formula trigger) does.
+#
+# We prefix with ``\t`` because Excel strips the leading tab on
+# display while never evaluating the cell as a formula.  See OWASP
+# CSV Injection guidance.  The same fix is mirrored in
+# ``fam/sync/gsheets.py:_cell_value()`` for the Google Sheets path
+# where formulas evaluate server-side.
+
+_CSV_DANGEROUS_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+
+
+def _sanitize_for_csv(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepend ``\\t`` to any string cell whose first character is a
+    formula trigger.  Returns a *copy* — never mutates the input.
+    """
+    df = df.copy()
+    # Pandas 2.x stores strings as 'object' dtype; pandas 3.x will
+    # also expose 'str' as a distinct dtype.  Pass both so the
+    # sanitizer survives the pandas 3 migration without a silent
+    # downgrade in coverage.
+    for col in df.select_dtypes(include=['object', 'string']).columns:
+        df[col] = df[col].astype(str).apply(
+            lambda v: ('\t' + v)
+            if v and v.startswith(_CSV_DANGEROUS_PREFIXES)
+            else v
+        )
+    return df
+
+
 def export_dataframe_to_csv(df: pd.DataFrame, filepath: str) -> str:
     """Export a pandas DataFrame to CSV with market identity columns.
 
     Inserts ``market_code`` and ``device_id`` as the first two columns
     so the finance team can identify the source market/device.
+
+    Sanitizes every string cell against CSV/Excel formula injection
+    before writing.  See the module-level comment.
     """
     from fam.utils.app_settings import get_market_code, get_device_id
     code = get_market_code() or ''
@@ -22,6 +64,7 @@ def export_dataframe_to_csv(df: pd.DataFrame, filepath: str) -> str:
     df = df.copy()
     df.insert(0, 'device_id', device)
     df.insert(0, 'market_code', code)
+    df = _sanitize_for_csv(df)
     df.to_csv(filepath, index=False)
     return filepath
 
@@ -79,6 +122,19 @@ def export_transaction_log(data: list[dict], filepath: str) -> str:
 
 def export_error_log(data: list[dict], filepath: str) -> str:
     """Export error log entries to CSV."""
+    df = pd.DataFrame(data)
+    return export_dataframe_to_csv(df, filepath)
+
+
+def export_generated_rewards(data: list[dict], filepath: str) -> str:
+    """Export Generated Rewards report (v1.9.10+) to CSV.
+
+    Disclaimer-only — these rows are NOT a financial reconciliation
+    document.  They show the customer-facing reward scrip (Food
+    Bucks, Food RX, etc.) the FAM rep handed customers separately
+    as a marketing/loyalty add-on.  Vendor reimbursement and FAM
+    match reports are unaffected by this data.
+    """
     df = pd.DataFrame(data)
     return export_dataframe_to_csv(df, filepath)
 
@@ -410,11 +466,49 @@ def _write_ledger_backup_inner():
     lines.append("=" * W)
     lines.append("")
 
-    # ── Atomic write (temp file + rename) ─────────────────────────
+    # ── Atomic write (temp file + rename) + rotation ──────────────
+    #
+    # v1.9.10 follow-up (2026-05-01): rotate the prior ledger
+    # snapshot to a numbered sibling before the fresh write so a
+    # corrupted overwrite doesn't lose every previous version.
+    # Keeps ``fam_ledger_backup.txt`` (current) plus
+    # ``fam_ledger_backup.prev1.txt`` ... ``.prev{N}.txt`` for
+    # quick eyeball-restore by an operator who doesn't want to
+    # open SQLite.  Binary ``.db`` backups in ``backups/`` remain
+    # the canonical recovery path; the text ledger is the
+    # human-readable belt-and-suspenders snapshot.
     backup_dir = os.path.dirname(os.path.abspath(get_db_path()))
     backup_path = os.path.join(backup_dir, "fam_ledger_backup.txt")
+    LEDGER_ROTATION_COUNT = 5  # keep current + 5 historical snapshots
+
+    def _rotate_ledger():
+        """Push current ledger to ``.prev1``; cascade older snapshots."""
+        if not os.path.exists(backup_path):
+            return
+        # Cascade .prev{N-1} → .prev{N} from oldest down so we
+        # never overwrite a slot we're about to read.
+        for i in range(LEDGER_ROTATION_COUNT, 1, -1):
+            src = os.path.join(
+                backup_dir, f"fam_ledger_backup.prev{i-1}.txt")
+            dst = os.path.join(
+                backup_dir, f"fam_ledger_backup.prev{i}.txt")
+            if os.path.exists(src):
+                try:
+                    os.replace(src, dst)
+                except OSError:
+                    logger.warning(
+                        "Ledger rotation: could not move %s -> %s",
+                        src, dst)
+        # Move the current file to .prev1.
+        prev1 = os.path.join(backup_dir, "fam_ledger_backup.prev1.txt")
+        try:
+            os.replace(backup_path, prev1)
+        except OSError:
+            logger.warning(
+                "Ledger rotation: could not archive current to %s", prev1)
 
     try:
+        _rotate_ledger()
         fd, tmp_path = tempfile.mkstemp(
             dir=backup_dir, prefix='.ledger_', suffix='.tmp', text=True,
         )

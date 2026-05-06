@@ -329,22 +329,51 @@ class TestBackupFilename:
         assert basename.startswith("fam_DT_backup_")
         assert basename.endswith("_auto.db")
 
-    def test_retention_matches_both_formats(self, fresh_db):
-        """Retention should clean up both old and new format backup files."""
-        from fam.database.backup import get_backup_dir, _enforce_retention, BACKUP_RETENTION_COUNT
+    def test_retention_per_market_does_not_starve(self, fresh_db):
+        """v2.0.3 fix (HIGH-2): retention is now PER-MARKET, not global.
+        A high-volume market cannot evict a low-volume market's
+        forensic backups.  Create N+5 backups for one market AND a
+        few for another; expect the high-volume market trimmed to
+        N while the low-volume market keeps everything."""
+        from fam.database.backup import (
+            get_backup_dir, _enforce_retention,
+            BACKUP_RETENTION_COUNT_PER_MARKET,
+        )
         bdir = get_backup_dir()
 
-        # Create a mix of old and new format files
-        total = BACKUP_RETENTION_COUNT + 5
-        for i in range(total):
-            if i % 2 == 0:
-                name = f"fam_backup_20260101_{i:06d}_auto.db"
-            else:
-                name = f"fam_DT_backup_20260101_{i:06d}_auto.db"
+        n = BACKUP_RETENTION_COUNT_PER_MARKET
+        # Market AB: n + 5 backups (over limit)
+        for i in range(n + 5):
+            name = f"fam_AB_backup_20260101_{i:06d}_auto.db"
+            with open(os.path.join(bdir, name), "w") as f:
+                f.write("x")
+        # Market CD: 3 backups (well under limit) — must be preserved
+        for i in range(3):
+            name = f"fam_CD_backup_20260201_{i:06d}_auto.db"
+            with open(os.path.join(bdir, name), "w") as f:
+                f.write("x")
+        # Legacy no-code: 2 backups — preserved
+        for i in range(2):
+            name = f"fam_backup_20260301_{i:06d}_auto.db"
             with open(os.path.join(bdir, name), "w") as f:
                 f.write("x")
 
         _enforce_retention(bdir)
-        remaining = [f for f in os.listdir(bdir)
-                     if f.startswith("fam_") and f.endswith(".db") and "backup_" in f]
-        assert len(remaining) == BACKUP_RETENTION_COUNT
+        remaining = sorted(
+            f for f in os.listdir(bdir)
+            if f.startswith("fam_") and f.endswith(".db")
+            and "backup_" in f
+        )
+        ab_count = sum(1 for f in remaining if f.startswith('fam_AB_'))
+        cd_count = sum(1 for f in remaining if f.startswith('fam_CD_'))
+        legacy_count = sum(
+            1 for f in remaining
+            if f.startswith('fam_backup_'))
+        assert ab_count == n, (
+            f"Market AB should be trimmed to {n}, got {ab_count}")
+        assert cd_count == 3, (
+            f"Market CD has only 3 backups (under cap); must NOT be "
+            f"trimmed.  Got {cd_count}.  This is the HIGH-2 fix: "
+            f"retention is per-market now.")
+        assert legacy_count == 2, (
+            f"Legacy no-code bucket: 2 backups, must be preserved")

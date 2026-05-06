@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FAM Market Manager v2.0.6 — Release Summary</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f3;font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;color:#1a1a1a;line-height:1.55;">
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f5f5f3;padding:24px 12px;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.06);overflow:hidden;max-width:640px;">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:#2d6a4f;color:#ffffff;padding:32px 36px 24px;">
+            <div style="font-size:11pt;font-weight:600;text-transform:uppercase;letter-spacing:2px;opacity:0.85;margin-bottom:6px;">FOOD ASSISTANCE MATCH</div>
+            <div style="font-size:22pt;font-weight:700;line-height:1.15;margin-bottom:4px;">FAM Market Manager v2.0.6</div>
+            <div style="font-size:12pt;opacity:0.92;">Release Summary &nbsp;·&nbsp; May 2026</div>
+          </td>
+        </tr>
+
+        <!-- Intro -->
+        <tr>
+          <td style="padding:28px 36px 8px;">
+            <p style="margin:0 0 14px;font-size:11pt;">
+              v2.0.6 covers everything since <strong>v1.9.8</strong> (April 27, 2026). The headline additions are
+              <strong>per-vendor payment-method eligibility</strong>, a <strong>configurable rewards engine</strong>,
+              and a redesigned <strong>Payment Confirmation Dialog</strong>. Behind the scenes,
+              <strong>multi-workstation cloud sync</strong> is now systematically guarded — every local mutation
+              that affects a cloud-bound row is wired to a sync trigger, and every cleanup respects per-device
+              ownership.
+            </p>
+            <p style="margin:0 0 6px;font-size:10.5pt;color:#555;">
+              <strong>Schema:</strong> v34 &nbsp;·&nbsp;
+              <strong>Tests:</strong> 3,387 (up from 1,822 at v1.9.8) &nbsp;·&nbsp;
+              <strong>Migration path:</strong> automatic on first launch, with pre-migration backup
+            </p>
+          </td>
+        </tr>
+
+        <!-- What's New -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">What's New for Volunteers &amp; Coordinators</h2>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Per-Vendor Payment-Method Eligibility</h3>
+            <p style="margin:0 0 10px;font-size:11pt;">
+              Configure, per vendor, exactly which payment methods that vendor can accept (Settings → Vendors).
+              Ineligible methods no longer appear as options against ineligible vendors — a baked-goods booth
+              can't accidentally take Food Bucks. Mid-season changes propagate to every laptop on the next sync.
+            </p>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Configurable Rewards Engine</h3>
+            <p style="margin:0 0 10px;font-size:11pt;">
+              Rules of the form <em>"For every $X spent on [source method], hand out N units of [reward method]
+              worth $Y each."</em> Default is the classic $5 SNAP → 1 × $2 JH Food Bucks, but every part is
+              editable. The new <strong>Generated Rewards</strong> report tab lists every reward issued for
+              end-of-season reconciliation against your token inventory.
+            </p>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Redesigned Payment Confirmation Dialog</h3>
+            <p style="margin:0 0 10px;font-size:11pt;">
+              A marching-ants action zone walks the volunteer through the physical steps before the transaction
+              commits. Per-method action rows ("Collect $10.00 SNAP", "Hand over 2 × $2.00 Food Bucks tokens").
+              Required acknowledgment checkboxes for SNAP/EBT.
+            </p>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Reports &amp; Analytics</h3>
+            <ul style="margin:0 0 10px;padding-left:22px;font-size:11pt;">
+              <li><strong>Zip Code column</strong> on Detailed Ledger, Transaction Log, Generated Rewards, and FMNP Entries (internal + Sheets).</li>
+              <li><strong>Vendor Reimbursement</strong> rebuilt with accurate per-vendor totals and a separate FMNP External column.</li>
+              <li><strong>FAM Match vs FAM Absorbed</strong> as two distinct columns.</li>
+              <li><strong>Activity Log</strong> with full audit trail across every CREATE / CONFIRM / ADJUST / VOID action.</li>
+            </ul>
+          </td>
+        </tr>
+
+        <!-- Multi-workstation -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">Multi-Workstation Cloud Sync — Hardened</h2>
+            <p style="margin:0 0 10px;font-size:11pt;">
+              Pre-release end-to-end testing (May 2026) surfaced a class of cases where local mutations
+              didn't always reach the shared Google Sheet, or reached it in ways that conflicted across
+              co-located workstations. v2.0.6 closes those gaps.
+            </p>
+            <ul style="margin:0 0 10px;padding-left:22px;font-size:11pt;">
+              <li><strong>Settings changes propagate.</strong> Vendor / market / payment-method add, edit, toggle, and delete; the four assignment dialogs; reward-rule changes — all now trigger a full-scope cloud sync.</li>
+              <li><strong>Closed market day mutations sync.</strong> FMNP entries added to closed days and Admin adjustments / voids on historical receipts now scope to the affected day, not the currently-open one.</li>
+              <li><strong>Vendor Reimbursement cleanup is multi-market-aware.</strong> Stale rows owned by this device are now removed across every market it's worked, not just its currently-configured primary.</li>
+              <li><strong>Reset preserves other devices' data.</strong> Resetting a local app instance now triggers an immediate sync that clears only this device's rows from the shared sheet — other workstations' data is untouched.</li>
+              <li><strong>Market renames protected.</strong> Renames that would shift the derived market_code are blocked once the market has any history; code-stable renames (typo fixes) are always allowed.</li>
+              <li><strong>Photo dedup cache cleaned on void / delete / replace.</strong> Re-uploading the same image to a fresh transaction or FMNP entry now triggers a fresh Drive upload instead of pointing at a VOID-renamed file.</li>
+            </ul>
+          </td>
+        </tr>
+
+        <!-- Reliability + diagnostics polish -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">Reliability &amp; Diagnostics Polish</h2>
+            <ul style="margin:0 0 10px;padding-left:22px;font-size:11pt;">
+              <li><strong>Single-instance lock</strong> against two app instances on one database.</li>
+              <li><strong>Pre-migration database snapshot</strong> on every schema upgrade — failure to write the backup blocks the migration entirely.</li>
+              <li><strong>Per-line invariant</strong> trigger ensures every payment-method row satisfies <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">customer_charged + match = method_amount</code>.</li>
+              <li><strong>Voided is terminal</strong> — DB-trigger enforced.</li>
+              <li><strong>Atomic ledger backup</strong> on every confirm / adjustment, with 5-snapshot rotation.</li>
+              <li><strong>Error Log tab auto-refreshes</strong> on every selection so the local view stays in sync with the cloud Error Log sheet.</li>
+              <li><strong>Fragmentation hint is size-aware</strong> — only fires on databases &gt;4MB with &gt;30% reclaimable space, silent on small/test installs.</li>
+              <li><strong>Device-identity dialog is actionable</strong> — image-cloned laptops with a missing MachineGuid get clear PowerShell remediation instead of a generic error.</li>
+            </ul>
+          </td>
+        </tr>
+
+        <!-- Upgrade -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">Upgrading from v1.9.8</h2>
+
+            <p style="margin:0 0 10px;font-size:11pt;">
+              <strong>In-app update (recommended):</strong> open the app, go to <strong>Settings → Updates</strong>,
+              click <em>Check for Updates</em>, then <em>Download &amp; Install</em>. The app handles the rest:
+              app folder is backed up, new version is extracted, integrity-verified rollback runs if anything goes wrong.
+            </p>
+            <p style="margin:0 0 10px;font-size:11pt;">
+              <strong>Manual update:</strong> download the zip from the GitHub release page, replace the old
+              application folder, re-launch.
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f6f9f7;border-left:3px solid #2d6a4f;border-radius:4px;margin:14px 0;">
+              <tr>
+                <td style="padding:14px 18px;font-size:10.5pt;">
+                  <strong>Data safety:</strong> existing data is preserved automatically. Cloud credentials,
+                  Drive folder, and update channel settings survive the upgrade. The schema migration runs
+                  on first launch, with a pre-migration backup written before any change.
+                  <br><br>
+                  <strong>What you'll see on existing Sheets:</strong> a new <strong>Zip Code</strong> column
+                  appears on Detailed Ledger, Transaction Log, Generated Rewards, and FMNP Entries on the
+                  next sync. Historical rows leave it empty; new rows from v2.0.6 onward populate it from
+                  each customer's order.
+                </td>
+              </tr>
+            </table>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#a85b00;">Pre-flight check for image-cloned fleet laptops</h3>
+            <p style="margin:0 0 10px;font-size:11pt;">
+              If your fleet was deployed by cloning one Windows image across multiple laptops, take 30 seconds
+              to verify each device has its own MachineGuid before upgrading. v2.0.6 refuses to launch on
+              devices that share a synthetic device identity (this prevents silent cross-device sync
+              corruption). In an elevated PowerShell on each laptop:
+            </p>
+            <pre style="background:#f6f9f7;border:1px solid #d8e6df;border-radius:4px;padding:12px 14px;font-size:10pt;font-family:Consolas,'Courier New',monospace;color:#1a1a1a;white-space:pre-wrap;margin:0 0 8px;">(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' MachineGuid).MachineGuid</pre>
+            <p style="margin:0 0 8px;font-size:11pt;">
+              You should see a <strong>unique GUID per device.</strong> If a value is missing, blank, or
+              identical across laptops, generate a fresh one before launching v2.0.6:
+            </p>
+            <pre style="background:#f6f9f7;border:1px solid #d8e6df;border-radius:4px;padding:12px 14px;font-size:10pt;font-family:Consolas,'Courier New',monospace;color:#1a1a1a;white-space:pre-wrap;margin:0 0 8px;">$g = [guid]::NewGuid().ToString()
+Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' MachineGuid $g</pre>
+            <p style="margin:0 0 12px;font-size:10.5pt;color:#555;">
+              If a device hits this on first launch of v2.0.6, you'll see a <em>Device Identity Required</em>
+              dialog with the same instructions — no data is touched, and the device runs normally once the
+              registry value is set.
+            </p>
+          </td>
+        </tr>
+
+        <!-- Reconciliation pull-quote -->
+        <tr>
+          <td style="padding:8px 36px 4px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#2d6a4f;color:#ffffff;border-radius:6px;margin:8px 0;">
+              <tr>
+                <td style="padding:16px 22px;font-size:11pt;text-align:center;">
+                  <strong>Three-way reconciliation verified end-to-end.</strong><br>
+                  For every tested transaction: Database = Ledger backup = Google Sheets sync output.
+                  <br>No penny is lost, duplicated, or misattributed.
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="padding:14px 36px 28px;font-size:9.5pt;color:#777;border-top:1px solid #eee;">
+            <p style="margin:14px 0 4px;">
+              Full release notes are available in the project repository as <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">RELEASE_NOTES_v2.0.6.md</code>.
+            </p>
+            <p style="margin:0;">
+              Questions or rollout coordination — please loop in the operations channel before deploying to production laptops.
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>

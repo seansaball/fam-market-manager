@@ -220,8 +220,19 @@ class TestReceiptIntakeSyncSignals:
         screen.data_changed = MagicMock()
         screen._order_receipts = [{'txn_id': 99, 'fam_txn_id': 'X'}]
         screen.receipts_frame = MagicMock()
+        # v2.0.2 fix (UF-H2): the remove path now wraps void+order
+        # status flip atomically and consults ``_current_order_id``.
+        # Set it to None so the parent-order branch is skipped (test
+        # is only verifying the data_changed signal).
+        screen._current_order_id = None
 
-        with patch('fam.ui.receipt_intake_screen.void_transaction'):
+        # Patch the DB-touching helpers so the test stays unit-level.
+        with patch('fam.ui.receipt_intake_screen.void_transaction'), \
+             patch('fam.ui.receipt_intake_screen.get_connection') as gc, \
+             patch('fam.ui.receipt_intake_screen.get_customer_order'), \
+             patch(
+                'fam.ui.receipt_intake_screen.update_customer_order_status'):
+            gc.return_value = MagicMock()
             ReceiptIntakeScreen._remove_receipt(screen, 0)
 
         screen.data_changed.emit.assert_called_once()
@@ -258,10 +269,15 @@ class TestMainWindowSignalWiring:
         src = inspect.getsource(mw_module)
 
         required_wirings = [
-            'fmnp_screen.entry_saved.connect(self._trigger_sync)',
+            # v2.0.6: FMNP and Admin signals now go through dedicated
+            # slots that scope the sync to the affected market_day_id
+            # — see ``_on_fmnp_entry_saved`` and
+            # ``_on_admin_data_changed`` for the rationale (mutations
+            # on CLOSED market days reach the cloud).
+            'fmnp_screen.entry_saved.connect(self._on_fmnp_entry_saved)',
             'payment_screen.payment_confirmed.connect(self._trigger_sync)',
             'payment_screen.draft_saved.connect(self._trigger_sync)',
-            'admin_screen.data_changed.connect(self._trigger_sync)',
+            'admin_screen.data_changed.connect(self._on_admin_data_changed)',
             'receipt_intake_screen.data_changed.connect(self._trigger_sync)',
         ]
         for wiring in required_wirings:
@@ -300,22 +316,72 @@ class TestAdjustmentDialogCapAndDistribute:
         assert '_auto_distribute' in src, \
             "AdjustmentDialog must implement _auto_distribute handler"
 
-    def test_update_row_caps_sets_receipt_total_as_max(self):
-        """_update_row_caps calls set_max_charge with the current receipt
-        total in integer cents on every payment row."""
+    def test_update_row_caps_subtracts_other_rows_from_receipt(self):
+        """v1.9.9 smart cap: ``_update_row_caps`` no longer passes
+        the full receipt to every row — that allowed two rows to
+        independently consume the entire receipt, which is exactly
+        the over-allocation the cap is supposed to prevent.
+
+        The new contract: each row's max charge =
+        ``(receipt - method_amount of OTHER rows) / (1 + match%/100)``.
+        For non-denominated rows with 0% match (Cash), that
+        collapses to ``receipt - other_rows``.
+
+        Setup: $25.50 receipt, row1 = SNAP (100% match) at $5
+        charge ($10 method_amount), row2 = Cash (0% match) — with
+        the new logic, Cash sees receipt $25.50 - other $10 =
+        $15.50 headroom = 1550 cents."""
         from fam.ui.admin_screen import AdjustmentDialog
+
+        # Two rows: SNAP at $5 charge (so $10 method_amount), Cash
+        # empty.  The cap on Cash must reflect "what's left of the
+        # receipt after SNAP's allocation".
+        snap_method = {'id': 1, 'name': 'SNAP', 'match_percent': 100.0,
+                       'denomination': None}
+        cash_method = {'id': 2, 'name': 'Cash', 'match_percent': 0.0,
+                       'denomination': None}
+
+        row1 = MagicMock()
+        row1.get_selected_method.return_value = snap_method
+        row1.has_method_selected.return_value = True
+        row1._get_active_charge.return_value = 500  # $5 in cents
+        row2 = MagicMock()
+        row2.get_selected_method.return_value = cash_method
+        row2.has_method_selected.return_value = True
+        row2._get_active_charge.return_value = 0
 
         dialog = MagicMock()
         dialog.receipt_spin.value.return_value = 25.50  # dollars
-        row1 = MagicMock()
-        row2 = MagicMock()
+        dialog._match_limit = None  # disable the limit branch
         dialog._payment_rows = [row1, row2]
 
         AdjustmentDialog._update_row_caps(dialog)
 
-        # dollars_to_cents(25.50) == 2550
-        row1.set_max_charge.assert_called_once_with(2550)
-        row2.set_max_charge.assert_called_once_with(2550)
+        # Row1 (SNAP): receipt=2550, other_total=0 (row2 charge=0),
+        # remaining=2550, divisor=2.0, max_charge_nominal=1275
+        row1.set_max_charge.assert_called_once_with(1275)
+        # Row2 (Cash): receipt=2550, other_total=1000 (SNAP $5 →
+        # $10 method_amount), remaining=1550, divisor=1.0,
+        # max_charge_nominal=1550
+        row2.set_max_charge.assert_called_once_with(1550)
+
+    def test_update_row_caps_skips_rows_without_method(self):
+        """Rows whose method dropdown is still on the placeholder
+        must NOT receive a ``set_max_charge`` call — there's no
+        sensible cap to push, and stamping a value would race with
+        the user's pending method selection."""
+        from fam.ui.admin_screen import AdjustmentDialog
+
+        row1 = MagicMock()
+        row1.get_selected_method.return_value = None  # placeholder
+        dialog = MagicMock()
+        dialog.receipt_spin.value.return_value = 20.00
+        dialog._match_limit = None
+        dialog._payment_rows = [row1]
+
+        AdjustmentDialog._update_row_caps(dialog)
+
+        row1.set_max_charge.assert_not_called()
 
     def test_auto_distribute_exits_cleanly_on_zero_receipt(self):
         """Zero or negative receipt: do nothing, do not crash."""

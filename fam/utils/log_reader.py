@@ -9,10 +9,17 @@ descriptions where possible.
 import os
 import re
 
-# Matches: "2026-02-28 14:07:03 [ERROR] fam.ui.payment_screen: message text"
+# Matches the v1.9.9+ format with embedded app version:
+#   "2026-04-29 10:51:25 [ERROR] [v1.9.9] fam.ui.payment_screen: message text"
+# AND the legacy pre-v1.9.9 format without the version token:
+#   "2026-04-29 10:51:25 [ERROR] fam.ui.payment_screen: message text"
+# The [vX.Y.Z] group is optional so old log files keep parsing
+# correctly; entries without a version are surfaced as "Unknown" in
+# the synced Error Log so coordinators can spot the cutover.
 LOG_LINE_RE = re.compile(
     r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+'
     r'\[(\w+)\]\s+'
+    r'(?:\[v([\d\w.\-+]+)\]\s+)?'   # optional [vX.Y.Z] capture
     r'([\w.]+):\s+'
     r'(.*)$'
 )
@@ -103,8 +110,13 @@ def parse_log_file(log_path, levels=None, date_from=None, date_to=None,
 
     Args:
         log_path: Absolute path to fam_manager.log.
-        levels: Set of level strings to include, e.g. {'ERROR', 'WARNING'}.
-                If None, includes ERROR and WARNING.
+        levels: Set of level strings to include.  If None, includes
+                CRITICAL, ERROR, and WARNING.  CRITICAL is the level
+                used by ``fam.app._global_exception_handler`` for
+                unhandled exceptions; without it, app crashes were
+                silently dropped from the Error Log report
+                (v2.0.1 fix — user reported a crash that never
+                appeared in the report).
         date_from: Include entries from this date (YYYY-MM-DD), inclusive.
         date_to: Include entries to this date (YYYY-MM-DD), inclusive.
         limit: Maximum entries to return.
@@ -114,7 +126,7 @@ def parse_log_file(log_path, levels=None, date_from=None, date_to=None,
         module_label, message, friendly_message, traceback
     """
     if levels is None:
-        levels = {'ERROR', 'WARNING'}
+        levels = {'CRITICAL', 'ERROR', 'WARNING'}
 
     if not os.path.exists(log_path):
         return []
@@ -135,10 +147,15 @@ def parse_log_file(log_path, levels=None, date_from=None, date_to=None,
             # Flush previous entry
             if current_entry is not None:
                 entries.append(current_entry)
-            timestamp, level, module, message = match.groups()
+            timestamp, level, app_version, module, message = match.groups()
             current_entry = {
                 'timestamp': timestamp,
                 'level': level,
+                # Per-line version (v1.9.9+).  Older log lines have
+                # no embedded version → mark Unknown so callers don't
+                # silently misattribute pre-upgrade errors to the
+                # post-upgrade __version__.
+                'app_version': app_version or 'Unknown',
                 'module': module,
                 'module_label': get_friendly_module(module),
                 'message': message,

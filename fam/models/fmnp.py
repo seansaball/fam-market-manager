@@ -112,7 +112,8 @@ def update_fmnp_entry(entry_id, amount=None, vendor_id=None,
 
     # Snapshot current values so we can diff and produce per-field audit rows
     row = conn.execute(
-        "SELECT amount, vendor_id, check_count, notes, photo_path "
+        "SELECT amount, vendor_id, check_count, notes, photo_path, "
+        "       photo_drive_url "
         "FROM fmnp_entries WHERE id=?", (entry_id,)
     ).fetchone()
     if row is None:
@@ -139,9 +140,43 @@ def update_fmnp_entry(entry_id, amount=None, vendor_id=None,
     if not changes:
         return  # No-op — don't bump updated_at, don't flood audit log
 
+    # v2.0.6 fix (2026-05-06, user-reported): when ``photo_path``
+    # changes, also clear ``photo_drive_url`` so the next sync's
+    # ``get_pending_photo_uploads`` sees the entry as needing
+    # re-evaluation.  Pre-fix this method only ever wrote
+    # ``photo_path`` and left ``photo_drive_url`` unchanged — and
+    # ``get_pending_photo_uploads`` matches "fewer URLs than
+    # paths", so a single-photo edit (paths=1, URLs=1) was never
+    # queued for upload.  The entry kept pointing at the OLD Drive
+    # file regardless of what the operator attached.
+    #
+    # We ALSO drop any ``photo_hashes`` cache rows that pointed to
+    # the now-orphaned URLs (those that no other active record
+    # references).  Without this the next upload of the same image
+    # content short-circuits via the dedup cache to the same
+    # stranded URL — defeating the purpose of the URL clear.  This
+    # mirrors the ``void_transaction`` cleanup pattern.
+    photo_path_changed = any(c[0] == 'photo_path' for c in changes)
+
+    # Capture the OLD Drive URL set BEFORE the update so we can
+    # run the cache cleanup against those specific URLs after the
+    # entry's photo_drive_url has been cleared.  Doing the cleanup
+    # before the clear would short-circuit on a self-reference
+    # (this entry's own row still holds the URL).
+    old_drive_urls: set[str] = set()
+    if photo_path_changed and row['photo_drive_url']:
+        from fam.utils.photo_paths import parse_photo_paths
+        for u in parse_photo_paths(row['photo_drive_url']):
+            if u:
+                old_drive_urls.add(u)
+
     try:
         set_clauses = [f"{name}=?" for name, _, _ in changes]
         set_values = [new for _, _, new in changes]
+        if photo_path_changed:
+            # Clear photo_drive_url so sync re-evaluates uploads.
+            set_clauses.append("photo_drive_url=?")
+            set_values.append(None)
         set_clauses.append("updated_at=?")
         set_values.append(eastern_timestamp())
         set_values.append(entry_id)
@@ -156,6 +191,15 @@ def update_fmnp_entry(entry_id, amount=None, vendor_id=None,
                        field_name=field_name,
                        old_value=old_val, new_value=new_val,
                        commit=False)
+
+        # Now that this entry's photo_drive_url is empty, any of
+        # ``old_drive_urls`` not referenced by another active
+        # record is safely droppable from the dedup cache.
+        if old_drive_urls:
+            from fam.models.photo_hash import (
+                _cleanup_orphaned_hashes_for_urls)
+            _cleanup_orphaned_hashes_for_urls(
+                old_drive_urls, commit=False)
 
         if commit:
             conn.commit()
@@ -173,7 +217,16 @@ def delete_fmnp_entry(entry_id, changed_by="System", commit=True):
     The delete action is recorded in the audit log with *changed_by* so
     the trail attributes the deletion to a real person.  Same transaction
     as the status update.
+
+    v2.0.6 fix (2026-05-06): also drop any ``photo_hashes`` cache
+    rows pointing to URLs unique to this entry — same rationale as
+    ``void_transaction``.  ``_process_voided_photos`` will rename
+    this entry's Drive file to ``VOID_*`` on the next sync;
+    without the cache cleanup, re-uploading the same image content
+    elsewhere would short-circuit to the renamed URL.
     """
+    from fam.models.photo_hash import cleanup_orphaned_hashes_for_fmnp
+
     conn = get_connection()
     try:
         conn.execute(
@@ -182,6 +235,11 @@ def delete_fmnp_entry(entry_id, changed_by="System", commit=True):
         )
         log_action('fmnp_entries', entry_id, 'DELETE', changed_by,
                    notes='FMNP entry soft-deleted', commit=False)
+        # Run cleanup AFTER status flip so the helper's "active
+        # references" lookup correctly excludes this just-deleted
+        # entry.  Bundle into the same transaction so a rollback
+        # on commit unrolls both halves.
+        cleanup_orphaned_hashes_for_fmnp(entry_id, commit=False)
         if commit:
             conn.commit()
     except Exception:

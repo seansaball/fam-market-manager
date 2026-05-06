@@ -194,6 +194,18 @@ class MarketDayScreen(QWidget):
             )
             self.open_btn.setEnabled(False)
             self.market_combo.setEnabled(False)
+
+            # Sync the (now-disabled) Market Location dropdown to the
+            # actually-open market.  Otherwise the combo keeps
+            # whatever the coordinator last clicked — including a
+            # stale selection from before they hit Open Market Day.
+            # The status header above shows the right market, but
+            # the dropdown was contradicting it (the 2026-04 onsite
+            # screenshot caught this).
+            for i in range(self.market_combo.count()):
+                if self.market_combo.itemData(i) == open_md['market_id']:
+                    self.market_combo.setCurrentIndex(i)
+                    break
         else:
             # Unlock volunteer field and controls
             self.volunteer_input.setReadOnly(False)

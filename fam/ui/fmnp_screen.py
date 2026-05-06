@@ -29,10 +29,29 @@ from fam.ui.helpers import (
 logger = logging.getLogger('fam.ui.fmnp_screen')
 
 
+# Hard cap on the number of photo upload slots the screen will render.
+# A typo (e.g. $4533 with $5 denomination = 906 slots) used to lock up
+# the UI thread because each slot creates ~5 widgets — 906 slots ×
+# 5 widgets = ~4500 widgets, which Qt renders synchronously.  The
+# real-world maximum a single FMNP entry should ever represent is
+# well under this cap; batches larger than this should be split into
+# multiple entries so the photos remain manageable.
+MAX_PHOTO_SLOTS = 50
+
+
 class FMNPScreen(QWidget):
     """FMNP Entry screen."""
 
-    entry_saved = Signal()
+    # v2.0.6 fix: emit the saved entry's market_day_id so the sync
+    # handler can scope to THAT specific day — not the currently-
+    # open market day.  Coordinators frequently add FMNP entries
+    # to closed market days after the fact (paper checks delivered
+    # later, end-of-month batch entry).  Pre-fix, the sync narrowed
+    # scope to the open market day and silently skipped the closed
+    # day's new entries.  Now main_window listens to this signal
+    # and passes the emitted md_id to the sync worker so the
+    # affected day is collected, regardless of open / closed state.
+    entry_saved = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -86,7 +105,7 @@ class FMNPScreen(QWidget):
         self.amount_spin = NoScrollDoubleSpinBox()
         self.amount_spin.setRange(0, 99999.99)
         self.amount_spin.setDecimals(2)
-        self.amount_spin.setPrefix("$")
+        self.amount_spin.setPrefix("$ ")
         self.amount_spin.setSingleStep(1.00)
         row2.addWidget(self.amount_spin)
 
@@ -124,6 +143,22 @@ class FMNPScreen(QWidget):
         photo_header.addWidget(make_field_label("Check Photos"))
         photo_header.addStretch()
         form_layout.addLayout(photo_header)
+
+        # Cap warning — shown when amount/denomination would generate
+        # more than ``MAX_PHOTO_SLOTS`` photo rows.  Tells the user
+        # exactly what's happening and how to recover.  Hidden when
+        # the count is within the cap.
+        self.photo_cap_warning = QLabel("")
+        self.photo_cap_warning.setWordWrap(True)
+        self.photo_cap_warning.setStyleSheet(f"""
+            color: {ERROR_COLOR}; font-weight: bold; font-size: 12px;
+            background-color: {ERROR_BG};
+            border: 1px solid {ERROR_COLOR};
+            border-radius: 6px;
+            padding: 6px 10px;
+        """)
+        self.photo_cap_warning.setVisible(False)
+        form_layout.addWidget(self.photo_cap_warning)
 
         # Scrollable container for photo slots — fixed height fits ~3 rows
         self._photo_scroll_area = QScrollArea()
@@ -184,11 +219,19 @@ class FMNPScreen(QWidget):
         layout.addWidget(self.table)
 
     def refresh(self):
+        # v2.0.2 fix (UF-H5): don't blow away mid-edit form state.
+        # Pre-fix every refresh / data_changed signal called
+        # ``_cancel_edit()`` unconditionally — silently discarding
+        # an in-progress entry (amount, vendor, notes, attached
+        # photos) when the volunteer briefly navigated away to
+        # check Reports.  Now we only cancel if there's nothing in
+        # progress to lose.
         self._configure_fmnp_denomination()
         self._load_market_days()
         self._load_vendors()
         self._load_entries()
-        self._cancel_edit()
+        if not self._has_in_progress_edit():
+            self._cancel_edit()
 
     def _configure_fmnp_denomination(self):
         """Look up FMNP payment method and configure denomination + photo requirement."""
@@ -213,16 +256,105 @@ class FMNPScreen(QWidget):
             self.denom_hint.setVisible(False)
 
     def _load_market_days(self):
+        # v2.0.2 fix (UF-H5): preserve the volunteer's selected
+        # market day across refresh.  Capture the current data
+        # value, rebuild, then restore the index if the same
+        # market day still exists.
+        #
+        # v2.0.6: when there's NO previous selection (first load
+        # after launch, or after a Reset / fresh install) default
+        # to the currently-OPEN market day if any exists, otherwise
+        # the most recent market day by date.  Pre-fix the dropdown
+        # silently selected the FIRST item (oldest market day in
+        # the list), which made coordinators scroll past dozens of
+        # historical entries to find today's market.
+        previous_data = (
+            self.md_combo.currentData()
+            if self.md_combo.count() > 0 else None
+        )
         self._market_days_data = get_all_market_days()
         self.md_combo.blockSignals(True)
-        self.md_combo.clear()
+        try:
+            self.md_combo.clear()
+            for d in self._market_days_data:
+                status = "[OPEN]" if d['status'] == 'Open' else "[Closed]"
+                self.md_combo.addItem(
+                    f"{d['market_name']} - {d['date']} {status}",
+                    userData=d['id']
+                )
+            if previous_data is not None:
+                idx = self.md_combo.findData(previous_data)
+                if idx >= 0:
+                    self.md_combo.setCurrentIndex(idx)
+            else:
+                # First load: pick the open market day if any,
+                # otherwise the most recent one by date.
+                default_id = self._pick_default_market_day_id()
+                if default_id is not None:
+                    idx = self.md_combo.findData(default_id)
+                    if idx >= 0:
+                        self.md_combo.setCurrentIndex(idx)
+        finally:
+            self.md_combo.blockSignals(False)
+
+    def _pick_default_market_day_id(self) -> int | None:
+        """Return the market_day_id to default-select on first load.
+
+        Preference order:
+          1. The currently-OPEN market day (only one can be open at
+             a time; coordinators usually want to log against today's
+             active market first).
+          2. The most recent market day by date (handles after-the-
+             fact entry on closed days when no market is open right
+             now).
+          3. None when no market days exist at all.
+        """
+        if not self._market_days_data:
+            return None
+        # 1. Open market day, if any
         for d in self._market_days_data:
-            status = "[OPEN]" if d['status'] == 'Open' else "[Closed]"
-            self.md_combo.addItem(
-                f"{d['market_name']} - {d['date']} {status}",
-                userData=d['id']
-            )
-        self.md_combo.blockSignals(False)
+            if d.get('status') == 'Open':
+                return d['id']
+        # 2. Most recent by date.  ``get_all_market_days`` ordering
+        # depends on the model — sort defensively here so we always
+        # land on the latest regardless of upstream order.
+        latest = max(
+            self._market_days_data,
+            key=lambda d: (d.get('date') or '', d.get('id') or 0))
+        return latest['id']
+
+    def _has_in_progress_edit(self) -> bool:
+        """Return True if the form has unsaved user input that a
+        ``_cancel_edit()`` would silently discard.  Used by
+        ``refresh()`` to avoid stomping mid-entry state when an
+        external ``data_changed`` signal triggers a refresh."""
+        # In edit mode (existing entry being modified) — always
+        # consider it in-progress so the manager doesn't lose their
+        # work.
+        if getattr(self, '_editing_id', None):
+            return True
+        # New-entry mode — consider any non-default field "in progress."
+        try:
+            if self.amount_spin.value() > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            if self.notes_input.toPlainText().strip():
+                return True
+        except Exception:
+            pass
+        # Photo slots populated?  ``_photo_slots`` is a list of
+        # dicts with keys ``source_path`` (newly attached file) and
+        # ``stored_path`` (already-stored file when editing).
+        try:
+            for slot in getattr(self, '_photo_slots', []):
+                if isinstance(slot, dict) and (
+                        slot.get('source_path') or slot.get('stored_path')):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _load_vendors(self):
         """Load vendors — filtered to selected market's assignments when available."""
@@ -331,7 +463,22 @@ class FMNPScreen(QWidget):
     # ── Photo attachment ─────────────────────────────────────
 
     def _get_expected_photo_count(self) -> int:
-        """Return the number of photo slots based on amount / denomination."""
+        """Return the number of photo slots based on amount /
+        denomination, hard-capped at ``MAX_PHOTO_SLOTS`` so a typo
+        in the amount field can't render thousands of widgets and
+        freeze the UI thread.
+
+        The capped value is the number of widgets RENDERED.  The
+        true check count (still accessible via ``_get_uncapped_check_count``)
+        is preserved for the save record so the entry's check_count
+        column stays accurate even when the photo UI is truncated.
+        """
+        return min(MAX_PHOTO_SLOTS, self._get_uncapped_check_count())
+
+    def _get_uncapped_check_count(self) -> int:
+        """Return the un-capped expected check count from amount /
+        denomination.  Used for the warning label and the saved
+        ``check_count`` value."""
         amount_cents = dollars_to_cents(self.amount_spin.value())
         if amount_cents <= 0:
             return 1
@@ -342,8 +489,26 @@ class FMNPScreen(QWidget):
     def _on_amount_changed(self):
         """Rebuild photo slots when amount changes (affects check count)."""
         expected = self._get_expected_photo_count()
+        uncapped = self._get_uncapped_check_count()
         if len(self._photo_slots) != expected:
             self._rebuild_photo_slots(expected)
+        # Surface a friendly warning when the amount would have
+        # produced more rows than the cap allows.  The warning
+        # explains the cap and recommends splitting the entry.
+        if hasattr(self, 'photo_cap_warning'):
+            if uncapped > MAX_PHOTO_SLOTS:
+                self.photo_cap_warning.setText(
+                    f"⚠  This amount represents {uncapped} checks, but "
+                    f"only {MAX_PHOTO_SLOTS} photo upload rows will be "
+                    f"shown to keep the screen responsive.  If you "
+                    f"need photos for every check, split this into "
+                    f"multiple smaller FMNP entries.  The saved "
+                    f"check_count will still record the full "
+                    f"{uncapped}."
+                )
+                self.photo_cap_warning.setVisible(True)
+            else:
+                self.photo_cap_warning.setVisible(False)
 
     def _rebuild_photo_slots(self, count: int):
         """Rebuild the dynamic photo slot UI to match the expected count."""
@@ -670,7 +835,10 @@ class FMNPScreen(QWidget):
             self.notes_input.clear()
             self._clear_all_photos()
             self._load_entries()
-            self.entry_saved.emit()
+            # v2.0.6: emit the affected market_day_id so the sync
+            # handler scopes to THAT day (not the open day).  Closed-
+            # market entries added after-the-fact reach the cloud.
+            self.entry_saved.emit(int(md_id) if md_id else 0)
         except Exception as e:
             logger.exception("Failed to save FMNP entry")
             self._show_error(f"Error saving entry: {e}")
@@ -719,6 +887,12 @@ class FMNPScreen(QWidget):
         )
         if result == QMessageBox.Yes:
             try:
+                # Capture the entry's market_day_id BEFORE delete so
+                # the post-delete sync can scope to the affected day
+                # (which may be a closed market day).
+                pre_delete = get_fmnp_entry_by_id(entry_id)
+                affected_md_id = (pre_delete or {}).get('market_day_id') or 0
+
                 entered_by = self.entered_by_input.text().strip() or "System"
                 # delete_fmnp_entry auto-logs a DELETE audit row
                 delete_fmnp_entry(entry_id, changed_by=entered_by)
@@ -727,7 +901,7 @@ class FMNPScreen(QWidget):
                 # Deletion is a mutation — emit the same signal as save so
                 # the main window triggers a cloud sync.  The 60-second
                 # sync cooldown prevents any rapid-fire overload.
-                self.entry_saved.emit()
+                self.entry_saved.emit(int(affected_md_id))
             except Exception as e:
                 logger.exception("Failed to delete FMNP entry %s", entry_id)
                 self._show_error(f"Error deleting entry: {e}")

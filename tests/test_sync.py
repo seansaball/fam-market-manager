@@ -62,8 +62,14 @@ def _create_market_day_with_transactions(
     else:
         market = conn.execute("SELECT id FROM markets LIMIT 1").fetchone()
     vendor = conn.execute("SELECT id FROM vendors LIMIT 1").fetchone()
+    # Skip system-managed methods (Unallocated Funds, seeded by v25)
+    # — they have special per-method column semantics in vendor
+    # reimbursement (column shows method_amount instead of
+    # customer_charged), which would invalidate the test's
+    # customer_charged assertions if it picked UF.
     pm = conn.execute(
-        "SELECT id, name, match_percent FROM payment_methods LIMIT 1"
+        "SELECT id, name, match_percent FROM payment_methods "
+        "WHERE COALESCE(is_system, 0) = 0 LIMIT 1"
     ).fetchone()
 
     # Create market day
@@ -173,11 +179,14 @@ class TestDataCollector:
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
-        assert len(data) == 9
+        # v1.9.10: 10 tabs (added 'Generated Rewards' for the
+        # customer-facing rewards add-on; required by default).
+        assert len(data) == 10
         expected_tabs = {
             'Vendor Reimbursement', 'FAM Match Report', 'Detailed Ledger',
             'Transaction Log', 'Activity Log', 'Geolocation',
             'FMNP Entries', 'Market Day Summary', 'Error Log',
+            'Generated Rewards',
         }
         assert set(data.keys()) == expected_tabs
 
@@ -275,7 +284,7 @@ class TestDataCollector:
 
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
-        assert len(data) == 9
+        assert len(data) == 10  # v1.9.10: +Generated Rewards
         assert data['Vendor Reimbursement'] == []
         assert data['Detailed Ledger'] == []
         assert len(data['Market Day Summary']) == 1  # Summary always has 1 row
@@ -326,7 +335,7 @@ class TestSyncTabToggles:
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
-        assert len(data) == 9
+        assert len(data) == 10  # v1.9.10: +Generated Rewards
 
     def test_required_tabs_always_enabled(self):
         """Required tabs cannot be disabled via is_sync_tab_enabled."""
@@ -383,7 +392,7 @@ class MockBackend(SyncBackend):
     def validate_connection(self):
         return SyncResult(success=self.connection_valid)
 
-    def upsert_rows(self, sheet_name, rows, key_columns):
+    def upsert_rows(self, sheet_name, rows, key_columns, delete_stale=True):
         self.upsert_calls.append((sheet_name, rows, key_columns))
         return SyncResult(success=True, rows_synced=len(rows))
 
@@ -407,9 +416,9 @@ class TestSyncManager:
         data = collect_sync_data(md_id)
         results = manager.sync_all(data)
 
-        assert len(results) == 10  # 9 data tabs + Agent Tracker
+        assert len(results) == 11  # v1.9.10: 10 data tabs + Agent Tracker
         assert all(r.success for r in results.values())
-        assert len(backend.upsert_calls) == 10
+        assert len(backend.upsert_calls) == 11  # v1.9.10: 10 + Agent Tracker
 
     def test_sync_all_records_last_sync_at(self):
         md_id, _ = _create_market_day_with_transactions()
@@ -431,7 +440,7 @@ class TestSyncManager:
         from fam.sync.manager import SyncManager
 
         class FailOnLedger(MockBackend):
-            def upsert_rows(self, sheet_name, rows, key_columns):
+            def upsert_rows(self, sheet_name, rows, key_columns, delete_stale=True):
                 if sheet_name == 'Detailed Ledger':
                     return SyncResult(success=False, error="API error")
                 return super().upsert_rows(sheet_name, rows, key_columns)
@@ -463,8 +472,8 @@ class TestSyncManager:
         manager = SyncManager(backend, throttle_writes=False)
         results = manager.clear_market_data()
 
-        assert len(results) == 10  # 9 data tabs + Agent Tracker
-        assert len(backend.delete_calls) == 10
+        assert len(results) == 11  # v1.9.10: 10 data tabs + Agent Tracker
+        assert len(backend.delete_calls) == 11
         for call in backend.delete_calls:
             assert call[1] == 'CLR'
             assert call[2] == 'dev-clr'
@@ -638,9 +647,10 @@ class TestMultiDeviceIsolation:
         data_b = collect_sync_data(md2)
         results_b = manager.sync_all(data_b)
 
-        # Each sync produced 10 upsert calls (9 data tabs + Agent Tracker)
-        assert calls_a == 10
-        assert len(backend.upsert_calls) == 20  # 10 + 10
+        # v1.9.10: each sync produces 11 upsert calls
+        # (10 data tabs incl. Generated Rewards + Agent Tracker)
+        assert calls_a == 11
+        assert len(backend.upsert_calls) == 22  # 11 + 11
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -677,17 +687,35 @@ class TestMultiMarketIsolation:
         expected_b = derive_market_code(m2_name)
         assert expected_a != expected_b  # sanity: different markets
 
-        for tab, rows in data_a.items():
-            if tab == 'Error Log':
-                continue  # global tab, not per-market-day
-            for row in rows:
-                assert row['market_code'] == expected_a
+        # Per-md tabs scope to the narrow market day, so all rows
+        # carry that day's market's code.
+        # v2.0.1: ``Vendor Reimbursement`` and ``Error Log`` are
+        # whole-dataset collectors — rows can span every market.
+        # Each VR row's market_code must match its own Market Name.
+        WHOLE_DATASET_TABS = {'Vendor Reimbursement', 'Error Log'}
 
-        for tab, rows in data_b.items():
-            if tab == 'Error Log':
-                continue
-            for row in rows:
-                assert row['market_code'] == expected_b
+        def _check_per_md_rows(data, expected_code):
+            for tab, rows in data.items():
+                if tab in WHOLE_DATASET_TABS:
+                    continue
+                for row in rows:
+                    assert row['market_code'] == expected_code, (
+                        f"{tab}: row market_code={row['market_code']!r} "
+                        f"expected {expected_code!r}")
+
+        def _check_vr_rows(data):
+            vr = data.get('Vendor Reimbursement', [])
+            for row in vr:
+                derived = derive_market_code(row.get('Market Name', ''))
+                assert row['market_code'] == derived, (
+                    f"VR row Market Name={row.get('Market Name')!r} "
+                    f"market_code={row['market_code']!r} "
+                    f"expected {derived!r}")
+
+        _check_per_md_rows(data_a, expected_a)
+        _check_per_md_rows(data_b, expected_b)
+        _check_vr_rows(data_a)
+        _check_vr_rows(data_b)
 
     def test_clear_only_affects_own_market(self):
         from fam.sync.manager import SyncManager
@@ -957,7 +985,7 @@ class InMemorySheetBackend(SyncBackend):
     def validate_connection(self):
         return SyncResult(success=True)
 
-    def upsert_rows(self, sheet_name, rows, key_columns):
+    def upsert_rows(self, sheet_name, rows, key_columns, delete_stale=True):
         """Replicate gsheets stale-row logic in pure Python."""
         if sheet_name not in self.sheets:
             self.sheets[sheet_name] = []
@@ -1215,7 +1243,7 @@ class TestEdgeCases:
         expected_mc = derive_market_code(market['name'])
 
         data = collect_sync_data(md_id)
-        assert len(data) == 9
+        assert len(data) == 10  # v1.9.10: +Generated Rewards
         for tab, rows in data.items():
             for row in rows:
                 if tab != 'Error Log':
@@ -1290,7 +1318,7 @@ class TestEdgeCases:
         from fam.sync.manager import SyncManager
 
         class ExplodingBackend(MockBackend):
-            def upsert_rows(self, sheet_name, rows, key_columns):
+            def upsert_rows(self, sheet_name, rows, key_columns, delete_stale=True):
                 raise ConnectionError("Network unreachable")
 
         md_id, _ = _create_market_day_with_transactions()
@@ -1300,8 +1328,9 @@ class TestEdgeCases:
         manager = SyncManager(ExplodingBackend(), throttle_writes=False)
         results = manager.sync_all(data)
 
-        # All 9 data tabs + Agent Tracker should have failed gracefully
-        assert len(results) == 10
+        # All 10 data tabs + Agent Tracker should have failed
+        # gracefully (v1.9.10: +Generated Rewards).
+        assert len(results) == 11
         for r in results.values():
             assert r.success is False
             assert "Network unreachable" in r.error
@@ -1312,7 +1341,7 @@ class TestEdgeCases:
         from fam.utils.app_settings import get_last_sync_error
 
         class FailOnGeo(MockBackend):
-            def upsert_rows(self, sheet_name, rows, key_columns):
+            def upsert_rows(self, sheet_name, rows, key_columns, delete_stale=True):
                 if sheet_name == 'Geolocation':
                     return SyncResult(success=False, error="quota exceeded")
                 return super().upsert_rows(sheet_name, rows, key_columns)
@@ -1412,11 +1441,35 @@ class TestSchemaMigrationV16:
         assert 'app_version' in col_names
         assert 'device_id' in col_names
 
-    def test_schema_version_is_23(self):
-        """Current schema version should be 23 (v1.9.8 bumped from 22
-        to add the UNIQUE constraint on vendors.name)."""
+    def test_schema_version_is_27(self):
+        """Current schema version should be 27:
+          v22 → v23 (v1.9.8) — UNIQUE on vendors.name
+          v23 → v24 (v1.9.9) — vendor_payment_methods junction
+          v24 → v25 (v1.9.9) — payment_methods.is_system + Unallocated
+                                Funds seed (Adjustments customer-gone
+                                recovery path)
+          v25 → v27 (v1.9.9) — defensive DROP of an abandoned v26
+                                UNIQUE INDEX (see schema.py
+                                ``_migrate_v26_to_v27``)
+          v27 → v28 (v1.9.10) — per-line invariant trigger
+                                (Finding H-3 fix; see schema.py
+                                ``_migrate_v27_to_v28``)
+          v28 → v29 (v1.9.10) — reward_rules table for the
+                                customer-facing rewards add-on
+                                (config only; does NOT touch
+                                the financial pipeline)
+          v29 → v30 (v1.9.10) — generated_rewards snapshot table.
+                                Switched rewards from derive-on-
+                                demand to write-once history so
+                                prior transactions are not
+                                retroactively rewarded when a
+                                rule is added"""
         from fam.database.schema import CURRENT_SCHEMA_VERSION
-        assert CURRENT_SCHEMA_VERSION == 23
+        # v1.9.10 follow-up (2026-05-01): version bumped to 31 when
+        # the v30->v31 migration added defense-in-depth triggers
+        # (PLI UPDATE non-negativity + Voided one-way).  Pinned
+        # ``>= 30`` so future bumps don't false-trigger this guard.
+        assert CURRENT_SCHEMA_VERSION >= 30
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1563,12 +1616,19 @@ class TestErrorLogCollector:
     """Tests for the Error Log sync tab (9th tab)."""
 
     def _write_fake_log(self, tmp_path, entries):
-        """Write a fake fam_manager.log file and mock get_log_path."""
+        """Write a fake fam_manager.log file and mock get_log_path.
+
+        Each entry dict supports an optional ``ver`` key — when
+        present, writes the v1.9.9+ format with embedded ``[vX.Y.Z]``
+        token.  Without it, writes the legacy pre-v1.9.9 format so
+        we can verify the parser falls back to 'Unknown' gracefully."""
         log_file = tmp_path / 'fam_manager.log'
         lines = []
         for e in entries:
+            ver_token = f" [v{e['ver']}]" if 'ver' in e else ''
             lines.append(
-                f"{e['ts']} [{e['level']}] {e['mod']}: {e['msg']}\n"
+                f"{e['ts']} [{e['level']}]{ver_token} "
+                f"{e['mod']}: {e['msg']}\n"
             )
             if 'tb' in e:
                 lines.append(e['tb'] + '\n')
@@ -1641,11 +1701,15 @@ class TestErrorLogCollector:
         assert rows[0]['Module'] == 'fam.ui.settings_screen'
 
     @patch('fam.utils.logging_config.get_log_path')
-    def test_error_log_includes_app_version(self, mock_path, fresh_db):
-        """'App Version' should match fam.__version__."""
-        from fam import __version__
+    def test_error_log_uses_per_line_version_when_present(
+            self, mock_path, fresh_db):
+        """v1.9.9+ behaviour: each row's 'App Version' is the version
+        embedded in the log line, NOT the current fam.__version__.
+        This preserves error provenance across upgrades — the v1.9.9
+        onsite finding."""
         log_path = self._write_fake_log(fresh_db, [
             {'ts': '2026-03-10 10:00:03', 'level': 'ERROR',
+             'ver': '1.9.7',
              'mod': 'fam.database.connection',
              'msg': 'DB locked'},
         ])
@@ -1653,7 +1717,56 @@ class TestErrorLogCollector:
 
         from fam.sync.data_collector import _collect_error_log
         rows = _collect_error_log()
-        assert rows[0]['App Version'] == __version__
+        assert rows[0]['App Version'] == '1.9.7', (
+            f"Expected per-line v1.9.7 to round-trip through the "
+            f"sync collector, got {rows[0]['App Version']!r}.  This "
+            f"is the regression that loses error provenance on "
+            f"upgrade."
+        )
+
+    @patch('fam.utils.logging_config.get_log_path')
+    def test_error_log_marks_pre_versioned_lines_as_unknown(
+            self, mock_path, fresh_db):
+        """Legacy log lines (written before v1.9.9 added the version
+        token) lack a [vX.Y.Z] field.  Surface those as 'Unknown' so
+        coordinators can see where the cutover happened — never silently
+        attribute them to the post-upgrade __version__."""
+        log_path = self._write_fake_log(fresh_db, [
+            {'ts': '2026-03-10 10:00:03', 'level': 'ERROR',
+             # no 'ver' → legacy format
+             'mod': 'fam.database.connection',
+             'msg': 'DB locked'},
+        ])
+        mock_path.return_value = log_path
+
+        from fam.sync.data_collector import _collect_error_log
+        rows = _collect_error_log()
+        assert rows[0]['App Version'] == 'Unknown'
+
+    @patch('fam.utils.logging_config.get_log_path')
+    def test_error_log_mixed_versioned_and_legacy(
+            self, mock_path, fresh_db):
+        """Mixed file (legacy lines from before the upgrade + new
+        lines from after) should preserve each line's correct
+        version with no cross-contamination."""
+        log_path = self._write_fake_log(fresh_db, [
+            {'ts': '2026-03-10 10:00:03', 'level': 'ERROR',
+             'mod': 'fam.app', 'msg': 'pre-upgrade error'},  # legacy
+            {'ts': '2026-04-29 10:00:03', 'level': 'ERROR',
+             'ver': '1.9.9',
+             'mod': 'fam.app', 'msg': 'post-upgrade error'},
+        ])
+        mock_path.return_value = log_path
+
+        from fam.sync.data_collector import _collect_error_log
+        rows = _collect_error_log()
+        # parse_log_file returns newest-first
+        post = next(r for r in rows
+                     if r['Message'] == 'post-upgrade error')
+        pre = next(r for r in rows
+                    if r['Message'] == 'pre-upgrade error')
+        assert post['App Version'] == '1.9.9'
+        assert pre['App Version'] == 'Unknown'
 
     @patch('fam.utils.logging_config.get_log_path')
     def test_error_log_empty_when_no_file(self, mock_path, fresh_db):
@@ -1696,18 +1809,29 @@ class TestSheetKeysErrorLog:
         assert 'Error Log' in SyncManager.SHEET_KEYS
 
     def test_error_log_key_columns(self):
+        # v2.0.5: key drops 'Message' (now multi-KB with full
+        # traceback) and uses 'Level' instead.  See
+        # ``test_error_log_full_traceback_in_message.py``.
         from fam.sync.manager import SyncManager
         keys = SyncManager.SHEET_KEYS['Error Log']
         assert 'market_code' in keys
         assert 'device_id' in keys
         assert 'Timestamp' in keys
         assert 'Module' in keys
-        assert 'Message' in keys
+        assert 'Level' in keys
+        assert 'Message' not in keys, (
+            "Error Log key must NOT include Message — Message now "
+            "contains the full multi-line traceback")
 
     def test_ten_tabs_in_sheet_keys(self):
-        """SyncManager should have 10 tabs registered."""
+        """SyncManager should have 11 tabs registered.
+
+        v1.9.10 bumped this from 10 → 11 with the addition of
+        'Generated Rewards' (customer-facing rewards add-on,
+        required by default).  Test name preserved for blame
+        continuity; the assertion floor is what matters."""
         from fam.sync.manager import SyncManager
-        assert len(SyncManager.SHEET_KEYS) == 10
+        assert len(SyncManager.SHEET_KEYS) == 11
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1788,7 +1912,7 @@ class TestAgentTracker:
         from fam.sync.manager import SyncManager
 
         class PartialFailBackend(MockBackend):
-            def upsert_rows(self, sheet_name, rows, key_columns):
+            def upsert_rows(self, sheet_name, rows, key_columns, delete_stale=True):
                 if sheet_name == 'Geolocation':
                     return SyncResult(success=False, error='test failure')
                 return super().upsert_rows(sheet_name, rows, key_columns)
@@ -1844,7 +1968,7 @@ class TestAgentTracker:
         from fam.sync.manager import SyncManager
 
         class TrackerFailBackend(MockBackend):
-            def upsert_rows(self, sheet_name, rows, key_columns):
+            def upsert_rows(self, sheet_name, rows, key_columns, delete_stale=True):
                 if sheet_name == 'Agent Tracker':
                     raise ConnectionError("Tracker network error")
                 return super().upsert_rows(sheet_name, rows, key_columns)
@@ -1868,7 +1992,12 @@ class TestAgentTracker:
         assert 'Tracker network error' in results['Agent Tracker'].error
 
     def test_agent_tracker_sheets_synced_count(self):
-        """Sheets Synced should show correct counts (e.g. '9/9')."""
+        """Sheets Synced should show correct counts (e.g. '10/10').
+
+        v1.9.10 bumped this from 9/9 to 10/10 with the addition of
+        the 'Generated Rewards' tab (customer-facing rewards add-on,
+        required by default).
+        """
         _enable_all_optional_tabs()
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
@@ -1881,7 +2010,7 @@ class TestAgentTracker:
 
         tracker_row = [c for c in backend.upsert_calls
                        if c[0] == 'Agent Tracker'][0][1][0]
-        assert tracker_row['Sheets Synced'] == '9/9'
+        assert tracker_row['Sheets Synced'] == '10/10'
 
 
 
@@ -2057,27 +2186,49 @@ class TestEnhancedVendorReimbursement:
         assert rows[0]['Total Due to Vendor'] == 25.00  # receipt_total
 
     def test_dynamic_payment_method_columns(self):
-        """Each distinct payment method should get its own column."""
+        """Each distinct payment method should get its own column.
+
+        Column semantics (v1.9.10+): per-method column shows
+        ``customer_charged`` (= $12.50 for the seed line item with
+        method_amount=$25, customer_charged=$12.50, match=$12.50),
+        NOT ``method_amount`` (= $25.00).  The match portion is
+        carried in the new ``FAM Match`` column.
+        """
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         conn = get_connection()
 
-        # Look up the method_name_snapshot actually used in the payment line items
+        # Look up the method_name_snapshot actually used in the
+        # payment line items.  Skip system-managed methods (e.g.
+        # the v25-seeded Unallocated Funds) since their per-method
+        # column shows method_amount, not customer_charged — see
+        # ``test_uf_in_vendor_reimbursement.py`` for that contract.
         pm_row = conn.execute(
-            "SELECT method_name_snapshot FROM payment_line_items"
-            " WHERE transaction_id IN"
-            " (SELECT id FROM transactions WHERE market_day_id = ?)"
-            " LIMIT 1", (md_id,)
+            "SELECT pli.method_name_snapshot "
+            "FROM payment_line_items pli "
+            "JOIN payment_methods pm "
+            "  ON pm.id = pli.payment_method_id "
+            "WHERE pli.transaction_id IN "
+            " (SELECT id FROM transactions WHERE market_day_id = ?) "
+            "  AND COALESCE(pm.is_system, 0) = 0 "
+            "LIMIT 1", (md_id,)
         ).fetchone()
         pm_name = pm_row['method_name_snapshot']
 
         data = collect_sync_data(md_id)
         rows = data['Vendor Reimbursement']
         assert len(rows) >= 1
-        # The payment method name should be a column with the amount
+        # The payment method name should be a column with customer_charged
         assert pm_name in rows[0], \
             f"Expected '{pm_name}' in columns: {list(rows[0].keys())}"
-        assert rows[0][pm_name] == 25.00
+        # Per-method column = customer_charged ($12.50, the physical
+        # instrument the customer handed over).
+        assert rows[0][pm_name] == 12.50
+        # FAM Match column carries the match portion ($12.50).
+        assert rows[0]['FAM Match'] == 12.50
+        # Math identity: per-method + FAM Match = Total Due.
+        assert rows[0][pm_name] + rows[0]['FAM Match'] == \
+               rows[0]['Total Due to Vendor']
 
     def test_multiple_payment_methods(self):
         """Multiple payment methods create separate columns per vendor."""
@@ -2109,7 +2260,18 @@ class TestEnhancedVendorReimbursement:
             " VALUES (999, 'FAM-MPM-001', ?, ?, 3500, 'Confirmed')",
             (md_id, vendor['id']))
         # Payment line: 20 SNAP, 15 Cash
-        pm1 = conn.execute("SELECT id, name, match_percent FROM payment_methods WHERE name != 'Cash' LIMIT 1").fetchone()
+        # v1.9.10 follow-up (2026-05-01): explicitly filter out the
+        # system-managed Unallocated Funds method.  After the v25
+        # migration that method is always present; without the
+        # filter this test would pick UF as ``pm1`` and the new
+        # UF column-override (= shows method_amount, not
+        # customer_charged) would cause this test's assertions
+        # against ``customer_charged`` to fail.
+        pm1 = conn.execute(
+            "SELECT id, name, match_percent FROM payment_methods "
+            "WHERE name != 'Cash' AND COALESCE(is_system, 0) = 0 "
+            "LIMIT 1"
+        ).fetchone()
         conn.execute(
             "INSERT INTO payment_line_items"
             " (transaction_id, payment_method_id, method_name_snapshot,"
@@ -2130,8 +2292,18 @@ class TestEnhancedVendorReimbursement:
         assert len(rows) == 1
         assert 'Cash' in rows[0]
         assert pm1['name'] in rows[0]
+        # Cash: method_amount=1500, match=0, customer_charged=1500
+        # → column shows $15.00 (= customer_charged)
         assert rows[0]['Cash'] == 15.00
-        assert rows[0][pm1['name']] == 20.00
+        # SNAP: method_amount=2000, match=1000, customer_charged=1000
+        # → column shows $10.00 (= customer_charged, NOT method_amount)
+        assert rows[0][pm1['name']] == 10.00
+        # FAM Match column = SUM(match_amount) across methods
+        # = $10.00 (SNAP $10) + $0 (Cash) = $10.00
+        assert rows[0]['FAM Match'] == 10.00
+        # Math identity: $15 + $10 + $10 = $35 (Total Due).
+        assert rows[0]['Cash'] + rows[0][pm1['name']] + \
+               rows[0]['FAM Match'] == rows[0]['Total Due to Vendor']
 
     def test_fmnp_external_column(self):
         """FMNP External entries should appear in vendor reimbursement."""
@@ -2264,8 +2436,16 @@ class TestEnhancedVendorReimbursement:
         conn = get_connection()
         market = conn.execute("SELECT id FROM markets LIMIT 1").fetchone()
         vendor = conn.execute("SELECT id, name FROM vendors LIMIT 1").fetchone()
+        # Exclude the system-managed 'Unallocated Funds' method —
+        # the v33 zero-amount trigger enforces customer_charged=0
+        # AND match_amount=0 on those rows, so tests that synthesize
+        # non-zero PLI rows must pick a regular payment method.
+        # (This is also closer to production reality: real receipts
+        # never use UF as their primary method.)
         pm = conn.execute(
-            "SELECT id, name, match_percent FROM payment_methods LIMIT 1"
+            "SELECT id, name, match_percent FROM payment_methods "
+            " WHERE name != 'Unallocated Funds' "
+            " ORDER BY id LIMIT 1"
         ).fetchone()
 
         from fam.models.market_day import create_market_day
@@ -2311,8 +2491,13 @@ class TestEnhancedVendorReimbursement:
         ).fetchall()
         assert len(markets) == 2, "Need at least 2 markets in seed data"
         vendor = conn.execute("SELECT id, name FROM vendors LIMIT 1").fetchone()
+        # Skip the system-managed 'Unallocated Funds' method — it has
+        # a v33 trigger that rejects non-zero customer_charged /
+        # match_amount, which this test deliberately writes.
         pm = conn.execute(
-            "SELECT id, name, match_percent FROM payment_methods LIMIT 1"
+            "SELECT id, name, match_percent FROM payment_methods "
+            " WHERE name != 'Unallocated Funds' "
+            " ORDER BY id LIMIT 1"
         ).fetchone()
 
         from fam.models.market_day import create_market_day

@@ -215,31 +215,160 @@ class TestSettingsToggleNoLongerBlocked:
             "FMNP-cannot-be-deactivated guard was re-introduced. " \
             "FMNP is intentionally togglable as of v1.9.8."
 
-    def test_toggle_pm_does_not_special_case_fmnp(self):
+    def test_toggle_pm_no_hard_block_on_fmnp(self):
+        """v1.9.10 update: ``_toggle_pm`` may now show a confirmation
+        dialog when *activating* FMNP (informational only — explains
+        what activation actually controls), but it still must not
+        HARD-BLOCK the toggle the way v1.9.7 did.  The dialog returns
+        Yes/No and proceeds with the user's choice.
+
+        Source-level guard: no language about FMNP being a 'system'
+        method that 'cannot be deactivated' — that was the v1.9.7
+        pattern we removed."""
         import inspect
         from fam.ui.settings_screen import SettingsScreen
         src = inspect.getsource(SettingsScreen._toggle_pm)
-        # No FMNP-specific branching in _toggle_pm.  All payment methods
-        # toggle uniformly via update_payment_method.
-        assert "method['name'] == 'FMNP'" not in src, \
-            "_toggle_pm must not special-case FMNP — toggle is uniform"
-        assert "name == 'FMNP'" not in src
+        forbidden = [
+            "cannot be deactivated",
+            "cannot be toggled",
+            "system payment method",
+            "is_system",  # _toggle_pm shouldn't gate on is_system
+        ]
+        for phrase in forbidden:
+            assert phrase not in src, (
+                f"_toggle_pm contains forbidden hard-block phrase "
+                f"{phrase!r} — FMNP must remain togglable")
 
     def test_toggle_pm_calls_update_payment_method(self):
-        """Confirm the simplified _toggle_pm still does the actual write."""
+        """Confirm the simplified _toggle_pm still does the actual write
+        when DEACTIVATING (no warning path on deactivate)."""
         from fam.ui.settings_screen import SettingsScreen
         screen = MagicMock()
-        with patch('fam.ui.settings_screen.update_payment_method') as upm:
+        with patch('fam.ui.settings_screen.update_payment_method') as upm, \
+             patch('fam.models.payment_method.get_payment_method_by_id',
+                   return_value={'id': 42, 'name': 'SNAP'}):
             SettingsScreen._toggle_pm(screen, 42, current_active=True)
         upm.assert_called_once_with(42, is_active=False)
         screen._load_payment_methods.assert_called_once()
 
-    def test_toggle_pm_flips_inactive_to_active(self):
+    def test_toggle_pm_flips_inactive_to_active_for_non_fmnp(self):
+        """Non-FMNP method: activation is uniform, no warning dialog."""
         from fam.ui.settings_screen import SettingsScreen
         screen = MagicMock()
-        with patch('fam.ui.settings_screen.update_payment_method') as upm:
+        with patch('fam.ui.settings_screen.update_payment_method') as upm, \
+             patch('fam.models.payment_method.get_payment_method_by_id',
+                   return_value={'id': 42, 'name': 'SNAP'}):
             SettingsScreen._toggle_pm(screen, 42, current_active=False)
         upm.assert_called_once_with(42, is_active=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+# v1.9.10: FMNP-activation warning dialog
+# ══════════════════════════════════════════════════════════════════
+class TestFmnpActivationWarning:
+    """Activating FMNP from inactive state must surface a confirmation
+    dialog explaining what activation actually controls (in-line
+    matching only — Entry screen is unaffected).  Pinned because FAM
+    is not currently equipped to redeem physical FMNP checks, so
+    activation should remain a deliberate, eyes-open decision.
+    """
+
+    def test_activating_fmnp_shows_confirmation(self):
+        """current_active=False on FMNP → QMessageBox appears."""
+        from fam.ui.settings_screen import SettingsScreen
+        from PySide6.QtWidgets import QMessageBox
+        screen = MagicMock()
+        with patch('fam.ui.settings_screen.update_payment_method') as upm, \
+             patch('fam.models.payment_method.get_payment_method_by_id',
+                   return_value={'id': 9, 'name': 'FMNP'}), \
+             patch('fam.ui.settings_screen.QMessageBox') as mb_class:
+            mb_instance = MagicMock()
+            mb_instance.exec.return_value = QMessageBox.Yes
+            mb_class.return_value = mb_instance
+            # Wire the standard-button enum to behave normally.
+            mb_class.Warning = QMessageBox.Warning
+            mb_class.Yes = QMessageBox.Yes
+            mb_class.No = QMessageBox.No
+            SettingsScreen._toggle_pm(screen, 9, current_active=False)
+            # Dialog was constructed and exec'd.
+            mb_class.assert_called_once_with(screen)
+            mb_instance.exec.assert_called_once()
+        # User accepted → toggle proceeds.
+        upm.assert_called_once_with(9, is_active=True)
+
+    def test_activating_fmnp_user_declines_keeps_inactive(self):
+        """User clicks No → no DB write, FMNP stays inactive."""
+        from fam.ui.settings_screen import SettingsScreen
+        from PySide6.QtWidgets import QMessageBox
+        screen = MagicMock()
+        with patch('fam.ui.settings_screen.update_payment_method') as upm, \
+             patch('fam.models.payment_method.get_payment_method_by_id',
+                   return_value={'id': 9, 'name': 'FMNP'}), \
+             patch('fam.ui.settings_screen.QMessageBox') as mb_class:
+            mb_instance = MagicMock()
+            mb_instance.exec.return_value = QMessageBox.No
+            mb_class.return_value = mb_instance
+            mb_class.Warning = QMessageBox.Warning
+            mb_class.Yes = QMessageBox.Yes
+            mb_class.No = QMessageBox.No
+            SettingsScreen._toggle_pm(screen, 9, current_active=False)
+        # User declined → NO write happened.
+        upm.assert_not_called()
+        # The reload helpers must NOT fire either (no state change).
+        screen._load_payment_methods.assert_not_called()
+        screen._load_vendors.assert_not_called()
+
+    def test_deactivating_fmnp_does_not_warn(self):
+        """current_active=True on FMNP → no dialog, deactivation is
+        always safe (Entry screen is unaffected anyway)."""
+        from fam.ui.settings_screen import SettingsScreen
+        screen = MagicMock()
+        with patch('fam.ui.settings_screen.update_payment_method') as upm, \
+             patch('fam.models.payment_method.get_payment_method_by_id',
+                   return_value={'id': 9, 'name': 'FMNP'}), \
+             patch('fam.ui.settings_screen.QMessageBox') as mb_class:
+            mb_instance = MagicMock()
+            mb_class.return_value = mb_instance
+            SettingsScreen._toggle_pm(screen, 9, current_active=True)
+            # No dialog construction.
+            mb_class.assert_not_called()
+        upm.assert_called_once_with(9, is_active=False)
+
+    def test_activating_non_fmnp_does_not_warn(self):
+        """Activating SNAP / Cash / Food RX / etc. must not surface
+        a confirmation dialog."""
+        from fam.ui.settings_screen import SettingsScreen
+        for non_fmnp_name in ['SNAP', 'Cash', 'Food RX', 'JH Food Bucks']:
+            screen = MagicMock()
+            with patch('fam.ui.settings_screen.update_payment_method') as upm, \
+                 patch('fam.models.payment_method.get_payment_method_by_id',
+                       return_value={'id': 1, 'name': non_fmnp_name}), \
+                 patch('fam.ui.settings_screen.QMessageBox') as mb_class:
+                SettingsScreen._toggle_pm(screen, 1, current_active=False)
+                mb_class.assert_not_called(), (
+                    f"Activating {non_fmnp_name} should not show "
+                    f"the FMNP warning dialog")
+            upm.assert_called_once_with(1, is_active=True)
+
+    def test_warning_text_explains_entry_screen_independence(self):
+        """The dialog body must mention the Entry screen continues
+        to work (the user's pinned message)."""
+        import inspect
+        from fam.ui.settings_screen import SettingsScreen
+        src = inspect.getsource(SettingsScreen._toggle_pm)
+        # The informative text mentions both controls and the
+        # FMNP Entry screen independence.
+        assert 'Entry' in src, (
+            "Warning text should mention the FMNP Entry screen so "
+            "the user knows it stays functional regardless")
+        assert 'Receipt Intake' in src or 'in-line matching' in src, (
+            "Warning text should explain what activation does "
+            "control (in-line matching during receipt collection)")
+        # And mention that FAM doesn't currently redeem physical
+        # checks so this should stay off unless told otherwise.
+        assert 'FAM' in src and ('cash' in src.lower() or 'check' in src.lower()), (
+            "Warning text should note FAM does not currently "
+            "accept/cash physical FMNP checks")
 
 
 # ══════════════════════════════════════════════════════════════════

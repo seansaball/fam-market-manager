@@ -218,6 +218,12 @@ QPushButton#secondary_btn:pressed, QPushButton.secondary:pressed {{
     background-color: #c8ddd0;
 }}
 
+QPushButton#secondary_btn:disabled, QPushButton.secondary:disabled {{
+    background-color: #ECECEC;
+    color: {MEDIUM_GRAY};
+    border-color: {LIGHT_GRAY};
+}}
+
 /* ===== DANGER BUTTON ===== */
 QPushButton#danger_btn, QPushButton.danger {{
     background-color: {ERROR_COLOR};
@@ -240,6 +246,12 @@ QPushButton#danger_btn:pressed, QPushButton.danger:pressed {{
     border-color: #9A1515;
 }}
 
+QPushButton#danger_btn:disabled, QPushButton.danger:disabled {{
+    background-color: #ECECEC;
+    color: {MEDIUM_GRAY};
+    border-color: {LIGHT_GRAY};
+}}
+
 /* ===== DEFAULT BUTTON ===== */
 QPushButton {{
     background-color: {WHITE};
@@ -257,6 +269,17 @@ QPushButton:hover {{
 
 QPushButton:pressed {{
     background-color: #EAEAEA;
+}}
+
+/* Default-button disabled state.  Without an explicit rule, Qt's
+   built-in grey-out is suppressed by the rules above (which inherit
+   to disabled buttons), making blocked buttons look identical to
+   active ones — masking the AdjustmentDialog OK-gate signal that
+   protects against erroneous Unallocated Funds injection. */
+QPushButton:disabled {{
+    background-color: #ECECEC;
+    color: {MEDIUM_GRAY};
+    border-color: {LIGHT_GRAY};
 }}
 
 /* ===== INPUTS ===== */

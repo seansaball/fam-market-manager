@@ -1,7 +1,7 @@
 # FAM Market Manager — User Guide
 
 > **For volunteers, coordinators, and market day staff**
-> Version 1.9.8
+> Version 2.0.1
 
 ---
 
@@ -10,6 +10,19 @@
 FAM Market Manager helps you run a farmers market day from start to finish. You can record customer purchases, calculate FAM matching funds, track payments, attach receipt photos, and generate end-of-day reports — all from one application.
 
 This guide walks you through everything you need to know.
+
+## Companion documents
+
+This is the long-form manual. There are three other documents you should know about:
+
+| Document | Who it's for | When to use |
+|---|---|---|
+| **`EMERGENCY_RUNBOOK.md`** | Volunteers at the booth | Print this. When something breaks during a market day, find your symptom in the runbook and follow the steps. |
+| **`COORDINATOR_HANDBOOK.md`** | The person responsible for laptops, credentials, and rollouts | Setup, multi-laptop deployments, monthly reconciliation, escalation guidance. |
+| **`QUICK_REFERENCE.md`** | Volunteers at the booth | One-page cheat sheet. Print and tape behind the booth. |
+| **In-app Help** (sidebar) | Everyone, anytime | Articles, troubleshooting flows, and a live diagnostic. Search in plain English. |
+
+If you're a volunteer reading this on a phone in the middle of a problem, **stop** and use the Emergency Runbook or in-app Help instead — both are designed for that exact moment. This guide is more useful for learning the app between markets.
 
 ---
 
@@ -33,17 +46,18 @@ The application has two main areas:
 - **Sidebar (left):** A green menu with buttons for each section. Click a button to switch screens.
 - **Content area (right):** The active screen where you do your work.
 
-The sidebar sections are:
+The sidebar sections are listed in the same order as in the app:
 
 | Section | What It Does |
 |---------|-------------|
 | **Market** | Open and close market days |
 | **Receipt Intake** | Record customer purchases |
 | **Payment** | Process payments and calculate FAM match |
-| **FMNP Entry** | Record FMNP check entries |
 | **Adjustments** | Fix mistakes in past transactions |
+| **FMNP Entry** | Record FMNP checks at the vendor side |
 | **Reports** | View summaries, charts, and export data |
-| **Settings** | Manage markets, vendors, payment methods, cloud sync, and updates |
+| **Settings** | Manage markets, vendors, payment methods, **rewards**, cloud sync, and updates |
+| **Help** | Articles, troubleshooting, and a live diagnostic snapshot |
 
 ### Built-In Tutorial
 
@@ -245,10 +259,17 @@ If you need to correct a transaction after it was confirmed, use the Adjustments
 
 Use the filters at the top:
 - **Market:** Filter by market location
+- **Last Updated:** Date range picker — filters by the **most recent activity** (creation OR adjustment) on each transaction.  Set it to today to see what you worked on today, even if the underlying market day was months ago.
 - **Status:** Filter by Draft, Confirmed, Adjusted, or Voided
 - **Transaction ID:** Search by the FAM transaction ID (e.g., FAM-BPFM-20260306-0001)
 
-Click **"Search"** to find matching transactions.
+The Last Updated filter is **live** — change the range and the table refreshes immediately.  The other filters need a Search button click.
+
+The results table shows three dates per row, each with a different meaning:
+
+- **Market Date** — the business day this transaction's revenue belongs to (used for vendor reimbursement and the FAM Match Report)
+- **Created** — when this transaction was first entered into the app
+- **Last Updated** — the most recent activity (the Last Updated filter targets this column)
 
 ### Adjusting a transaction
 
@@ -260,9 +281,34 @@ Click **"Search"** to find matching transactions.
    - **Reason** — select why you are making the change
    - **Notes** — explain the adjustment
    - **Adjusted By** — enter your name
+   - **Payment breakdown** — adjust how each payment method contributed; the row inputs **cap at the receipt total** so you can't accidentally over-allocate
 4. Click **OK** to save
 
 The adjustment is recorded in the audit log with the old and new values.
+
+### Customer-gone path (when the customer can't pay more)
+
+Most adjustments happen **after** the customer has left the market — coordinators reconcile vendor receipts hours or days later.  When the adjustment would require the customer to physically pay more than they originally did, a popup appears asking:
+
+> "Can the customer still be charged?"
+
+Three scenarios trigger it:
+
+1. **Receipt total raised** but breakdown not updated — vendor reconciliation showed a higher total
+2. **Customer payment increased** in the breakdown — you raised a payment row's amount (e.g. correcting an under-recorded count of physical Food Bucks)
+3. **Denomination overage** — physical instruments (FMNP checks, Food Bucks) overshoot the receipt by less than one full unit
+
+**Click Yes** if you can still charge the customer (or if they did pay the additional amount and you're correcting under-recorded data).  Save proceeds normally.
+
+**Click No** if the customer is unavailable.  The system records what they ACTUALLY paid (the original amount) and adds an **Unallocated Funds** line item for the gap — FAM absorbs that amount.  The vendor still gets reimbursed in full so they're never short.  All Unallocated Funds activity is visible in:
+
+- **Audit Log** — every absorption gets a dedicated `UNALLOCATED_FUNDS` action with the dollar amount
+- **FAM Match Report** — new "FAM Absorbed" column + summary card alongside "FAM Match"
+- **Vendor Reimbursement** and **Detailed Ledger** — Unallocated Funds appears as its own per-method column
+
+### Denomination forfeit (Adjustments)
+
+If you're recording physical instruments (Food Bucks tokens, FMNP checks) and they overshoot the receipt — for example, the customer handed over 3 × $5 FMNP checks ($15 face value) against an $11 receipt — a popup asks you to confirm the **forfeit**.  FAM caps its match at what fits the receipt, the customer "forfeits" the unmatched portion of the FAM match they would have gotten, the vendor still gets paid the full receipt, and the customer still hands over the physical checks (you can't make change against them).  The audit log records the forfeit amount.
 
 ### Voiding a transaction
 
@@ -348,6 +394,16 @@ Use the Settings screen to manage the reference data used throughout the applica
 - **Activate/Deactivate:** Make a payment method available or unavailable
 
 > **About FMNP (v1.9.8+):** FMNP is now a togglable payment method like the others, **and it defaults to inactive on fresh installs / Load Defaults**.  When inactive, it does NOT appear in the Payment Screen's payment-method dropdown, but the dedicated **FMNP Entry** screen continues to work normally regardless.  Most markets leave FMNP inactive here because they handle FMNP exclusively through the FMNP Entry screen (vendor-matched at the booth).  Activate FMNP only if your market wants to record FMNP-as-a-payment-method on the customer's order at the FAM table.
+
+### Rewards tab
+
+Customer rewards (tokens, vouchers, extra dollars) given on top of the FAM match. Configured by the coordinator; volunteers see only the result on the payment confirmation dialog and the printed receipt.
+
+- **Master toggle:** Enable / disable all rewards. When off, no GIVE TO CUSTOMER zone appears on the confirmation dialog.
+- **Rules table:** Each row defines one rule (trigger method, threshold, reward method, reward amount, active toggle).
+- **Add Rule / Edit / Delete:** standard CRUD.
+
+See the **Rewards Program** section near the end of this guide for the full math, what gets recorded where, and how to handle voids that involved physical token hand-offs. See also the in-app help articles `rewards-overview`, `rewards-configure`, and `rewards-given-then-voided`.
 
 ### Preferences tab
 
@@ -566,25 +622,122 @@ go straight to Troubleshooting.
 
 ## Troubleshooting
 
-### The app will not open
+> **For market-day emergencies, use `EMERGENCY_RUNBOOK.md`.** It's
+> shorter, symptom-indexed, and designed to read on a phone in
+> 30 seconds. The notes below are a short summary; the runbook
+> goes deeper.
 
-Make sure you **extracted the zip file** before running. Right-click the zip file and choose "Extract All." Do not run the `.exe` directly from inside the zip.
+### Quick lookup
 
-### Windows SmartScreen warning
+| Symptom | Where to look |
+|---|---|
+| App won't open | Emergency Runbook §1 |
+| "Already running" message | Emergency Runbook §2 |
+| "Update did not complete" | Emergency Runbook §3 |
+| Need to update manually | Emergency Runbook §4 |
+| Need to roll back a bad update | Emergency Runbook §5 |
+| No internet at the venue | Emergency Runbook §6 |
+| Sync chip is red or yellow | Emergency Runbook §7 |
+| Rows missing from the shared sheet | Emergency Runbook §8 |
+| App is slow or hanging | Emergency Runbook §9 |
+| Voided the wrong transaction | Emergency Runbook §10 |
+| Gave reward tokens, then order was voided | Emergency Runbook §11 |
+| Customer wants to change a confirmed payment | Emergency Runbook §12 |
+| Sending diagnostic info without internet | Emergency Runbook §13 |
+| Data appears gone or corrupted | Emergency Runbook §14 |
 
-When you first run the app, Windows may show a SmartScreen warning. Click **"More info"** and then **"Run anyway."** This is normal for applications that are not distributed through the Microsoft Store.
+### Most-asked questions
 
-### "No active market day" messages
+#### The app will not open
 
-You need to open a market day before recording transactions. Go to the **Market** screen, select a market, enter your name, and click **"Open Market Day."**
+Most common cause is the single-instance lock holding from a previous crash. **Ctrl + Shift + Esc → Task Manager → end "FAM Manager.exe" → relaunch.** If still stuck, see Emergency Runbook §2 for the lock-file delete steps.
 
-### Payment does not balance
+If the app never opens (no window, no error), make sure you extracted the zip file before running — running `.exe` directly from inside a zip doesn't work.
 
-If the Remaining card shows a number other than $0.00, adjust the payment method amounts until the total allocated matches the receipt total exactly.
+#### Windows SmartScreen warning
 
-### Something went wrong
+On first launch, Windows may show a SmartScreen warning. Click **"More info"** then **"Run anyway."** This is normal for applications not distributed through the Microsoft Store.
 
-If you see an "Unexpected Error" dialog, the error details have been saved to `fam_manager.log` in your data folder (`%APPDATA%\FAM Market Manager\`). You can also open this folder from the About dialog. Share the log file with your coordinator or technical support if you need help.
+#### "No active market day" messages
+
+Open a market day first: **Market** sidebar item → select location → enter your name → **Open Market Day**.
+
+#### Payment does not balance
+
+If the Remaining card shows a number other than $0.00, click the **⚡ Auto-Distribute** button on the Payment screen. It balances all method amounts to match the receipt total exactly. Manual entry also works — just adjust amounts until Remaining is $0.00.
+
+#### "Stale market day was auto-closed" at startup
+
+Normal safety feature. A market day was left Open with a date earlier than today; the app closed it automatically so today's transactions don't get attributed to a past day. The closed day's transactions are intact. Just open a new market day for today.
+
+#### Something went wrong (generic "Unexpected Error" dialog)
+
+The error details are saved to `fam_manager.log` in your data folder. The fastest way to share is **Help → System Status → Copy Diagnostic Info** — that includes the last 30 lines of the log automatically. Paste into an email to your coordinator.
+
+#### "Network unavailable" in the sync error tooltip
+
+The laptop can't reach Google. Check your Wi-Fi. Once back online, the sync resumes automatically. As of v2.0, repeated network errors are coalesced into a single warning per cycle — your log won't fill up with stack traces during an outage.
+
+#### Multiple laptops at the same market
+
+Fully supported. Each laptop needs the same `market_code` and a different `device_tag`. See the in-app help article `multi-laptop-deployment` or the Coordinator Handbook for setup steps.
+
+---
+
+## Common operator scenarios
+
+A grab-bag of "I just want to know how to..." answers, written for the volunteer at the booth.
+
+### "The customer wants to add another receipt after I confirmed the payment"
+
+That's the **returning customer** flow. Sidebar → Receipt Intake → enter the customer's existing label (e.g., C-005) instead of creating a new one. The new receipt joins the existing day's record for that customer. They'll go through Payment again for just the new receipt.
+
+### "The customer wants to change a payment method after I confirmed"
+
+Use **Adjustments**, not Void. Sidebar → Adjustments → search by customer label / vendor / receipt total → Edit → modify payment lines → ⚡ Auto-Distribute → Save. The original confirmation is preserved in the audit log.
+
+### "I voided the wrong transaction"
+
+You can't un-void in the same session. Re-enter the transaction from scratch (Receipt Intake → Payment → Confirm). The void stays in the audit log as a correction; the new entry is fully valid.
+
+### "I gave the customer reward tokens but the order was voided"
+
+The Generated Rewards row stays as a historical record by design — pretending tokens went back hides a real inventory shortage. Write a sticky note: customer label, tokens given, void reason. Hand to the coordinator at end-of-day.
+
+### "I'm not seeing my data on the shared Google Sheet"
+
+Three checks:
+
+1. The sync indicator chip — green means it pushed; anything else means try Sync to Cloud
+2. Right tab on the sheet (receipts → "Detailed Ledger", vendor totals → "Vendor Reimbursement", FMNP → "FMNP Entries", rewards → "Generated Rewards")
+3. Filter the sheet by your `market_code` and `device_id` (Help → System Status to find the device_id)
+
+In-app: Help → Browse → search "data not on sheet" for the full troubleshooting flow.
+
+### "We have no internet at the market"
+
+Keep working. Everything works offline except sync itself. Auto-sync resumes when internet returns; or take the laptop home, click Sync to Cloud manually.
+
+### "I need to send a diagnostic but I have no signal"
+
+Help → System Status → Copy Diagnostic Info → Notepad → save to Desktop. Email it (or copy to USB) when you have signal.
+
+### "My laptop died mid-market — what about today's data?"
+
+Two layers of recovery:
+
+1. The plain-text **ledger backup** at `%APPDATA%\FAM Market Manager\fam_ledger_backup.txt` records every confirmed transaction in plain English. Open in Notepad on a different laptop.
+2. Auto-saved database backups in `%APPDATA%\FAM Market Manager\backups\` snapshot every 5 minutes during market days.
+
+If the laptop's hard drive is fully dead, the shared Google Sheet (if you'd been syncing) has every row through the last successful sync. Pull from there. See `restore-from-backup` in the in-app help for step-by-step instructions.
+
+### "I'm running a new laptop alongside an existing one — what do I need to know?"
+
+The shared sheet handles multi-laptop merging automatically — each laptop has a unique `device_id` and a same `market_code`. Customer labels can repeat (C-005 on laptop A and C-005 on laptop B are different customers — that's fine; the device_id keeps them separate). Coordinator does the laptop setup; see the Coordinator Handbook for the checklist.
+
+### "I keep seeing 'Sync skipped — network unavailable' in the log"
+
+That's the v2.0 quiet-logging feature working as intended. Before v2.0, an internet outage produced ~6 stack traces per sync tick (one per sheet tab). Now you get one concise warning per cycle. Nothing is wrong — sync will resume automatically when internet returns.
 
 ---
 
@@ -615,10 +768,164 @@ Example: `FAM-BPFM-20260306-0005` means the 5th transaction at Bethel Park Farme
 
 ### Customer Label Format
 
-Customer labels follow the pattern: **C-001**, **C-002**, etc.
+Customer labels follow the pattern: **C-001-{TAG}**, **C-002-{TAG}**, etc., where `{TAG}` is your laptop's 3-character device tag (e.g. `C-001-A1B`).
 
-These reset at the start of each new market day.
+The numeric portion (`001`, `002`, ...) resets at the start of each new market day.  The device tag is constant per laptop and shown in the header chip.
+
+**Why the tag exists:** when multiple laptops run at one market, every device independently generates `C-001`, `C-002`, ...  The tag turns each into a globally unique label so coordinators can refer to "C-005-A1B" or "C-005-LB1" without ambiguity.
+
+**Customizing the tag:** Settings → Preferences → Device Identity → Device Tag accepts 1-4 alphanumeric characters.  Set `LB1` for "Laptop 1", `MGR` for the manager's machine, etc.  Leave blank to use the auto-derived hash.
+
+**Legacy labels:** customer labels from before v1.9.9 keep their old `C-NNN` format (no tag).  They remain valid; only newly-generated labels carry the tag.
 
 ### Backup Retention
 
 The app keeps the **20 most recent** database backups. A typical market day produces ~3 backups (open, auto, close), so this retains approximately the last 6-7 market days of snapshots.
+
+---
+
+## Rewards Program (v2.0+)
+
+The Rewards feature is a **customer-facing marketing/loyalty add-on**.  When a customer pays for an order using a configured source payment method (e.g. SNAP), the FAM rep hands them physical scrip tokens (e.g. JH Food Bucks) at confirmation time as a thank-you.
+
+> ⚠️ **Important — not financial.** Rewards are NOT part of vendor reimbursement, NOT FAM match, and NOT linked to any payment line item.  The vendor does not see or redeem these tokens.  Reward amounts are NEVER stored against transactions — they are recomputed on demand from the rules + the order's customer-paid totals.
+
+### Default rule
+
+A fresh install seeds:
+
+> For every **$5.00 of SNAP** customer-paid in a confirmed order → hand the customer **one $2.00 JH Food Bucks token**.
+
+The rule is **active by default** in v2.0.  If your market does not run this loyalty program, disable it in Settings → Rewards (the rule is preserved for later re-enabling).
+
+### Math (whole-increment, NOT pro-rated)
+
+The customer earns one full reward unit per **whole** threshold crossed:
+
+| SNAP customer-paid | Food Bucks tokens earned |
+|---|---|
+| $4.99 | 0 ($0.00) |
+| $5.00 | 1 ($2.00) |
+| $7.50 | 1 ($2.00) — only one full $5 was crossed |
+| $10.00 | 2 ($4.00) |
+| $14.99 | 2 ($4.00) |
+| $15.00 | 3 ($6.00) |
+
+Source totals are summed **per customer order** (across all of the order's vendor receipts).  Voided transactions don't contribute.
+
+### Where you'll see rewards
+
+1. **Payment confirmation dialog** — the new "🎁 GIVE TO CUSTOMER" zone appears below the regular collect zone, listing the scrip the rep should hand out.  Purple/violet styling so it can't be confused with a payment item.
+2. **Printed receipt** — a "Rewards Earned" section near the bottom (between the financial summary and the thank-you footer).
+3. **Reports → Generated Rewards** — a derived table that recomputes against current data on every refresh.  Voiding a payment automatically removes that order's contribution.
+4. **Cloud sync** — uploads to a "Generated Rewards" sheet by default.
+
+### Configuring rewards (Settings → Rewards)
+
+* **Master toggle** — globally enable or disable the feature without losing your rules.
+* **Add Rule** — pick the source method (SNAP, Cash, anything active), the threshold dollar amount, and the reward method (must be a denominated method like Food Bucks, Food RX, JH Tokens — SNAP/Cash/FMNP cannot be reward methods because the rep doesn't physically hand them out).
+* **Multiple rules** — supported.  Each rule fires independently against its source method's order total.
+* **Disable / Delete** — Disable preserves the config; Delete is permanent.
+
+### When does a reward get recorded?
+
+A reward row is **written exactly once** — at the moment a payment is confirmed.  After that, the row is part of the historical record and is **never modified**.  This means:
+
+* **Pre-feature transactions don't appear retroactively.**  Turning the feature on (or adding a new rule) does NOT cause prior orders to suddenly show up in the Generated Rewards report — only orders confirmed *after* the rule was active will appear.
+* **Disabling the feature later does NOT wipe history.**  The Generated Rewards report still shows everything that was already given.
+* **Editing or deleting a rule does NOT change past rewards.**  The row keeps its snapshot of the rule that was active at the moment of confirmation.
+* **Voids and adjustments do NOT change past rewards.**  The cashier already handed the tokens; the row stays as the historical record.  Operationally, any conversation with the customer about a returned reward happens outside the app.
+
+This design is the same write-once posture as the printed customer receipt: a record of what actually happened at the time of payment, immune to later edits.
+
+---
+
+## Glossary
+
+Plain-English definitions of every term that shows up in the app, the printed receipt, the Google Sheet, and these docs. The in-app `glossary` article has the same content searchable from Help → Browse.
+
+### App and people
+
+| Term | Meaning |
+|---|---|
+| **FAM** | Food Assistance Match. The subsidy program. When the app says "FAM match" it means the dollars FAM contributes on top of what the customer pays. |
+| **FMNP** | Farmers' Market Nutrition Program. A state-funded voucher / check program separate from FAM. |
+| **Vendor** | A farmer or seller at the market. |
+| **Customer** | The shopper. Tracked by short label (e.g., C-005) across multiple receipts on the same day. |
+| **Coordinator** | The person who runs the market or the FAM program. Configures Settings, troubleshoots, reconciles end-of-day. |
+| **Volunteer** | The person at the booth running the app. |
+
+### Identifiers
+
+| Term | Meaning |
+|---|---|
+| **market_code** | The 4-letter code for a market location (e.g., `BPFM`). Set in Settings → Markets. Shows in the title bar in brackets. |
+| **device_id** | A short tag identifying *this laptop*. Used on the shared Google Sheet to tell which laptop produced each row. Defaults to a 3-character auto-derived tag; customizable in Settings → Preferences. |
+| **fam_transaction_id** | The unique ID for a transaction, e.g., `FAM-BPFM-20260501-0001`. Format: `FAM-<market_code>-<YYYYMMDD>-<NNNN>`. Adjustments search this. |
+
+### Concepts
+
+| Term | Meaning |
+|---|---|
+| **Composite key** | When the shared sheet matches a row by multiple columns at once (e.g., market_code + device_id + date + customer label), preventing two laptops from accidentally overwriting each other. |
+| **Upsert** | "Update or insert." When syncing, the app updates a matching row if one exists, or inserts a new row if not. |
+| **Audit log** | An append-only history of every change in the database (confirms, voids, adjustments). "Append-only" means rows are added but never modified or deleted, so it's a permanent record. |
+| **Service account** | A Google identity used by the app to authenticate to Sheets and Drive. The credentials JSON file is the proof of identity. Coordinators handle this; volunteers just receive the file once. |
+| **Drive folder ID** | The long string in a Google Drive folder URL. Where the app uploads photos. |
+| **Spreadsheet ID** | The long string in a Google Sheets URL. Identifies the shared workbook the app syncs to. |
+| **Soft delete** | The row stays in the database but is hidden from normal views. Used when something is "deleted" but still needs to be referenced for history. |
+| **Schema migration** | A database upgrade that runs automatically when the app launches a newer version against an older database file. Always preceded by a `.bak` snapshot. |
+
+### Money math
+
+| Term | Meaning |
+|---|---|
+| **Match cap** | The maximum FAM dollars a single market day can spend. Configured per market. Once hit, new orders show "Cap reached" and FAM contributes 0. |
+| **Match percent** | For each payment method, the percentage FAM matches. SNAP at 100% means $1 SNAP earns $1 FAM. FMNP at 50% means $5 FMNP earns $2.50 FAM. |
+| **Penny reconciliation** | Rounding cents so the totals on a multi-method payment add up exactly to the receipt total. Automatic. |
+| **Drift / drift cent** | The 1¢ rounding leftover that the app distributes between methods to keep totals exact. |
+| **Denominated payment** | A payment whose amount can only be a multiple of a fixed denomination (e.g., Food Bucks in $5 increments). The app prevents non-multiples. |
+| **Forfeit** | When a denominated payment overshoots the receipt (customer hands $15 of FMNP for an $11 receipt). Vendor gets full $11; customer "forfeits" the unmatched $4 of physical paper. |
+| **Unallocated funds** | Money that was on a confirmed transaction but isn't covered by any line after an adjustment. Shows in the audit log as `UNALLOCATED_FUNDS`. |
+
+### Sync
+
+| Term | Meaning |
+|---|---|
+| **Sync indicator chip** | The colored dot in the title bar showing the latest sync state (green/yellow/red/gray). |
+| **5-minute auto-sync** | The timer that triggers sync automatically while a market day is open. |
+| **60-write/min quota** | Google's rate limit on Sheets writes. The app paces itself to stay under it. |
+| **Offline-quiet logging** (v2.0) | When sync fails because of no internet, the log gets ONE warning per cycle instead of a full traceback per sheet tab. |
+
+### Files and folders
+
+| Term | Meaning |
+|---|---|
+| **Data folder** | `%APPDATA%\FAM Market Manager\` — where everything lives. |
+| **fam_data.db** | The main SQLite database file. Source of truth. |
+| **WAL** | Write-Ahead Log, a file SQLite uses while committing. You'll see `fam_data.db-wal` and `fam_data.db-shm` next to the main file. Don't move or delete them while the app is running. |
+| **Backup** | A `.db` file copied to `backups/` at fixed intervals during a market day. |
+| **Ledger backup** | `fam_ledger_backup.txt`, a plain-text human-readable copy of every confirmed transaction. |
+| **Pending-update marker** | `_pending_update.json`. A short note left behind by the updater so the new version can verify it actually installed. |
+| **Instance lock** | `.fam_instance.lock`. Prevents two copies of the app from running against the same data folder. |
+| **Update backup** | `_update_backup\` — previous version's binaries, kept for rollback. |
+
+### Status words
+
+| Term | Meaning |
+|---|---|
+| **Confirmed** | The operator clicked Confirm; FAM has committed match dollars. |
+| **Voided** | The transaction was cancelled. Match dollars are released; the customer didn't pay. |
+| **Adjusted** | A confirmed transaction was edited later. The audit log records what changed. |
+
+---
+
+## See also
+
+- **`EMERGENCY_RUNBOOK.md`** — symptom-indexed recovery steps for market-day disasters
+- **`COORDINATOR_HANDBOOK.md`** — setup, deployment, monthly reconciliation, escalation
+- **`QUICK_REFERENCE.md`** — printable single-page cheat sheet
+- **In-app Help** (sidebar) — articles, troubleshooting, and live diagnostic
+- **`README.md`** — developer-facing repo overview
+- **GitHub repository** — `https://github.com/seansaball/fam-market-manager`
+

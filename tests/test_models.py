@@ -369,7 +369,10 @@ class TestPaymentMethodCRUD:
 
     def test_get_all_payment_methods(self, fresh_db):
         _seed_full(fresh_db)
-        methods = get_all_payment_methods()
+        # ``include_system=False`` matches what the Payment-screen
+        # selection UIs pass — without this the schema-v25 seed
+        # ('Unallocated Funds') would inflate the count.
+        methods = get_all_payment_methods(include_system=False)
         assert len(methods) == 2
         assert methods[0]['sort_order'] <= methods[1]['sort_order']
 
@@ -380,8 +383,10 @@ class TestPaymentMethodCRUD:
             " VALUES ('Disabled', 50.0, 0, 99)"
         )
         fresh_db.commit()
-        all_m = get_all_payment_methods(active_only=False)
-        active = get_all_payment_methods(active_only=True)
+        all_m = get_all_payment_methods(
+            active_only=False, include_system=False)
+        active = get_all_payment_methods(
+            active_only=True, include_system=False)
         assert len(all_m) == 3
         assert len(active) == 2
 
@@ -1344,15 +1349,39 @@ class TestStatusValidation:
         assert updated['status'] == 'Draft'
 
     def test_valid_transaction_statuses_accepted(self, fresh_db):
-        """All valid statuses should be accepted without error."""
+        """All valid statuses should be accepted without error.
+
+        v1.9.10 hardening (Finding H-2): Voided is now a terminal
+        status — update_transaction refuses Voided -> non-Voided
+        transitions.  This test creates a fresh transaction for
+        each status so we exercise each assignment in isolation
+        rather than chaining a single transaction through every
+        status.  See test_voided_is_terminal for the terminal-
+        guard contract.
+        """
         from fam.models.transaction import update_transaction, VALID_TRANSACTION_STATUSES
         _seed_full(fresh_db)
-        txn_id, _ = create_transaction(1, 1, 5000)
 
         for status in VALID_TRANSACTION_STATUSES:
+            txn_id, _ = create_transaction(1, 1, 5000)
             update_transaction(txn_id, status=status)
             updated = get_transaction_by_id(txn_id)
             assert updated['status'] == status
+
+    def test_voided_is_terminal(self, fresh_db):
+        """v1.9.10 (Finding H-2): Voided -> non-Voided is rejected
+        at the model layer to prevent silent resurrection of a
+        voided transaction's full financial impact."""
+        from fam.models.transaction import update_transaction
+        _seed_full(fresh_db)
+        txn_id, _ = create_transaction(1, 1, 5000)
+        update_transaction(txn_id, status='Voided')
+        for forbidden in ('Confirmed', 'Adjusted', 'Draft'):
+            with pytest.raises(ValueError, match="Voided"):
+                update_transaction(txn_id, status=forbidden)
+        # Voided -> Voided is idempotent and accepted.
+        update_transaction(txn_id, status='Voided')
+        assert get_transaction_by_id(txn_id)['status'] == 'Voided'
 
     def test_invalid_order_status_rejected(self, fresh_db):
         """update_customer_order_status should reject unknown status values."""

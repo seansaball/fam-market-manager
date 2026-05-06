@@ -556,15 +556,19 @@ class TestMigrationChain:
 
         initialize_database()
 
-        bak_path = db_file + ".pre-migration.bak"
-        assert os.path.exists(bak_path), "Pre-migration backup should exist"
+        # v2.0.1: backup is version-stamped — match any of the new
+        # ``<db>.pre-migration-vN-to-vM-TS.bak`` files.
+        import glob as _glob
+        bak_candidates = _glob.glob(db_file + ".pre-migration*.bak")
+        assert bak_candidates, "Pre-migration backup should exist"
 
     def test_no_backup_on_fresh_install(self, fresh_db):
         """Fresh install should NOT create a .pre-migration.bak file."""
         _, db_file = fresh_db
         initialize_database()
-        bak_path = db_file + ".pre-migration.bak"
-        assert not os.path.exists(bak_path)
+        import glob as _glob
+        bak_candidates = _glob.glob(db_file + ".pre-migration*.bak")
+        assert not bak_candidates
 
 
 # Need os for the backup file checks

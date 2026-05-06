@@ -10,18 +10,21 @@ logger = logging.getLogger('fam.models.audit')
 
 # Human-readable labels for audit action codes
 ACTION_LABELS = {
-    'CREATE':        'Transaction Created',
-    'CONFIRM':       'Payment Confirmed',
+    'CREATE':            'Transaction Created',
+    'CONFIRM':           'Payment Confirmed',
     'ADJUST':            'Transaction Adjusted',
     'PAYMENT_ADJUSTED':  'Payment Methods Adjusted',
+    'UNALLOCATED_FUNDS': 'FAM Absorbed (Customer Gone)',
     'VOID':              'Voided',
+    'AUTO_CLOSE':        'Market Day Auto-Closed',
+    'REWARD_ISSUED':     'Reward Tokens Issued',
     'PAYMENT_SAVED':     'Payment Methods Saved',
-    'OPEN':          'Market Day Opened',
-    'CLOSE':         'Market Day Closed',
-    'REOPEN':        'Market Day Reopened',
-    'INSERT':        'Record Added',
-    'DELETE':        'Record Removed',
-    'UPDATE':        'Record Updated',
+    'OPEN':              'Market Day Opened',
+    'CLOSE':             'Market Day Closed',
+    'REOPEN':            'Market Day Reopened',
+    'INSERT':            'Record Added',
+    'DELETE':            'Record Removed',
+    'UPDATE':            'Record Updated',
 }
 
 
@@ -61,7 +64,14 @@ def get_audit_log(table_name=None, record_id=None, limit=100):
     if record_id:
         query += " AND record_id=?"
         params.append(record_id)
-    query += " ORDER BY changed_at DESC LIMIT ?"
+    # v1.9.10 follow-up (2026-05-01): ``id DESC`` is the natural
+    # tiebreaker when many audit rows share a ``changed_at``
+    # second.  Especially after the H8 fix made
+    # ``update_transaction`` self-audit, a single Adjust call
+    # writes 2-3 audit rows in the same second; without an id
+    # tiebreaker the row order on read is implementation-defined
+    # and tests that rely on most-recent-first see flaps.
+    query += " ORDER BY changed_at DESC, id DESC LIMIT ?"
     params.append(limit)
     rows = conn.execute(query, params).fetchall()
     return [dict(r) for r in rows]
@@ -85,7 +95,15 @@ def get_transaction_log(market_day_id=None, date_from=None, date_to=None,
     Returns:
         List of dicts with keys: id, changed_at, action, table_name, record_id,
         fam_transaction_id, vendor_name, market_name, market_day_date,
+        customer_label, zip_code,
         field_name, old_value, new_value, reason_code, notes, changed_by
+
+    v2.0.6: customer_label and zip_code are joined from
+    ``customer_orders`` so coordinator reports can correlate audit
+    actions with which customer (and which zip code) the action
+    affected.  NULL when the audit row references a transaction
+    with no customer_order (legacy data) or a non-transaction
+    record.
     """
     conn = get_connection()
     query = """
@@ -93,7 +111,8 @@ def get_transaction_log(market_day_id=None, date_from=None, date_to=None,
                al.field_name, al.old_value, al.new_value, al.reason_code,
                al.notes, al.changed_by, al.app_version, al.device_id,
                t.fam_transaction_id, v.name AS vendor_name,
-               m.name AS market_name, md.date AS market_day_date
+               m.name AS market_name, md.date AS market_day_date,
+               co.customer_label, co.zip_code
         FROM audit_log al
         LEFT JOIN transactions t
             ON al.record_id = t.id
@@ -101,6 +120,7 @@ def get_transaction_log(market_day_id=None, date_from=None, date_to=None,
         LEFT JOIN vendors v ON t.vendor_id = v.id
         LEFT JOIN market_days md ON t.market_day_id = md.id
         LEFT JOIN markets m ON md.market_id = m.id
+        LEFT JOIN customer_orders co ON t.customer_order_id = co.id
         WHERE al.table_name IN (
             'transactions', 'payment_line_items',
             'customer_orders', 'market_days', 'fmnp_entries'
@@ -125,7 +145,8 @@ def get_transaction_log(market_day_id=None, date_from=None, date_to=None,
         query += f" AND al.action IN ({placeholders})"
         params.extend(action_filter)
 
-    query += " ORDER BY al.changed_at DESC LIMIT ?"
+    # See ``get_audit_log`` for the id-tiebreaker rationale.
+    query += " ORDER BY al.changed_at DESC, al.id DESC LIMIT ?"
     params.append(limit)
 
     rows = conn.execute(query, params).fetchall()

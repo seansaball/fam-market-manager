@@ -1,6 +1,6 @@
 # FAM Market Manager — Technical Overview
 
-> **Version:** 1.9.8
+> **Version:** 1.9.9
 > **Last Updated:** April 2026
 > **Audience:** Developers, administrators, and stakeholders
 
@@ -116,7 +116,7 @@ The application runs as a standalone Windows desktop executable with local SQLit
 | Photo Upload | google-auth (AuthorizedSession) | Google Drive REST API |
 | Auto-Update | urllib.request (stdlib) | GitHub Releases API |
 | Packaging | PyInstaller | Standalone Windows executable |
-| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (1822 tests) |
+| Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (2 090+ tests) |
 
 **Runtime Dependencies** (`requirements.txt`):
 - `PySide6 >= 6.5.0`
@@ -140,7 +140,7 @@ fam-market-manager/
 │   ├── settings_io.py          # .fam file import/export
 │   ├── database/
 │   │   ├── connection.py       # Thread-local SQLite connections
-│   │   ├── schema.py           # Table creation + migrations (v1–v22)
+│   │   ├── schema.py           # Table creation + migrations (v1–v27)
 │   │   ├── seed.py             # Sample data (opt-in via tutorial)
 │   │   └── backup.py           # SQLite backup API + retention
 │   ├── models/
@@ -171,7 +171,7 @@ fam-market-manager/
 │   │       ├── payment_row.py  # Payment method entry widget + denomination validation
 │   │       └── summary_card.py # Metric display cards
 │   ├── help/                   # Structured help library — single source of truth (v1.9.8)
-│   │   ├── content.py          # Categories + 51 articles + 10 troubleshooting flows + accessors
+│   │   ├── content.py          # Categories + 52 articles + 10 troubleshooting flows + accessors
 │   │   ├── search.py           # Ranked substring search across articles + flows
 │   │   └── system_status.py    # Live diagnostic snapshot (never raises) + clipboard format
 │   ├── sync/
@@ -193,7 +193,7 @@ fam-market-manager/
 │       ├── log_reader.py       # Log file parser for Error Log sync tab
 │       ├── photo_storage.py    # Photo storage in {data_dir}/photos/ with SHA-256 hashing + resize
 │       └── photo_paths.py      # JSON encode/decode for multi-photo pipe-separated paths
-├── tests/                          # 1822 tests across 32 files
+├── tests/                          # 1857 tests across 33 files
 │   ├── test_match_formula.py       # Core formula verification
 │   ├── test_match_limit.py         # Daily cap logic
 │   ├── test_returning_customer.py  # Multi-visit tracking
@@ -314,6 +314,10 @@ Schema migrations run automatically on startup. Each migration is guarded by a t
 | v19-v20 | Added FK indexes (transactions.vendor_id, customer_orders.market_day_id, fmnp_entries.vendor_id, payment_line_items.payment_method_id) |
 | v20-v21 | Added indexes: transactions(customer_order_id), market_days(market_id, date), audit_log(table_name, record_id) |
 | v21-v22 | Converted all monetary REAL columns to INTEGER cents (markets.daily_match_limit, payment_methods.denomination, transactions.receipt_total, payment_line_items.method_amount/match_amount/customer_charged, fmnp_entries.amount) |
+| v22-v23 | (v1.9.8) UNIQUE constraint on `vendors.name` + `vendors.is_active=1` filter in receipt-intake/payment dropdowns |
+| v23-v24 | (v1.9.9) `vendor_payment_methods` junction table for per-vendor payment-method eligibility.  Permissive migration backfills every vendor with every payment method so coordinators tighten via Settings → Vendors → Methods |
+| v24-v25 | (v1.9.9) `payment_methods.is_system` BOOLEAN column + seeded `Unallocated Funds` system payment method for the Adjustments customer-gone recovery path |
+| v25-v27 | (v1.9.9) Defensive cleanup migration that drops a UNIQUE INDEX (`idx_customer_orders_unique_label`) installed by an abandoned in-flight v26 build.  No `_migrate_v25_to_v26` exists — v27 is the canonical successor to v25; the chain `if current_version < 27` runs the cleanup for installs at either v25 or v26 |
 
 ### 5.5 Database Triggers
 
@@ -359,7 +363,24 @@ The code is embedded in transaction IDs, CSV export filenames, ledger headers, r
 
 The Windows `MachineGuid` is captured from `HKLM\SOFTWARE\Microsoft\Cryptography` on first launch and stored in `app_settings`. Falls back to `hostname-{platform.node()}` if registry access fails. Appears in CSV exports, ledger headers, audit log entries, and the Agent Tracker sync tab.
 
-### 6.3 CSV Export Identity Columns
+### 6.3 Device Tag (v1.9.9)
+
+A 1-4 character tag derived from the device's MachineGuid (SHA1 hash → first 3 hex chars uppercased) and embedded in every customer label generated on this device.  Format: `C-NNN-{TAG}` (e.g. `C-005-A1B`).
+
+**Why it exists:** five laptops at one market each generate `C-001`, `C-002`, `C-003` independently — without a tag, "look up C-005" is ambiguous across the five devices, and the synced Sheets reports show duplicate-looking customer IDs (technically separated by the device_id metadata column, but visually identical to humans).
+
+**Override:** Settings → Preferences → Device Identity → Device Tag accepts 1-4 alphanumeric characters (e.g. `LB1` for "Laptop 1").  When set, replaces the auto-derived hash.  Stored in `app_settings.device_tag_override`.
+
+**Header chip:** main window header bar shows `Device: A1B` so coordinators see at a glance which device they're on.
+
+**Resolution order** (`fam.utils.app_settings.get_device_tag()`):
+1. Override row (if set, validated 1-4 alphanumeric upper-cased)
+2. SHA1(device_id)[:3].upper()
+3. `'X00'` sentinel (only if device_id is missing — production code always has it captured at startup)
+
+**Backward compatibility:** when no device_id is captured (test environment, very-early startup), `generate_customer_label` falls back to the legacy `C-NNN` format.  Existing pre-v1.9.9 labels stay readable; only newly-generated labels carry the tag.
+
+### 6.4 CSV Export Identity Columns
 
 All CSV exports inject `market_code` and `device_id` as the first two columns, allowing the finance team to consolidate reports from multiple markets/devices.
 
@@ -628,7 +649,23 @@ When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is
 
 ## 13. Testing
 
-**1822 tests** across 32 test files:
+**2 090 tests** across 40+ test files.
+
+> **Mandatory release gate.** Every release must pass the full
+> Production Readiness Audit before tagging or distribution:
+>
+> ```bat
+> scripts\run_release_audit.bat
+> ```
+>
+> The runner executes three gates: full pytest suite, production
+> simulation (`scripts/production_sim.py`), and v1.9.9 stress
+> simulation (`scripts/v1_9_9_stress_sim.py`).  See
+> `docs/RELEASE_AUDIT_PROCEDURE.md` for the full procedure and
+> `docs/PRODUCTION_READINESS_v1.9.9.md` for the inaugural audit
+> report.
+
+### 13.1 Test files
 
 | File | Tests | Coverage |
 |------|-------|----------|

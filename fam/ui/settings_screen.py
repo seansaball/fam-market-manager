@@ -2,6 +2,9 @@
 
 import logging
 import os
+import sqlite3
+
+from datetime import datetime
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -9,7 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QMessageBox, QDialog, QFileDialog, QScrollArea,
     QFormLayout, QDialogButtonBox, QSizePolicy, QProgressBar, QComboBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QBrush
 
 from fam.database.connection import get_connection
@@ -24,11 +27,13 @@ from fam.models.vendor import (
 from fam.models.payment_method import (
     get_all_payment_methods, create_payment_method, update_payment_method,
     get_market_payment_method_ids, assign_payment_method_to_market,
-    unassign_payment_method_from_market
+    unassign_payment_method_from_market,
+    get_vendor_payment_method_ids, assign_payment_method_to_vendor,
+    unassign_payment_method_from_vendor,
 )
 from fam.ui.styles import (
     WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ACCENT_GREEN,
-    BACKGROUND, TEXT_COLOR, SUBTITLE_GRAY
+    BACKGROUND, TEXT_COLOR, SUBTITLE_GRAY, HARVEST_GOLD,
 )
 from fam.ui.helpers import (
     make_field_label, make_item, make_action_btn, configure_table,
@@ -279,7 +284,7 @@ class MatchLimitDialog(QDialog):
         self.limit_spin = NoScrollDoubleSpinBox()
         self.limit_spin.setRange(0.01, 99999.99)
         self.limit_spin.setDecimals(2)
-        self.limit_spin.setPrefix("$")
+        self.limit_spin.setPrefix("$ ")
         limit_cents = market.get('daily_match_limit') or 10000
         self.limit_spin.setValue(cents_to_dollars(limit_cents))
         layout.addRow("Daily Match Limit:", self.limit_spin)
@@ -386,10 +391,24 @@ class AssignPaymentMethodsDialog(QDialog):
         info.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(info)
 
-        # Build checkboxes for all payment methods
+        # Build checkboxes for all payment methods.
+        #
+        # v2.0.6 fix: hide system-managed methods (``is_system=1``) —
+        # currently just "Unallocated Funds" — from this dialog.
+        # System methods are background categories the engine writes
+        # to internally (the "customer gone" Adjustment path injects
+        # an UF row to absorb the gap); they are NEVER customer-
+        # facing payment methods a coordinator can opt in or out of.
+        # Showing them as unchecked checkboxes was confusing because:
+        #   * Unchecking has no effect at the engine layer (the
+        #     model writes UF unconditionally on the absorb path).
+        #   * The v34 trigger enforces UF rows have customer=0 and
+        #     match=0, so they never affect financial totals.
+        # Hide them so the dialog shows ONLY methods the operator
+        # actually controls.
         self._checkboxes = []
         assigned_ids = get_market_payment_method_ids(market['id'])
-        all_methods = get_all_payment_methods()
+        all_methods = get_all_payment_methods(include_system=False)
 
         from PySide6.QtWidgets import QScrollArea
         scroll = QScrollArea()
@@ -430,6 +449,107 @@ class AssignPaymentMethodsDialog(QDialog):
         layout.addWidget(scroll)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_checked_payment_method_ids(self):
+        """Return set of payment method IDs that are checked."""
+        return {
+            cb.property("pm_id")
+            for cb in self._checkboxes
+            if cb.isChecked()
+        }
+
+
+class VendorEligiblePaymentMethodsDialog(QDialog):
+    """Per-vendor payment-method eligibility editor (schema v24+).
+
+    Mirrors ``AssignPaymentMethodsDialog`` (which is at the market
+    level) but operates on a single vendor.  Determines which payment
+    methods this vendor can accept on the Payment screen — the
+    practical effect is the row's vendor dropdown only lists vendors
+    that are registered for the selected denominated method.
+    """
+
+    def __init__(self, vendor, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Eligible Payment Methods for: {vendor['name']}")
+        self.setMinimumWidth(440)
+        self.setMinimumHeight(420)
+        self.vendor = vendor
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {BACKGROUND}; }}
+            QLabel {{ background-color: transparent; color: {TEXT_COLOR}; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        info = QLabel(
+            f"Check payment methods <b>{vendor['name']}</b> is eligible to "
+            f"accept.  This determines which vendors appear in the Payment "
+            f"screen's vendor dropdown when a denominated method (e.g. Food "
+            f"Bucks, FMNP) is selected."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size: 12px;")
+        layout.addWidget(info)
+
+        # One checkbox per active payment method (plus inactive ones marked).
+        # v2.0.6: hide system-managed methods (Unallocated Funds) — see
+        # ``AssignPaymentMethodsDialog`` for the rationale.
+        self._checkboxes = []
+        assigned_ids = get_vendor_payment_method_ids(vendor['id'])
+        all_methods = get_all_payment_methods(include_system=False)
+
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ border: 1px solid {LIGHT_GRAY};"
+            f" border-radius: 6px; }}")
+        scroll_widget = QWidget()
+        scroll_widget.setStyleSheet(f"background-color: {WHITE};")
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(6)
+
+        for m in all_methods:
+            label = f"{m['name']} ({m['match_percent']:.0f}% match"
+            if m.get('denomination'):
+                from fam.utils.money import cents_to_dollars
+                label += f", ${cents_to_dollars(m['denomination']):.2f} denom"
+            label += ")"
+            if not m['is_active']:
+                label += " (inactive)"
+            cb = QCheckBox(label)
+            cb.setChecked(m['id'] in assigned_ids)
+            cb.setProperty("pm_id", m['id'])
+            cb.setStyleSheet(f"""
+                QCheckBox {{
+                    font-size: 13px; padding: 4px;
+                    background-color: {WHITE};
+                }}
+                QCheckBox::indicator {{
+                    width: 16px; height: 16px;
+                    background-color: {WHITE};
+                    border: 2px solid #AAAAAA;
+                    border-radius: 3px;
+                }}
+                QCheckBox::indicator:checked {{
+                    background-color: {ACCENT_GREEN};
+                    border-color: {PRIMARY_GREEN};
+                }}
+            """)
+            scroll_layout.addWidget(cb)
+            self._checkboxes.append(cb)
+
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -730,8 +850,35 @@ class ImportPreviewDialog(QDialog):
 
 # ── Main Settings Screen ─────────────────────────────────────
 
+
+def _settings_changed_by() -> str:
+    """Resolve the ``changed_by`` attribution for audit_log writes
+    initiated from the Settings screen.
+
+    Convention (matches admin_screen.py): use the open market day's
+    ``opened_by`` if there is one, otherwise fall back to "Admin".
+    Settings edits OUTSIDE an open market day land as 'Admin'.
+    """
+    try:
+        from fam.models.market_day import get_open_market_day
+        open_md = get_open_market_day()
+        return (open_md.get('opened_by') if open_md else None) or 'Admin'
+    except Exception:
+        return 'Admin'
+
+
 class SettingsScreen(QWidget):
     """Admin settings for managing reference data."""
+
+    # v2.0.6: settings changes (vendor / payment-method / market
+    # add / edit / toggle / delete) emit this signal so the main
+    # window can trigger a full-scope cloud sync.  Settings affect
+    # rows across all markets — a vendor rename should propagate
+    # to every market's Vendor Reimbursement row, not just today's
+    # — so this signal connects to a slot that bypasses the open-
+    # market-day narrow-scope optimization.  See
+    # ``MainWindow._on_settings_changed`` for the routing.
+    settings_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -794,6 +941,7 @@ class SettingsScreen(QWidget):
         self.tabs.addTab(self._build_markets_tab(), "Markets")
         self.tabs.addTab(self._build_vendors_tab(), "Vendors")
         self.tabs.addTab(self._build_payment_methods_tab(), "Payment Methods")
+        self.tabs.addTab(self._build_rewards_tab(), "Rewards")
         self.tabs.addTab(self._build_preferences_tab(), "Preferences")
         self.cloud_sync_tab = self._build_cloud_sync_tab()
         self.tabs.addTab(self.cloud_sync_tab, "Cloud Sync")
@@ -841,7 +989,13 @@ class SettingsScreen(QWidget):
         self.markets_table.setHorizontalHeaderLabels(
             ["ID", "Name", "Address", "Match Limit", "Active", "Actions"]
         )
-        configure_table(self.markets_table, actions_col=5, actions_width=450)
+        # actions_width sized to fit Edit (50) + Vendors (60) + Payments
+        # (65) + Match Limit (75) + Limit On (65) + Deactivate (70) +
+        # Delete (50) + 6 spacings (6×3) + widget margins (4) = 457px
+        # plus buffer for column-header decoration.  v1.9.9 added the
+        # Delete button — without bumping from the original 450 the
+        # right side of "Delete" gets clipped.
+        configure_table(self.markets_table, actions_col=5, actions_width=510)
         layout.addWidget(self.markets_table)
 
         return tab
@@ -879,11 +1033,14 @@ class SettingsScreen(QWidget):
         fl.addWidget(add_btn)
         layout.addWidget(form)
 
+        # Vendors table — column layout is built dynamically in
+        # ``_load_vendors`` because per-payment-method columns
+        # (one per active, non-system method) get inserted between
+        # the static identity columns and the Actions cell.  This
+        # gives managers an at-a-glance ✓/✗ matrix of which vendor
+        # accepts which payment method without having to open the
+        # per-vendor Methods dialog one by one.
         self.vendors_table = QTableWidget()
-        self.vendors_table.setColumnCount(7)
-        self.vendors_table.setHorizontalHeaderLabels(
-            ["ID", "Name", "Contact", "Check Payable To", "ACH", "Active", "Actions"])
-        configure_table(self.vendors_table, actions_col=6, actions_width=220)
         layout.addWidget(self.vendors_table)
 
         return tab
@@ -961,12 +1118,292 @@ class SettingsScreen(QWidget):
 
         return tab
 
+    # ── Rewards Tab (v1.9.10+) ───────────────────────────────
+    #
+    # Coordinator-facing config for the customer-facing rewards
+    # add-on.  This tab does NOT touch any financial calculation —
+    # rewards are purely a marketing/loyalty layer where the FAM
+    # rep hands physical scrip to the customer at confirmation
+    # time.  See ``fam/utils/rewards.py`` for the full disclaimer.
+
+    def _build_rewards_tab(self):
+        from fam.utils.app_settings import is_rewards_enabled
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(12)
+
+        # ── Disclaimer banner ────────────────────────────────
+        banner = QLabel(
+            "<b>Rewards Program (informational add-on)</b><br>"
+            "Rewards are physical scrip the FAM rep hands the "
+            "customer at the time of payment.  They do "
+            "<b>NOT</b> affect vendor reimbursement, FAM match, "
+            "the daily match cap, or any line-item calculation.  "
+            "No reward amount is stored against transactions — "
+            "the value is recomputed on demand from rule "
+            "config × source-method customer_charged totals."
+        )
+        banner.setWordWrap(True)
+        banner.setStyleSheet(
+            f"background-color: #FFF8E1; "
+            f"border: 1px solid {HARVEST_GOLD}; "
+            f"border-radius: 6px; padding: 10px; font-size: 12px;")
+        layout.addWidget(banner)
+
+        # ── Master enable/disable toggle ─────────────────────
+        master = QFrame()
+        master.setStyleSheet(_COMPACT_FRAME)
+        ml = QHBoxLayout(master)
+        ml.addWidget(make_field_label("Rewards Program"))
+        self.rewards_enabled_check = QCheckBox(
+            "Enabled — show reward lines on the payment "
+            "confirmation dialog and printed receipt")
+        self.rewards_enabled_check.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: 13px; padding: 4px;
+                background-color: transparent;
+            }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                background-color: {WHITE};
+                border: 2px solid #AAAAAA;
+                border-radius: 3px;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {ACCENT_GREEN};
+                border-color: {PRIMARY_GREEN};
+            }}
+        """)
+        self.rewards_enabled_check.setChecked(is_rewards_enabled())
+        self.rewards_enabled_check.toggled.connect(
+            self._on_rewards_enabled_toggled)
+        ml.addWidget(self.rewards_enabled_check)
+        ml.addStretch()
+        layout.addWidget(master)
+
+        # ── Add-rule form ────────────────────────────────────
+        # Source × ratio × reward — populated when the user clicks
+        # "Add Rule".  Source method = any active method (incl.
+        # SNAP/Cash/etc.).  Reward method = denominated only.
+        form = QFrame()
+        form.setStyleSheet(_COMPACT_FRAME)
+        fl = QHBoxLayout(form)
+
+        fl.addWidget(make_field_label("For every"))
+        self.reward_threshold_spin = NoScrollDoubleSpinBox()
+        self.reward_threshold_spin.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.reward_threshold_spin.setStyleSheet(_FORM_INPUT_STYLE)
+        self.reward_threshold_spin.setRange(0.01, 99999.99)
+        self.reward_threshold_spin.setDecimals(2)
+        self.reward_threshold_spin.setPrefix("$ ")
+        self.reward_threshold_spin.setValue(5.00)
+        self.reward_threshold_spin.setFixedWidth(110)
+        fl.addWidget(self.reward_threshold_spin)
+
+        fl.addWidget(make_field_label("of"))
+        self.reward_source_combo = QComboBox()
+        self.reward_source_combo.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.reward_source_combo.setStyleSheet(_FORM_INPUT_STYLE)
+        fl.addWidget(self.reward_source_combo, 1)
+
+        fl.addWidget(make_field_label("→ give"))
+        self.reward_unit_spin = NoScrollDoubleSpinBox()
+        self.reward_unit_spin.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.reward_unit_spin.setStyleSheet(_FORM_INPUT_STYLE)
+        self.reward_unit_spin.setRange(0.01, 99999.99)
+        self.reward_unit_spin.setDecimals(2)
+        self.reward_unit_spin.setPrefix("$ ")
+        self.reward_unit_spin.setValue(2.00)
+        self.reward_unit_spin.setFixedWidth(110)
+        fl.addWidget(self.reward_unit_spin)
+
+        fl.addWidget(make_field_label("of"))
+        self.reward_target_combo = QComboBox()
+        self.reward_target_combo.setFixedHeight(_FORM_ROW_HEIGHT)
+        self.reward_target_combo.setStyleSheet(_FORM_INPUT_STYLE)
+        self.reward_target_combo.setToolTip(
+            "Reward methods are limited to denominated payment "
+            "methods (physical scrip the FAM rep can hand out).  "
+            "SNAP, Cash, and FMNP cannot be reward methods.")
+        fl.addWidget(self.reward_target_combo, 1)
+
+        add_btn = QPushButton("Add Rule")
+        add_btn.setObjectName("primary_btn")
+        add_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        add_btn.setStyleSheet(_FORM_BTN_STYLE)
+        add_btn.clicked.connect(self._add_reward_rule)
+        fl.addWidget(add_btn)
+        layout.addWidget(form)
+
+        # ── Rules table ──────────────────────────────────────
+        self.rewards_table = QTableWidget()
+        self.rewards_table.setColumnCount(6)
+        self.rewards_table.setHorizontalHeaderLabels(
+            ["ID", "Source Method", "Per", "Reward", "Active",
+             "Actions"]
+        )
+        configure_table(
+            self.rewards_table, actions_col=5, actions_width=200)
+        layout.addWidget(self.rewards_table)
+
+        return tab
+
+    def _populate_reward_method_combos(self):
+        """Fill the source / target combos for the add-rule form.
+
+        Source = any ACTIVE non-system payment method (incl.
+        non-denominated like SNAP/Cash).
+        Target = ACTIVE non-system DENOMINATED methods only.
+        """
+        from fam.models.payment_method import get_all_payment_methods
+        all_methods = get_all_payment_methods(
+            active_only=True, include_system=False)
+        # Source dropdown — every active method.
+        self.reward_source_combo.clear()
+        for m in all_methods:
+            self.reward_source_combo.addItem(m['name'], m['id'])
+        # Target dropdown — denominated methods only.
+        self.reward_target_combo.clear()
+        for m in all_methods:
+            if m.get('denomination') and m['denomination'] > 0:
+                label = (f"{m['name']} "
+                         f"(${m['denomination']/100:.2f} denom)")
+                self.reward_target_combo.addItem(label, m['id'])
+
+    def _on_rewards_enabled_toggled(self, checked: bool):
+        from fam.utils.app_settings import set_rewards_enabled
+        set_rewards_enabled(bool(checked))
+
+    def _add_reward_rule(self):
+        from fam.models.reward_rule import create_reward_rule
+        from fam.utils.money import dollars_to_cents
+
+        source_id = self.reward_source_combo.currentData()
+        target_id = self.reward_target_combo.currentData()
+        threshold = dollars_to_cents(
+            self.reward_threshold_spin.value())
+        reward_unit = dollars_to_cents(
+            self.reward_unit_spin.value())
+
+        if source_id is None or target_id is None:
+            QMessageBox.warning(
+                self, "Add Rule",
+                "Both source and reward methods must be selected.")
+            return
+        if source_id == target_id:
+            QMessageBox.warning(
+                self, "Add Rule",
+                "Source and reward methods must differ — "
+                "handing out the same instrument the customer "
+                "just paid with is a nonsensical config.")
+            return
+        try:
+            create_reward_rule(
+                source_method_id=source_id,
+                threshold_cents=threshold,
+                reward_method_id=target_id,
+                reward_unit_cents=reward_unit,
+                changed_by=_settings_changed_by(),
+            )
+        except ValueError as e:
+            QMessageBox.warning(self, "Add Rule", str(e))
+            return
+        except Exception:
+            logger.exception("Failed to add reward rule")
+            QMessageBox.warning(
+                self, "Add Rule",
+                "Could not add the rule (see log).")
+            return
+        self._load_reward_rules()
+        # v2.0.6: reward rules drive Generated Rewards rows on the
+        # cloud sheet — notify so the next sync reflects the new
+        # rule's effect on subsequent transactions.
+        self.settings_changed.emit()
+
+    def _load_reward_rules(self):
+        from fam.models.reward_rule import get_all_reward_rules
+        from fam.models.payment_method import get_all_payment_methods
+
+        # Refresh combo sources in case methods were added/changed.
+        self._populate_reward_method_combos()
+
+        all_methods = {
+            m['id']: m for m in get_all_payment_methods(
+                active_only=False, include_system=True)}
+        rules = get_all_reward_rules()
+        self.rewards_table.setSortingEnabled(False)
+        self.rewards_table.setRowCount(0)
+        self.rewards_table.setRowCount(len(rules))
+        for i, r in enumerate(rules):
+            src = all_methods.get(
+                r['source_method_id'], {}).get('name', '?')
+            tgt = all_methods.get(
+                r['reward_method_id'], {}).get('name', '?')
+            self.rewards_table.setItem(
+                i, 0, make_item(str(r['id']), r['id']))
+            self.rewards_table.setItem(i, 1, make_item(src))
+            self.rewards_table.setItem(i, 2, make_item(
+                f"${r['threshold_cents']/100:.2f}",
+                r['threshold_cents']))
+            self.rewards_table.setItem(i, 3, make_item(
+                f"${r['reward_unit_cents']/100:.2f} {tgt}",
+                r['reward_unit_cents']))
+            active_item = make_item(
+                "Yes" if r['is_active'] else "No")
+            active_item.setForeground(QBrush(QColor(
+                ACCENT_GREEN if r['is_active'] else ERROR_COLOR)))
+            self.rewards_table.setItem(i, 4, active_item)
+
+            action_widget = QWidget()
+            al = QHBoxLayout(action_widget)
+            al.setContentsMargins(2, 2, 2, 2)
+            al.setSpacing(3)
+            rid = r['id']
+            is_active = r['is_active']
+            toggle_btn = make_action_btn(
+                "Disable" if is_active else "Enable", 70)
+            toggle_btn.clicked.connect(
+                lambda _, rid=rid, ia=is_active:
+                    self._toggle_reward_rule(rid, ia))
+            al.addWidget(toggle_btn)
+            del_btn = make_action_btn("Delete", 60)
+            del_btn.clicked.connect(
+                lambda _, rid=rid: self._delete_reward_rule(rid))
+            al.addWidget(del_btn)
+            self.rewards_table.setCellWidget(i, 5, action_widget)
+            self.rewards_table.setRowHeight(i, 42)
+        self.rewards_table.setSortingEnabled(True)
+
+    def _toggle_reward_rule(self, rid: int, current_active: int):
+        from fam.models.reward_rule import update_reward_rule
+        update_reward_rule(
+            rid, is_active=0 if current_active else 1,
+            changed_by=_settings_changed_by())
+        self._load_reward_rules()
+        self.settings_changed.emit()
+
+    def _delete_reward_rule(self, rid: int):
+        confirm = QMessageBox.question(
+            self, "Delete Reward Rule",
+            "Permanently remove this reward rule?  Use Disable "
+            "instead if you want to preserve the config for later.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        from fam.models.reward_rule import delete_reward_rule
+        delete_reward_rule(rid, changed_by=_settings_changed_by())
+        self._load_reward_rules()
+        self.settings_changed.emit()
+
     # ── Preferences Tab ───────────────────────────────────────
 
     def _build_preferences_tab(self):
         from fam.utils.app_settings import (
             get_large_receipt_threshold, set_large_receipt_threshold,
-            get_market_code, get_device_id
+            get_market_code, get_device_id,
+            get_device_tag, get_device_tag_override,
         )
 
         tab = QWidget()
@@ -985,7 +1422,10 @@ class SettingsScreen(QWidget):
             "These identifiers distinguish this device's data when "
             "multiple markets send reports to the finance team. "
             "The market code is automatically derived from the market "
-            "name when a market day is opened."
+            "name when a market day is opened.  The device tag (3-4 "
+            "chars) is appended to every customer label generated on "
+            "this laptop (e.g. \"C-005-A1B\") so multi-laptop "
+            "deployments at one market never see colliding customer IDs."
         )
         id_desc.setWordWrap(True)
         id_desc.setStyleSheet(
@@ -1030,6 +1470,70 @@ class SettingsScreen(QWidget):
 
         id_fl.addStretch()
         layout.addWidget(id_frame)
+
+        # ── Device tag editor (sub-row) ────────────────────────
+        # Read-only auto-derived tag is shown alongside an editable
+        # override.  Empty override = use the auto value; non-empty
+        # override = use the typed value (1-4 alphanumeric chars).
+        tag_frame = QFrame()
+        tag_frame.setStyleSheet(_COMPACT_FRAME)
+        tag_fl = QHBoxLayout(tag_frame)
+
+        tag_lbl = make_field_label("Device Tag")
+        tag_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        tag_fl.addWidget(tag_lbl)
+
+        self._device_tag_display = QLabel(get_device_tag())
+        self._device_tag_display.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {TEXT_COLOR}; "
+            "letter-spacing: 3px; background: transparent; padding: 0 8px;"
+        )
+        self._device_tag_display.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._device_tag_display.setToolTip(
+            "The active device tag — appended to every new customer "
+            "label.  Reflects the override below if set, otherwise "
+            "an auto-derived hash of this device's MachineGuid.")
+        tag_fl.addWidget(self._device_tag_display)
+
+        tag_fl.addSpacing(20)
+
+        override_lbl = make_field_label("Override")
+        override_lbl.setFixedHeight(_FORM_ROW_HEIGHT)
+        tag_fl.addWidget(override_lbl)
+
+        self._device_tag_input = QLineEdit()
+        self._device_tag_input.setPlaceholderText("auto")
+        existing = get_device_tag_override()
+        if existing:
+            self._device_tag_input.setText(existing)
+        self._device_tag_input.setMaxLength(4)
+        self._device_tag_input.setFixedHeight(_FORM_ROW_HEIGHT)
+        self._device_tag_input.setFixedWidth(80)
+        self._device_tag_input.setStyleSheet(_FORM_INPUT_STYLE)
+        self._device_tag_input.setToolTip(
+            "Leave empty to use the auto-derived hash tag.  Type "
+            "1-4 alphanumeric chars to override (e.g. 'LB1' for "
+            "'Laptop 1', 'MGR' for the manager's machine).  Useful "
+            "when you want labels that match the physical sticker "
+            "on the laptop.")
+        tag_fl.addWidget(self._device_tag_input)
+
+        tag_save_btn = QPushButton("Save")
+        tag_save_btn.setObjectName("primary_btn")
+        tag_save_btn.setFixedHeight(_FORM_ROW_HEIGHT)
+        tag_save_btn.setStyleSheet(_FORM_BTN_STYLE)
+        tag_save_btn.clicked.connect(self._save_device_tag_override)
+        tag_fl.addWidget(tag_save_btn)
+
+        self._device_tag_status = QLabel("")
+        self._device_tag_status.setStyleSheet(
+            f"color: {ACCENT_GREEN}; font-weight: bold; background: transparent;"
+        )
+        self._device_tag_status.setVisible(False)
+        tag_fl.addWidget(self._device_tag_status)
+
+        tag_fl.addStretch()
+        layout.addWidget(tag_frame)
 
         # ── Section: Receipt Warnings ──────────────────────────
         section_label = QLabel("Receipt Warnings")
@@ -1396,6 +1900,41 @@ class SettingsScreen(QWidget):
         self._pref_status.setText(f"Saved — warnings will appear above ${value:.2f}")
         self._pref_status.setVisible(True)
         logger.info("Large receipt threshold set to %.2f", value)
+
+    def _save_device_tag_override(self):
+        """Apply the typed override (or clear it if blank) and
+        refresh both the local display and the main-window header
+        chip so the new tag takes effect immediately — no app
+        restart required."""
+        from fam.utils.app_settings import (
+            set_device_tag_override, get_device_tag,
+        )
+        text = self._device_tag_input.text()
+        try:
+            set_device_tag_override(text)
+        except ValueError as e:
+            QMessageBox.warning(
+                self, "Invalid Device Tag", str(e))
+            return
+
+        new_tag = get_device_tag()
+        self._device_tag_display.setText(new_tag)
+        if not (text and text.strip()):
+            self._device_tag_status.setText(
+                f"Override cleared — using auto tag {new_tag}")
+        else:
+            self._device_tag_status.setText(f"Saved — tag is now {new_tag}")
+        self._device_tag_status.setVisible(True)
+        logger.info("Device tag override set to %r (active tag: %s)",
+                    text.strip().upper() or None, new_tag)
+
+        # Push the change to the main-window header chip so the
+        # coordinator immediately sees the new tag without an app
+        # restart.  Walk up the parent chain until we find the
+        # MainWindow with the refresh helper.
+        w = self.window()
+        if hasattr(w, 'refresh_device_tag_display'):
+            w.refresh_device_tag_display()
 
     # ── Sync settings handlers ─────────────────────────────────
 
@@ -1941,19 +2480,46 @@ class SettingsScreen(QWidget):
         self._update_url_status.setVisible(True)
 
     def _save_update_settings(self):
-        """Persist update configuration to app_settings."""
-        from fam.utils.app_settings import set_update_repo_url, set_setting
+        """Persist update configuration to app_settings.
+
+        v2.0.2 fix: ``set_update_repo_url`` now raises ValueError when
+        the URL is not on the official allow-list (security guard
+        against auto-update channel hijack).  Surface the rejection
+        to the user with a clear message so they know why the save
+        was refused.
+        """
+        from fam.utils.app_settings import (
+            set_update_repo_url, set_setting, DEFAULT_REPO_URL,
+        )
 
         url = self._update_repo_input.text().strip()
-        if url:
-            set_update_repo_url(url)
-        else:
-            set_setting('update_repo_url', '')
+        try:
+            if url:
+                set_update_repo_url(url)
+            else:
+                # Empty input → reset to default (still allow-listed).
+                set_setting('update_repo_url', '')
+        except ValueError as e:
+            self._update_save_status.setText(
+                f"Cannot save: only the official release channel "
+                f"({DEFAULT_REPO_URL}) is permitted."
+            )
+            self._update_save_status.setStyleSheet(
+                f"font-size: 12px; color: {ERROR_COLOR}; "
+                "background: transparent; padding: 0 0 0 4px;"
+            )
+            self._update_save_status.setVisible(True)
+            logger.warning("Refused to save update_repo_url: %s", e)
+            return
 
         set_setting('update_auto_check',
                      '1' if self._update_auto_check_cb.isChecked() else '0')
 
         self._update_save_status.setText("Update settings saved")
+        self._update_save_status.setStyleSheet(
+            "font-size: 12px; color: #2e7d32; "
+            "background: transparent; padding: 0 0 0 4px;"
+        )
         self._update_save_status.setVisible(True)
         logger.info("Update settings saved (repo=%s, auto_check=%s)",
                     url, self._update_auto_check_cb.isChecked())
@@ -2113,7 +2679,56 @@ class SettingsScreen(QWidget):
             )
             return
 
-        # Check for open market day
+        # v2.0.2 fix (C4): refuse to install from any non-allow-listed
+        # repo URL.  ``set_update_repo_url`` already enforces this on
+        # save, but a defense-in-depth check at install time guards
+        # against:
+        #   * direct DB writes that bypassed the save path
+        #   * a malicious ``.fam`` import slipping past an older
+        #     parser that didn't validate
+        #   * a future regression in the save validator
+        # The asset_url and version come from the GitHub Releases API
+        # response keyed off the saved repo URL — if that URL was
+        # tampered with, the download target is attacker-controlled.
+        try:
+            from fam.utils.app_settings import (
+                _is_allowed_repo_url, get_setting, DEFAULT_REPO_URL,
+            )
+            saved_url = get_setting('update_repo_url') or DEFAULT_REPO_URL
+            if not _is_allowed_repo_url(saved_url):
+                QMessageBox.critical(
+                    self, "Update Blocked",
+                    "The configured update repository URL is not on the "
+                    "approved release-channel allow-list.  For security, "
+                    "FAM Manager will not download an update from an "
+                    "unauthorized source.\n\n"
+                    f"Configured: {saved_url}\n"
+                    f"Approved:   {DEFAULT_REPO_URL}\n\n"
+                    "Reset the update URL in Settings or contact your "
+                    "coordinator."
+                )
+                logger.warning(
+                    "Update install blocked: saved repo URL %r is not "
+                    "on the allow-list.", saved_url)
+                return
+        except Exception:
+            logger.exception(
+                "Could not validate update repo URL allow-list — "
+                "refusing install for safety.")
+            QMessageBox.critical(
+                self, "Update Blocked",
+                "FAM Manager could not validate the update channel.  "
+                "Update has been cancelled."
+            )
+            return
+
+        # Check for open market day.
+        # v2.0.1: previously this guard was wrapped in
+        # ``except Exception: pass``, which let the update
+        # proceed if the DB query failed — defeating the entire
+        # safety check.  Now it fails CLOSED: any exception
+        # surfaces a "could not verify state" warning and
+        # cancels the install.
         try:
             from fam.models.market_day import get_open_market_day
             if get_open_market_day():
@@ -2124,7 +2739,17 @@ class SettingsScreen(QWidget):
                 )
                 return
         except Exception:
-            pass
+            logger.exception("Could not check open-market-day state "
+                             "before update install")
+            QMessageBox.warning(
+                self, "Cannot Verify State",
+                "FAM Manager could not check whether a market day is "
+                "currently open.  Update has been cancelled to "
+                "protect any in-flight data.\n\n"
+                "Please close any open market day, restart the app, "
+                "and try again."
+            )
+            return
 
         # Confirmation
         reply = QMessageBox.question(
@@ -2192,7 +2817,18 @@ class SettingsScreen(QWidget):
                 f"Downloading... {mb_dl:.1f} / {mb_total:.1f} MB ({pct}%)")
 
     def _on_download_finished(self, zip_path: str):
-        """Generate update script and restart."""
+        """Generate update script and restart.
+
+        v2.0.2 fix (C5): re-check the open-market-day state HERE
+        before launching the install script.  ``_download_and_install``
+        runs the same check before kicking off the download, but the
+        download itself takes 30s–several minutes — long enough for
+        a volunteer to navigate to Market Day and click Open
+        mid-download.  Without this re-check the download would
+        complete, the app would silently quit, and any in-flight
+        Receipt Intake state would be lost.  This closes the TOCTOU
+        window that the v2.0.1 pre-download guard left open.
+        """
         import subprocess
         import sys
         from fam.app import get_app_dir
@@ -2208,6 +2844,51 @@ class SettingsScreen(QWidget):
             f"font-size: 13px; color: {ACCENT_GREEN}; font-weight: bold; "
             "background: transparent; padding: 2px 0;"
         )
+
+        # ── Pre-install TOCTOU re-check ──
+        # The pre-download guard at ``_download_and_install`` could be
+        # invalidated by a market opening during the download.  Re-run
+        # the same check now and abort cleanly if the state changed.
+        try:
+            from fam.models.market_day import get_open_market_day
+            if get_open_market_day():
+                QMessageBox.warning(
+                    self, "Market Day Opened During Download",
+                    "A market day was opened while the update was "
+                    "downloading.  The install has been cancelled to "
+                    "protect any in-flight data.\n\n"
+                    "Please close the market day and click "
+                    "'Download & Install' again to retry."
+                )
+                logger.warning(
+                    "Update install aborted at TOCTOU re-check: "
+                    "market day was opened during download.")
+                self._update_status_lbl.setText(
+                    "Install cancelled — market day opened during download.")
+                self._update_status_lbl.setStyleSheet(
+                    f"font-size: 13px; color: {ERROR_COLOR}; "
+                    "background: transparent; padding: 2px 0;"
+                )
+                self._update_check_btn.setEnabled(True)
+                self._update_install_btn.setEnabled(True)
+                self._update_progress.setVisible(False)
+                return
+        except Exception:
+            # Fail closed: cancel the install rather than risk
+            # losing data we couldn't verify the state of.
+            logger.exception(
+                "Could not re-verify open-market-day state at "
+                "pre-install TOCTOU check; aborting install.")
+            QMessageBox.critical(
+                self, "Cannot Verify State",
+                "FAM Manager could not re-check market day state "
+                "before installing the update.  Install has been "
+                "cancelled to protect any in-flight data."
+            )
+            self._update_check_btn.setEnabled(True)
+            self._update_install_btn.setEnabled(True)
+            self._update_progress.setVisible(False)
+            return
 
         try:
             app_dir = get_app_dir()
@@ -2301,6 +2982,7 @@ class SettingsScreen(QWidget):
         self._load_markets()
         self._load_vendors()
         self._load_payment_methods()
+        self._load_reward_rules()
         # Update the market code display in Preferences tab
         from fam.utils.app_settings import get_market_code
         self._market_code_display.setText(get_market_code() or "Not Set")
@@ -2372,12 +3054,96 @@ class SettingsScreen(QWidget):
             )
             al.addWidget(toggle_btn)
 
+            # Delete is a separate action from Deactivate.  Deactivate
+            # hides the market from new entry flows but keeps history
+            # readable; Delete physically removes the row and is only
+            # offered when no market_days reference it (handler
+            # double-checks before committing).  v1.9.9 added this
+            # so legacy/test rows like the pre-v22 "M" market — which
+            # have no transactional history — could be cleaned up
+            # without rebuilding the DB.
+            del_btn = make_action_btn("Delete", 50, danger=True)
+            del_btn.setToolTip(
+                "Permanently remove this market.  Only allowed when "
+                "no market days have been opened for it — otherwise "
+                "deleting would orphan transactions and audit "
+                "history.  Use Deactivate to hide a market from "
+                "new entry while keeping its history intact.")
+            del_btn.clicked.connect(
+                lambda checked, mid=mid: self._delete_market(mid))
+            al.addWidget(del_btn)
+
             self.markets_table.setCellWidget(i, 5, action_widget)
             self.markets_table.setRowHeight(i, 42)
         self.markets_table.setSortingEnabled(True)
 
     def _load_vendors(self):
         vendors = get_all_vendors()
+        # Active, non-system payment methods only — system rows like
+        # Unallocated Funds aren't accepted by vendors and shouldn't
+        # appear in the eligibility matrix.
+        all_methods = [
+            m for m in get_all_payment_methods(active_only=True,
+                                                include_system=False)
+        ]
+        # Snapshot for the test that checks deterministic order.
+        # Sort by sort_order (settings UI ordering), then name.
+        all_methods.sort(
+            key=lambda m: (m.get('sort_order') or 999, m['name']))
+
+        # Pre-fetch each vendor's method-id set in one lookup loop —
+        # avoids N+1 queries when there are many vendors.
+        eligibility_by_vendor: dict[int, set] = {
+            v['id']: get_vendor_payment_method_ids(v['id'])
+            for v in vendors
+        }
+
+        # Layout:  ID | Name | Contact | Check Payable To | ACH |
+        #          Active | <method-1> ✓/✗ | <method-2> ✓/✗ | …
+        #          Actions
+        static_left_count = 6   # ID, Name, Contact, CPT, ACH, Active
+        method_count = len(all_methods)
+        actions_col_idx = static_left_count + method_count
+        total_cols = actions_col_idx + 1
+
+        # Header labels.
+        headers = ["ID", "Name", "Contact", "Check Payable To",
+                   "ACH", "Active"]
+        for m in all_methods:
+            headers.append(m['name'])
+        headers.append("Actions")
+
+        self.vendors_table.setColumnCount(total_cols)
+        self.vendors_table.setHorizontalHeaderLabels(headers)
+        # Configure once per call — column count changes when
+        # methods are added/removed in the Payment Methods tab and
+        # the user navigates back to the Vendors tab.  Width budget:
+        # Edit(45) + Markets(60) + Methods(60) + Deactivate(70) +
+        # spacings = ~280px.
+        configure_table(self.vendors_table,
+                        actions_col=actions_col_idx,
+                        actions_width=280, resizable=True)
+
+        # Tooltip on each method header so the manager knows what
+        # the column means without having to open the Methods dialog.
+        header = self.vendors_table.horizontalHeader()
+        for col_offset, m in enumerate(all_methods):
+            col = static_left_count + col_offset
+            tip_parts = [
+                f"<b>{m['name']}</b>",
+                f"Match: {m['match_percent']}%",
+            ]
+            if m.get('denomination'):
+                tip_parts.append(
+                    f"Denomination: ${cents_to_dollars(m['denomination']):.2f}")
+            tip = "<br>".join(tip_parts) + (
+                "<br><br>✓ = vendor accepts this method"
+                "<br>✗ = vendor does NOT accept this method"
+                "<br><br>Click <i>Methods</i> in the row to change.")
+            header_item = self.vendors_table.horizontalHeaderItem(col)
+            if header_item is not None:
+                header_item.setToolTip(tip)
+
         self.vendors_table.setSortingEnabled(False)
         self.vendors_table.setRowCount(0)
         self.vendors_table.setRowCount(len(vendors))
@@ -2394,6 +3160,20 @@ class SettingsScreen(QWidget):
             active_item.setForeground(QBrush(QColor(ACCENT_GREEN if v['is_active'] else ERROR_COLOR)))
             self.vendors_table.setItem(i, 5, active_item)
 
+            # Per-method ✓/✗ matrix — same visual language as the
+            # Payment screen's vendor breakdown table.
+            vendor_methods = eligibility_by_vendor.get(v['id'], set())
+            for col_offset, m in enumerate(all_methods):
+                col = static_left_count + col_offset
+                if m['id'] in vendor_methods:
+                    cell = make_item("✓", 1)
+                    cell.setForeground(QBrush(QColor(ACCENT_GREEN)))
+                else:
+                    cell = make_item("✗", 0)
+                    cell.setForeground(QBrush(QColor(ERROR_COLOR)))
+                cell.setTextAlignment(Qt.AlignCenter)
+                self.vendors_table.setItem(i, col, cell)
+
             action_widget = QWidget()
             al = QHBoxLayout(action_widget)
             al.setContentsMargins(2, 2, 2, 2)
@@ -2409,14 +3189,26 @@ class SettingsScreen(QWidget):
             markets_btn.clicked.connect(lambda checked, vid=vid: self._assign_markets_to_vendor(vid))
             al.addWidget(markets_btn)
 
+            methods_btn = make_action_btn("Methods", 60)
+            methods_btn.setToolTip(
+                "Eligible payment methods this vendor can accept on the "
+                "Payment screen (drives the vendor dropdown for denominated "
+                "methods like Food Bucks).")
+            methods_btn.clicked.connect(
+                lambda checked, vid=vid:
+                    self._assign_payment_methods_to_vendor(vid))
+            al.addWidget(methods_btn)
+
             toggle_btn = make_action_btn("Deactivate" if is_active else "Activate", 70)
             toggle_btn.clicked.connect(
                 lambda checked, vid=vid, active=is_active: self._toggle_vendor(vid, active)
             )
             al.addWidget(toggle_btn)
 
-            self.vendors_table.setCellWidget(i, 6, action_widget)
+            self.vendors_table.setCellWidget(i, actions_col_idx, action_widget)
             self.vendors_table.setRowHeight(i, 42)
+        # Resize columns to content so the ✓/✗ matrix is compact.
+        self.vendors_table.resizeColumnsToContents()
         self.vendors_table.setSortingEnabled(True)
 
     def _load_payment_methods(self):
@@ -2449,19 +3241,40 @@ class SettingsScreen(QWidget):
             mid = m['id']
             is_active = m['is_active']
             sort_order = m['sort_order']
+            # System-managed methods (schema v25+, e.g. Unallocated
+            # Funds) are locked: no rename, no reorder, no toggle.
+            # The Adjustments "customer gone" code path depends on
+            # the row staying is_active=1 with its seeded match% and
+            # denomination -- letting a coordinator twiddle those
+            # would silently break the FAM-absorbed-loss accounting.
+            is_system = bool(m.get('is_system') or 0)
+            system_tooltip = (
+                "System-managed payment method - locked.\n"
+                "Used by the Adjustments \"customer gone\" recovery "
+                "path; renaming, deactivating, or reordering it would "
+                "break the FAM-absorbed-loss accounting.")
 
             edit_btn = make_action_btn("Edit", 40)
             edit_btn.clicked.connect(lambda checked, mid=mid: self._edit_pm(mid))
+            if is_system:
+                edit_btn.setEnabled(False)
+                edit_btn.setToolTip(system_tooltip)
             al.addWidget(edit_btn)
 
             up_btn = make_action_btn("\u25B2", 24)
             up_btn.setToolTip("Move up")
             up_btn.clicked.connect(lambda checked, mid=mid, so=sort_order: self._move_pm(mid, so, -1))
+            if is_system:
+                up_btn.setEnabled(False)
+                up_btn.setToolTip(system_tooltip)
             al.addWidget(up_btn)
 
             down_btn = make_action_btn("\u25BC", 24)
             down_btn.setToolTip("Move down")
             down_btn.clicked.connect(lambda checked, mid=mid, so=sort_order: self._move_pm(mid, so, 1))
+            if is_system:
+                down_btn.setEnabled(False)
+                down_btn.setToolTip(system_tooltip)
             al.addWidget(down_btn)
 
             toggle_btn = make_action_btn("Deactivate" if is_active else "Activate", 70)
@@ -2477,6 +3290,9 @@ class SettingsScreen(QWidget):
             toggle_btn.clicked.connect(
                 lambda checked, mid=mid, active=is_active: self._toggle_pm(mid, active)
             )
+            if is_system:
+                toggle_btn.setEnabled(False)
+                toggle_btn.setToolTip(system_tooltip)
             al.addWidget(toggle_btn)
 
             self.pm_table.setCellWidget(i, 5, action_widget)
@@ -2492,17 +3308,106 @@ class SettingsScreen(QWidget):
             QMessageBox.warning(self, "Error", "Market name is required.")
             return
         try:
+            from fam.models.audit import log_action
             conn = get_connection()
-            conn.execute("INSERT INTO markets (name, address) VALUES (?, ?)", (name, address))
+            # v2.0.1 fix: explicitly set daily_match_limit to 10000
+            # cents ($100) instead of relying on the schema column
+            # DEFAULT.  On DBs upgraded through the v4→v5 migration
+            # the column default was created as ``REAL DEFAULT 100.00``
+            # (dollars).  v21→v22 converted existing ROWS to integer
+            # cents but didn't rewrite the column DEFAULT clause —
+            # SQLite then coerces the literal float ``100.00`` to the
+            # integer ``100`` (cents) on every subsequent INSERT,
+            # making new markets default to $1 instead of $100.
+            # Setting the value explicitly bypasses the bad default.
+            DEFAULT_DAILY_MATCH_LIMIT_CENTS = 10000  # $100.00
+            cur = conn.execute(
+                "INSERT INTO markets (name, address, daily_match_limit) "
+                "VALUES (?, ?, ?)",
+                (name, address, DEFAULT_DAILY_MATCH_LIMIT_CENTS))
+            new_id = cur.lastrowid
+            log_action('markets', new_id, 'CREATE',
+                       _settings_changed_by(),
+                       new_value=(
+                           f"name={name} address={address or ''} "
+                           f"daily_match_limit=$100.00"),
+                       commit=False)
+            # Commit the market row FIRST.  v2.0.6 auto-assigns the
+            # cross-product of vendors / payment methods, but we do
+            # that as a SEPARATE transaction so any failure (FK, schema
+            # weirdness on legacy DBs) can't roll back the market
+            # itself — the operator gets a working market they can
+            # then configure manually if the auto-assign fell over.
             conn.commit()
+
+            # v2.0.6 fix: auto-assign every active vendor and active
+            # payment method to the new market.  Pre-fix, new markets
+            # were created with empty market_vendors and empty
+            # market_payment_methods junctions — Settings → Vendors
+            # and Settings → Markets correctly showed all checkboxes
+            # UNCHECKED, but the runtime fallback in
+            # ``receipt_intake_screen._load_vendors`` (and the
+            # equivalent payment-method fallback in payment_screen)
+            # silently showed ALL vendors anyway.  Coordinators
+            # interpreted that as "Settings is broken / disconnected"
+            # because un-checking in Settings had no visible effect.
+            # Auto-assigning at creation time mirrors what
+            # ``seed_sample_data`` does (cross-product of every market
+            # × every vendor).  Run as best-effort in a try/except —
+            # the market row above is already durable, so an auto-
+            # assign failure leaves the operator with a working
+            # market that they can configure by hand.
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO market_vendors "
+                    " (market_id, vendor_id) "
+                    " SELECT ?, id FROM vendors WHERE is_active = 1",
+                    (new_id,))
+                conn.execute(
+                    "INSERT OR IGNORE INTO market_payment_methods "
+                    " (market_id, payment_method_id) "
+                    " SELECT ?, id FROM payment_methods "
+                    "  WHERE is_active = 1",
+                    (new_id,))
+                conn.commit()
+            except Exception:
+                logger.exception(
+                    "Could not auto-assign vendors / payment methods "
+                    "to new market %s; market itself was created "
+                    "successfully.  Configure assignments manually "
+                    "via Settings → Markets.", new_id)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             self.market_name_input.clear()
             self.market_address_input.clear()
             self._load_markets()
+            # v2.0.6: tell main_window to push to cloud so the new
+            # market's auto-assigned vendor / payment-method
+            # assignments propagate to any reports that key off
+            # them.  Force-full sync because Settings changes can
+            # affect rows across multiple markets.
+            self.settings_changed.emit()
         except Exception as e:
             logger.exception("Failed to add market '%s'", name)
             msg = str(e)
             if 'UNIQUE' in msg.upper():
                 msg = f"A market with the name \"{name}\" already exists."
+            elif 'FOREIGN KEY' in msg.upper():
+                # v2.0.6: surface FK errors with actionable context.
+                # Pre-fix the user saw a bare "FOREIGN KEY constraint
+                # failed" with no clue what to do.  log_action /
+                # market insert shouldn't trip FK in normal use, but
+                # if something does, point the operator at the log
+                # for full traceback.
+                msg = (
+                    "Could not save the new market because of a "
+                    "database integrity error.\n\n"
+                    "Detail: " + msg + "\n\n"
+                    "See fam_manager.log for full traceback (Help → "
+                    "System Status → Open Data Folder)."
+                )
             QMessageBox.warning(self, "Error", msg)
 
     def _edit_market(self, market_id):
@@ -2519,12 +3424,116 @@ class SettingsScreen(QWidget):
             if not new_name:
                 QMessageBox.warning(self, "Error", "Market name is required.")
                 return
+
+            # v2.0.6: protect the cloud-sheet identity for markets
+            # that have ANY market_days on record.
+            #
+            # market_code is part of every cloud-sync composite key.
+            # A rename that shifts the derived code orphans every
+            # existing row under the old code:
+            #
+            #   * Whole-dataset tabs (Vendor Reimbursement, Error Log)
+            #     would clean up old-code rows on the next full sync,
+            #     but ALSO lose the historical trail.
+            #   * Per-md tabs (Detailed Ledger, FAM Match, Transaction
+            #     Log, Activity Log, FMNP Entries, Generated Rewards,
+            #     Geolocation, Market Day Summary) leave old-code rows
+            #     stranded forever — those tabs are scoped per-md and
+            #     the OLD market_code's rows aren't in the new
+            #     collection, so cleanup never runs over them.
+            #   * Multi-workstation race: an offline workstation
+            #     resyncs under the OLD code (its app_settings hasn't
+            #     been notified), creating two market_code identities
+            #     for the same physical market.
+            #
+            # Decision (option 2 / 2026-05-06): block code-changing
+            # renames once the market has history.  Pre-history
+            # markets can still be freely renamed — there's no cloud
+            # data to orphan yet.  Code-stable renames (typo fixes,
+            # casing) are always allowed since the cloud identity
+            # doesn't move.
+            from fam.utils.app_settings import derive_market_code
+            old_name = market.get('name') or ''
+            old_code = derive_market_code(old_name)
+            new_code = derive_market_code(new_name)
+            if (new_name != old_name and old_code != new_code):
+                md_count = conn.execute(
+                    "SELECT COUNT(*) FROM market_days WHERE market_id=?",
+                    (market_id,)).fetchone()[0]
+                if md_count > 0:
+                    block = QMessageBox(self)
+                    block.setIcon(QMessageBox.Critical)
+                    block.setWindowTitle("Rename Blocked")
+                    block.setText(
+                        f"\"{old_name}\" cannot be renamed to "
+                        f"\"{new_name}\" because the change would "
+                        f"shift its market code from \"{old_code}\" "
+                        f"to \"{new_code}\".")
+                    block.setInformativeText(
+                        f"<p>This market has <b>{md_count}</b> "
+                        "market day(s) on record.  The market code "
+                        "is part of every cloud-sync row's identity, "
+                        "and changing it would strand existing rows "
+                        "on the shared Google Sheet under the old "
+                        "code.  Per-day reports (Detailed Ledger, "
+                        "FAM Match, Transaction Log, FMNP Entries, "
+                        "etc.) would never clean those rows up.</p>"
+                        "<p><b>Allowed:</b> renames that preserve "
+                        "the derived code — for example fixing a "
+                        f"typo or casing where the code stays "
+                        f"<b>{old_code}</b>.</p>"
+                        "<p><b>If you truly need a new identity</b>, "
+                        "create a new market with the new name and "
+                        "leave this one in place for the historical "
+                        "record.</p>")
+                    block.setStandardButtons(QMessageBox.Ok)
+                    block.exec()
+                    return
+                # No market_days yet — code change is harmless on
+                # the cloud sheet (no rows to orphan).  Still surface
+                # an FYI dialog so an operator who didn't realise the
+                # code would change can back out.
+                confirm = QMessageBox(self)
+                confirm.setIcon(QMessageBox.Information)
+                confirm.setWindowTitle("Market Code Will Change")
+                confirm.setText(
+                    f"Renaming \"{old_name}\" to \"{new_name}\" will "
+                    f"change this market's derived code from "
+                    f"\"{old_code}\" to \"{new_code}\".")
+                confirm.setInformativeText(
+                    "<p>This market has no market days on record yet, "
+                    "so the rename is safe — there are no cloud-sheet "
+                    "rows to orphan.  Going forward, all rows from "
+                    f"this market will use the code <b>{new_code}</b>."
+                    "</p>"
+                    "<p>Proceed with rename?</p>")
+                confirm.setStandardButtons(
+                    QMessageBox.Yes | QMessageBox.No)
+                confirm.setDefaultButton(QMessageBox.Yes)
+                if confirm.exec() != QMessageBox.Yes:
+                    return  # operator backed out
+
             try:
+                from fam.models.audit import log_action
                 conn = get_connection()
                 conn.execute("UPDATE markets SET name=?, address=? WHERE id=?",
                              (new_name, new_address, market_id))
+                changed_by = _settings_changed_by()
+                if new_name != market.get('name'):
+                    log_action('markets', market_id, 'UPDATE',
+                               changed_by, field_name='name',
+                               old_value=market.get('name'),
+                               new_value=new_name, commit=False)
+                if (new_address or '') != (market.get('address') or ''):
+                    log_action('markets', market_id, 'UPDATE',
+                               changed_by, field_name='address',
+                               old_value=market.get('address'),
+                               new_value=new_address, commit=False)
                 conn.commit()
                 self._load_markets()
+                # v2.0.6: propagate to cloud so renamed market
+                # appears with the new name everywhere.
+                self.settings_changed.emit()
             except Exception as e:
                 logger.exception("Failed to edit market %s", market_id)
                 msg = str(e)
@@ -2533,11 +3542,111 @@ class SettingsScreen(QWidget):
                 QMessageBox.warning(self, "Error", msg)
 
     def _toggle_market(self, market_id, current_active):
+        from fam.models.audit import log_action
         conn = get_connection()
+        new_active = 0 if current_active else 1
         conn.execute("UPDATE markets SET is_active=? WHERE id=?",
-                     (0 if current_active else 1, market_id))
+                     (new_active, market_id))
+        log_action('markets', market_id, 'UPDATE',
+                   _settings_changed_by(),
+                   field_name='is_active',
+                   old_value=int(bool(current_active)),
+                   new_value=new_active, commit=False)
         conn.commit()
         self._load_markets()
+        self.settings_changed.emit()
+
+    def _delete_market(self, market_id):
+        """Permanently remove a market — only when it has no
+        market_days on record.
+
+        The safety gate matters because deleting a market that has
+        history would orphan its market_days, transactions, and
+        audit_log entries (none of which carry the market name as a
+        snapshot — they reference market_id by foreign key).  An
+        orphan would leave reports and the activity log with
+        unjoinable rows.
+
+        Use case this handler exists for: legacy/test rows like the
+        pre-v22 "M" market that survived from very early
+        development on a real machine, have no transactional
+        history, but can't be cleaned up via Deactivate alone.
+        """
+        conn = get_connection()
+        market = conn.execute(
+            "SELECT name FROM markets WHERE id=?", (market_id,)
+        ).fetchone()
+        if not market:
+            return  # already gone
+
+        md_count = conn.execute(
+            "SELECT COUNT(*) FROM market_days WHERE market_id=?",
+            (market_id,),
+        ).fetchone()[0]
+
+        if md_count > 0:
+            QMessageBox.warning(
+                self, "Cannot Delete",
+                f"'{market['name']}' has {md_count} market day(s) "
+                f"on record.\n\n"
+                f"Deleting would orphan their transactions and "
+                f"audit history.  Use Deactivate instead — it "
+                f"hides the market from new entry flows while "
+                f"keeping the data intact for reports."
+            )
+            return
+
+        answer = QMessageBox.question(
+            self, "Delete Market",
+            f"Delete '{market['name']}' permanently?\n\n"
+            f"This market has no recorded market days and can be "
+            f"safely removed.  This action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            from fam.models.audit import log_action
+            # Cascade-clean junction rows first.  These have no
+            # historical value (they're configuration, not data),
+            # so dropping them with the market is correct.
+            conn.execute(
+                "DELETE FROM market_vendors WHERE market_id=?",
+                (market_id,))
+            conn.execute(
+                "DELETE FROM market_payment_methods WHERE market_id=?",
+                (market_id,))
+            conn.execute(
+                "DELETE FROM markets WHERE id=?", (market_id,))
+            # Audit the hard-delete so the market_days-zero precondition
+            # is on record and the operator who triggered it is
+            # identifiable.  After commit the markets row is gone, but
+            # the audit_log entry persists.
+            log_action(
+                'markets', market_id, 'DELETE',
+                _settings_changed_by(),
+                old_value=market['name'],
+                notes=(f"Hard-deleted market '{market['name']}'; "
+                       f"no market_days were referenced"),
+                commit=False)
+            conn.commit()
+            logger.info(
+                "Deleted market %s ('%s') — no market_days "
+                "referenced it", market_id, market['name'])
+        except Exception as e:
+            logger.exception("Failed to delete market %s", market_id)
+            QMessageBox.critical(
+                self, "Error",
+                f"Could not delete market: {e}")
+            return
+        self._load_markets()
+        # v2.0.6: deleted markets that had no market_days had no
+        # cloud rows either, but emit anyway so any incidental
+        # config-derived rows (e.g. error log entries referencing
+        # the now-gone market) get a chance to refresh.
+        self.settings_changed.emit()
 
     def _edit_match_limit(self, market_id):
         """Open dialog to adjust a market's daily match limit."""
@@ -2551,26 +3660,54 @@ class SettingsScreen(QWidget):
         if dialog.exec() == QDialog.Accepted:
             new_limit_cents = dollars_to_cents(dialog.limit_spin.value())
             try:
+                from fam.models.audit import log_action
                 conn = get_connection()
+                old_limit_cents = market.get('daily_match_limit', 0)
                 conn.execute(
                     "UPDATE markets SET daily_match_limit=? WHERE id=?",
                     (new_limit_cents, market_id)
                 )
+                # CRITICAL audit: this controls FAM's per-day per-customer
+                # payout cap.  Edits MUST be traceable for fund stewardship.
+                if new_limit_cents != old_limit_cents:
+                    log_action(
+                        'markets', market_id, 'UPDATE',
+                        _settings_changed_by(),
+                        field_name='daily_match_limit',
+                        old_value=old_limit_cents,
+                        new_value=new_limit_cents,
+                        notes=f"daily match limit ${old_limit_cents/100:.2f} → ${new_limit_cents/100:.2f}",
+                        commit=False)
                 conn.commit()
                 self._load_markets()
+                self.settings_changed.emit()
             except Exception as e:
                 logger.exception("Failed to update match limit for market %s", market_id)
                 QMessageBox.warning(self, "Error", f"Could not update match limit: {e}")
 
     def _toggle_match_limit(self, market_id, current_active):
         """Toggle the match limit on/off for a market."""
+        from fam.models.audit import log_action
         conn = get_connection()
+        new_active = 0 if current_active else 1
         conn.execute(
             "UPDATE markets SET match_limit_active=? WHERE id=?",
-            (0 if current_active else 1, market_id)
+            (new_active, market_id)
         )
+        # CRITICAL audit: toggling this OFF lets FAM Match payouts
+        # exceed the daily cap.  Track who flipped it and when.
+        log_action(
+            'markets', market_id, 'UPDATE',
+            _settings_changed_by(),
+            field_name='match_limit_active',
+            old_value=int(bool(current_active)),
+            new_value=new_active,
+            notes=('match cap ENABLED' if new_active
+                   else 'match cap DISABLED'),
+            commit=False)
         conn.commit()
         self._load_markets()
+        self.settings_changed.emit()
 
     def _assign_vendors(self, market_id):
         """Open vendor assignment dialog for a market."""
@@ -2593,6 +3730,13 @@ class SettingsScreen(QWidget):
             for vid in old_ids - new_ids:
                 unassign_vendor_from_market(market_id, vid)
 
+            if new_ids != old_ids:
+                # v2.0.6: vendor↔market assignments determine which
+                # vendors appear in Receipt Intake at each market.
+                # Trigger sync so historical Vendor Reimbursement
+                # rows track the latest config.
+                self.settings_changed.emit()
+
     def _assign_markets_to_vendor(self, vendor_id):
         """Open market assignment dialog for a vendor."""
         vendor = get_vendor_by_id(vendor_id)
@@ -2612,6 +3756,9 @@ class SettingsScreen(QWidget):
             for mid in old_ids - new_ids:
                 unassign_vendor_from_market(mid, vendor_id)
 
+            if new_ids != old_ids:
+                self.settings_changed.emit()
+
     def _assign_payment_methods(self, market_id):
         """Open payment method assignment dialog for a market."""
         conn = get_connection()
@@ -2624,14 +3771,63 @@ class SettingsScreen(QWidget):
         if dialog.exec() == QDialog.Accepted:
             new_ids = dialog.get_checked_payment_method_ids()
             old_ids = get_market_payment_method_ids(market_id)
+            adding = new_ids - old_ids
+            removing = old_ids - new_ids
 
-            # Add newly checked
-            for pid in new_ids - old_ids:
+            # v2.0.6 fix: warn when FMNP is being NEWLY assigned to a
+            # market.  Mirrors the v1.9.10 ``_toggle_pm`` warning that
+            # fires when activating FMNP at the global level — the
+            # same caveats apply here at the per-market level: FAM
+            # doesn't currently accept or cash physical FMNP checks,
+            # so adding FMNP to a market is rarely the right call
+            # unless explicitly instructed by a FAM rep.  Pre-fix this
+            # path silently assigned FMNP to the market with no
+            # confirmation (user-reported 2026-05-05).
+            from fam.models.payment_method import get_payment_method_by_name
+            fmnp = get_payment_method_by_name('FMNP')
+            fmnp_id = fmnp['id'] if fmnp else None
+            if fmnp_id is not None and fmnp_id in adding:
+                confirm = QMessageBox(self)
+                confirm.setIcon(QMessageBox.Warning)
+                confirm.setWindowTitle("Add FMNP — Confirm")
+                confirm.setText(
+                    f"Adding FMNP to \"{market['name']}\" will make it "
+                    f"appear as an in-line payment option during "
+                    f"Receipt Intake and on the Payment screen for "
+                    f"this market.")
+                confirm.setInformativeText(
+                    "<p>Leaving FMNP <b>unchecked</b> for this market "
+                    "does <i>not</i> affect the dedicated FMNP Check "
+                    "Entry screen — that remains fully functional "
+                    "either way.</p>"
+                    "<p>FAM does <b>not</b> currently accept or cash "
+                    "physical FMNP checks, so in-line matching is not "
+                    "expected this season.  Leave FMNP unassigned "
+                    "unless explicitly instructed by a FAM "
+                    "representative.</p>"
+                    "<p>Add FMNP to this market anyway?</p>")
+                confirm.setStandardButtons(
+                    QMessageBox.Yes | QMessageBox.No)
+                confirm.setDefaultButton(QMessageBox.No)
+                if confirm.exec() != QMessageBox.Yes:
+                    # User backed out — drop FMNP from the additions,
+                    # but proceed with everything else they checked /
+                    # unchecked in the dialog.
+                    adding.discard(fmnp_id)
+
+            # Add newly checked (minus any FMNP the user backed out of)
+            for pid in adding:
                 assign_payment_method_to_market(market_id, pid)
 
             # Remove newly unchecked
-            for pid in old_ids - new_ids:
+            for pid in removing:
                 unassign_payment_method_from_market(market_id, pid)
+
+            if adding or removing:
+                # v2.0.6: payment-method ↔ market bindings drive
+                # which methods are available during intake at this
+                # market.  Trigger sync.
+                self.settings_changed.emit()
 
     # ── Vendor Actions ───────────────────────────────────────
 
@@ -2646,11 +3842,20 @@ class SettingsScreen(QWidget):
             self.vendor_name_input.clear()
             self.vendor_contact_input.clear()
             self._load_vendors()
+            # v2.0.6: trigger cloud sync so the new vendor's
+            # auto-assigned payment-method bindings + market
+            # assignments are reflected on the next sync.
+            self.settings_changed.emit()
         except Exception as e:
             logger.exception("Failed to add vendor '%s'", name)
             msg = str(e)
             if 'UNIQUE' in msg.upper():
                 msg = f"A vendor with the name \"{name}\" already exists."
+            elif 'FOREIGN KEY' in msg.upper():
+                msg = ("Could not save the new vendor because of a "
+                       "database integrity error.\n\n"
+                       "Detail: " + msg + "\n\n"
+                       "See fam_manager.log for full traceback.")
             QMessageBox.warning(self, "Error", msg)
 
     def _edit_vendor(self, vendor_id):
@@ -2678,6 +3883,16 @@ class SettingsScreen(QWidget):
                     ach_enabled=dialog.ach_check.isChecked(),
                 )
                 self._load_vendors()
+                # v2.0.6: vendor name changes propagate to all
+                # cloud-sheet rows that show this vendor (Detailed
+                # Ledger, Vendor Reimbursement, FMNP Entries) on
+                # the next sync.  Composite-key dedupe handles the
+                # rename: per-md tabs key on stable Transaction ID
+                # (vendor name updates in place); Vendor
+                # Reimbursement keys on Vendor name (old-name row
+                # goes stale, gets cleaned up by whole-dataset
+                # delete; new-name row appears).
+                self.settings_changed.emit()
             except Exception as e:
                 logger.exception("Failed to edit vendor %s", vendor_id)
                 msg = str(e)
@@ -2688,6 +3903,33 @@ class SettingsScreen(QWidget):
     def _toggle_vendor(self, vid, current_active):
         update_vendor(vid, is_active=not current_active)
         self._load_vendors()
+        # Activating / deactivating a vendor changes whether they
+        # appear in Receipt Intake / Payment Screen.  Trigger sync
+        # so the cloud sheet stays consistent.
+        self.settings_changed.emit()
+
+    def _assign_payment_methods_to_vendor(self, vendor_id):
+        """Open per-vendor payment-method eligibility dialog (v24+)."""
+        vendor = get_vendor_by_id(vendor_id)
+        if not vendor:
+            return
+        dialog = VendorEligiblePaymentMethodsDialog(vendor, self)
+        if dialog.exec() == QDialog.Accepted:
+            new_ids = dialog.get_checked_payment_method_ids()
+            old_ids = get_vendor_payment_method_ids(vendor_id)
+            for pid in new_ids - old_ids:
+                assign_payment_method_to_vendor(vendor_id, pid)
+            for pid in old_ids - new_ids:
+                unassign_payment_method_from_vendor(vendor_id, pid)
+            # Refresh the vendors table so the ✓/✗ matrix reflects
+            # the new eligibility immediately, without the manager
+            # having to switch tabs.
+            self._load_vendors()
+            if new_ids != old_ids:
+                # v2.0.6: vendor-level payment method eligibility
+                # affects which methods can be used for this vendor
+                # at intake.  Trigger sync.
+                self.settings_changed.emit()
 
     # ── Payment Method Actions ───────────────────────────────
 
@@ -2702,7 +3944,12 @@ class SettingsScreen(QWidget):
             QMessageBox.warning(self, "Error", "Payment method name is required.")
             return
         try:
-            methods = get_all_payment_methods()
+            # Exclude system methods so the new method's sort_order
+            # is computed from coordinator-managed methods only.
+            # UF is seeded with sort_order=9999; including it would
+            # land new methods at sort_order >=10000 (visually after
+            # UF in the dropdown order), which is wrong.
+            methods = get_all_payment_methods(include_system=False)
             max_sort = max((m['sort_order'] for m in methods), default=0)
             create_payment_method(name, match_pct, max_sort + 1, denomination=denom_val)
             self.pm_name_input.clear()
@@ -2710,6 +3957,13 @@ class SettingsScreen(QWidget):
             self.pm_denom_check.setChecked(False)
             self.pm_denom_spin.setValue(25.0)
             self._load_payment_methods()
+            # Vendors tab carries one column per active, non-system
+            # payment method.  Re-render so the column set tracks
+            # the methods just changed here.
+            self._load_vendors()
+            # v2.0.6: new payment method may unlock new reward
+            # rules and expands the column set on Vendor sheets.
+            self.settings_changed.emit()
         except Exception as e:
             logger.exception("Failed to add payment method '%s'", name)
             msg = str(e)
@@ -2743,10 +3997,27 @@ class SettingsScreen(QWidget):
                                   denomination=new_denom_val,
                                   photo_required=photo_req)
             self._load_payment_methods()
+            # Vendors tab carries one column per active, non-system
+            # payment method.  Re-render so the column set tracks
+            # the methods just changed here.
+            self._load_vendors()
+            # v2.0.6: payment-method renames are safe because
+            # ``payment_line_items.method_name_snapshot`` already
+            # captured the historical name at transaction time.
+            # Trigger sync so net-new transactions show the new
+            # name in cloud sheets.
+            self.settings_changed.emit()
 
     def _move_pm(self, pm_id, current_sort, direction):
-        """Move a payment method up (-1) or down (+1) in sort order."""
-        methods = get_all_payment_methods()
+        """Move a payment method up (-1) or down (+1) in sort order.
+
+        System methods (Unallocated Funds) are excluded — they have a
+        fixed high sort_order (9999) and the UI's reorder buttons are
+        disabled for them.  Including them in the swap candidate list
+        would produce nonsensical reorderings against the high
+        sort_order.
+        """
+        methods = get_all_payment_methods(include_system=False)
         idx = None
         for i, m in enumerate(methods):
             if m['id'] == pm_id:
@@ -2768,8 +4039,46 @@ class SettingsScreen(QWidget):
         # FMNP is intentionally togglable as of v1.9.8 — when deactivated
         # it disappears from Receipt Intake / Payment Screen but stays
         # fully functional on the dedicated FMNP Entry screen.
+        #
+        # v1.9.10 (2026-04-30): when *activating* FMNP, surface a
+        # warning explaining what activation actually controls (in-line
+        # matching during receipt collection only — the FMNP Entry
+        # screen is always available regardless).  FAM does not
+        # currently accept or cash physical FMNP checks, so this
+        # method should remain inactive unless explicitly enabled by
+        # a FAM rep.
+        from fam.models.payment_method import get_payment_method_by_id
+        method = get_payment_method_by_id(mid)
+        if (method and method.get('name') == 'FMNP'
+                and not current_active):
+            # Currently inactive → user is about to activate it.
+            confirm = QMessageBox(self)
+            confirm.setIcon(QMessageBox.Warning)
+            confirm.setWindowTitle("Activate FMNP — Confirm")
+            confirm.setText(
+                "Activating FMNP only enables in-line matching "
+                "during receipt collection (Receipt Intake / Payment "
+                "screen).")
+            confirm.setInformativeText(
+                "<p>Keeping FMNP <b>inactive</b> does <i>not</i> "
+                "affect the dedicated FMNP Check Entry screen — "
+                "that remains fully functional either way.</p>"
+                "<p>FAM does <b>not</b> currently accept or cash "
+                "physical FMNP checks, so in-line matching is not "
+                "expected this season.  Leave FMNP inactive unless "
+                "explicitly instructed by a FAM representative.</p>"
+                "<p>Activate anyway?</p>")
+            confirm.setStandardButtons(
+                QMessageBox.Yes | QMessageBox.No)
+            confirm.setDefaultButton(QMessageBox.No)
+            if confirm.exec() != QMessageBox.Yes:
+                return  # user backed out — leave inactive
         update_payment_method(mid, is_active=not current_active)
         self._load_payment_methods()
+        # Vendors tab carries one column per ACTIVE, non-system
+        # method — toggling active state changes the column set.
+        self._load_vendors()
+        self.settings_changed.emit()
 
     # ── Import / Export ────────────────────────────────────────
 
@@ -2885,21 +4194,117 @@ class SettingsScreen(QWidget):
         if result2 != QMessageBox.Yes:
             return
 
+        # v2.0.1: third gate — type-RESET confirmation.  Two
+        # successive Yes clicks are easy to miskey on a touchscreen
+        # or to dismiss accidentally with the keyboard.  Requiring
+        # the operator to type the literal word "RESET" makes
+        # accidental triggers effectively impossible while still
+        # being clear what's required.
+        from PySide6.QtWidgets import QInputDialog
+        typed, ok = QInputDialog.getText(
+            self, "Type RESET to Confirm",
+            "Type the word RESET (in capitals) and click OK to "
+            "permanently erase all data.",
+        )
+        if not ok or typed.strip() != "RESET":
+            QMessageBox.information(
+                self, "Reset Cancelled",
+                "Reset cancelled — the confirmation word was not "
+                "typed exactly.  Your data is unchanged.",
+            )
+            return
+
+        # v2.0.1: snapshot the DB before any deletion so the
+        # operator can recover if they regret the reset (or hit
+        # it accidentally despite the three confirmations).  The
+        # snapshot path is a sibling to the live DB so the runtime
+        # backup directory remains untouched.
         try:
-            conn = get_connection()
-            # Delete all data in dependency order (junction/child tables first)
-            conn.execute("DELETE FROM audit_log")
-            conn.execute("DELETE FROM payment_line_items")
-            conn.execute("DELETE FROM fmnp_entries")
-            conn.execute("DELETE FROM transactions")
-            conn.execute("DELETE FROM customer_orders")
-            conn.execute("DELETE FROM market_days")
-            conn.execute("DELETE FROM market_payment_methods")
-            conn.execute("DELETE FROM market_vendors")
-            conn.execute("DELETE FROM payment_methods")
-            conn.execute("DELETE FROM vendors")
-            conn.execute("DELETE FROM markets")
+            from fam.app import get_data_dir
+            from fam.database.connection import get_db_path
+            db_path = get_db_path()
+            data_dir = get_data_dir()
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            pre_reset_path = os.path.join(
+                data_dir, f"fam_data.pre-reset-{ts}.bak")
+            if os.path.exists(db_path):
+                # Use the SQLite backup API so WAL state is captured.
+                live = sqlite3.connect(db_path)
+                dest = sqlite3.connect(pre_reset_path)
+                try:
+                    live.backup(dest)
+                finally:
+                    dest.close()
+                    live.close()
+                logger.info(
+                    "Pre-reset snapshot written: %s", pre_reset_path)
+        except Exception:
+            logger.exception("Could not write pre-reset snapshot — "
+                             "continuing with reset")
+
+        conn = get_connection()
+        # v1.9.10 follow-up (2026-05-01, onsite report): the prior
+        # reset missed ``reward_rules`` and ``generated_rewards``,
+        # which carry FK refs into ``payment_methods`` /
+        # ``customer_orders`` / ``market_days``.  Resetting an app
+        # that had any reward rule configured failed with
+        # "FOREIGN KEY constraint failed" on the DELETE of
+        # payment_methods, halting the reset and leaving the DB
+        # in a half-wiped state — recoverable only by deleting the
+        # DB file.
+        #
+        # Fix: drain rewards-history tables FIRST, run the entire
+        # sequence inside a SAVEPOINT (sqlite3's stdlib module
+        # ignores raw ``BEGIN`` issued via execute() — it manages
+        # its own implicit transactions), and roll back on any
+        # error so a partial-failure mid-reset cannot strand the
+        # DB in an unrecoverable mid-state.  Re-seed the
+        # system-managed Unallocated Funds method afterwards so
+        # the customer-gone branch keeps working post-reset
+        # without manual re-config.
+        try:
+            conn.execute("SAVEPOINT reset_all")
+            try:
+                conn.execute("DELETE FROM generated_rewards")
+                conn.execute("DELETE FROM reward_rules")
+                conn.execute("DELETE FROM audit_log")
+                conn.execute("DELETE FROM payment_line_items")
+                conn.execute("DELETE FROM fmnp_entries")
+                conn.execute("DELETE FROM transactions")
+                conn.execute("DELETE FROM customer_orders")
+                conn.execute("DELETE FROM market_days")
+                conn.execute("DELETE FROM market_payment_methods")
+                conn.execute("DELETE FROM market_vendors")
+                conn.execute("DELETE FROM vendor_payment_methods")
+                conn.execute("DELETE FROM payment_methods")
+                conn.execute("DELETE FROM vendors")
+                conn.execute("DELETE FROM markets")
+                # Photo-hash caches — non-financial but expected
+                # to be empty after a "reset".  Tables may not
+                # exist on legacy schemas; skip silently.
+                try:
+                    conn.execute("DELETE FROM photo_hashes")
+                except Exception:
+                    pass
+                try:
+                    conn.execute("DELETE FROM local_photo_hashes")
+                except Exception:
+                    pass
+            except Exception:
+                conn.execute("ROLLBACK TO reset_all")
+                conn.execute("RELEASE reset_all")
+                raise
+            conn.execute("RELEASE reset_all")
             conn.commit()
+            # Re-seed the system-managed Unallocated Funds method
+            # so the customer-gone adjustment branch keeps working
+            # immediately after reset.
+            try:
+                from fam.database.schema import _migrate_v24_to_v25
+                _migrate_v24_to_v25(conn)
+                conn.commit()
+            except Exception:
+                pass
 
             # Also clear the rotating log file + backups so the Error
             # Log tab doesn't keep showing pre-reset entries.  Best-
@@ -2917,6 +4322,27 @@ class SettingsScreen(QWidget):
 
             self.refresh()
 
+            # v2.0.6: trigger an immediate full-scope cloud sync.
+            # device_id is preserved through reset (it lives in
+            # app_settings, not in the wiped data tables), so this
+            # device's identity on the shared sheet is unchanged.
+            # The sync sees an empty local DB and runs the cleanup
+            # path in ``upsert_rows``: deletes every row owned by
+            # this device_id across ALL tabs (per-md and whole-
+            # dataset), preserving rows owned by OTHER devices.
+            #
+            # Pre-fix (user-reported 2026-05-06): reset left local
+            # empty but cloud still carried this device's stale
+            # rows.  No sync trigger fired, so the sync-status
+            # indicator kept showing the previous run's
+            # ``last_sync_error`` until something else (opening a
+            # market day, manual sync click) finally drove a sync.
+            # Coordinators interpreted the stale "failed" status as
+            # "reset broke sync" — confusing during onsite testing.
+            # Emitting here makes the cleanup happen immediately
+            # and refreshes the status indicator on success.
+            self.settings_changed.emit()
+
             if log_clear_failed:
                 QMessageBox.information(
                     self, "Reset Complete",
@@ -2929,7 +4355,9 @@ class SettingsScreen(QWidget):
             else:
                 QMessageBox.information(
                     self, "Reset Complete",
-                    "All data has been cleared.\n\n"
+                    "All data has been cleared.  This device's rows "
+                    "on the shared cloud sheet have been queued for "
+                    "removal — other devices' data is unaffected.\n\n"
                     "Use the Settings tabs to add new markets, vendors, and "
                     "payment methods, or import a .fam settings file."
                 )

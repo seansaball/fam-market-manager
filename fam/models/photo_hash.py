@@ -51,6 +51,139 @@ def delete_photo_hash_by_url(drive_url: str) -> None:
     conn.commit()
 
 
+def _cleanup_orphaned_hashes_for_urls(
+        urls: set[str], commit: bool = True) -> int:
+    """Drop ``photo_hashes`` cache rows whose ``drive_url`` is in
+    *urls* AND is no longer referenced by any active record (non-
+    Voided transaction OR non-Deleted FMNP entry).
+
+    Shared core for the void/delete/photo-replace cleanup paths.
+    Returns the number of rows removed.
+
+    *commit*: when False the caller is bundling the cleanup into a
+    larger transaction.  Default True for standalone use.
+    """
+    if not urls:
+        return 0
+
+    conn = get_connection()
+    removed = 0
+    for url in urls:
+        if not url:
+            continue
+        active_txn_ref = conn.execute(
+            "SELECT 1 FROM payment_line_items pl "
+            "JOIN transactions t ON pl.transaction_id = t.id "
+            "WHERE t.status != 'Voided' "
+            "  AND pl.photo_drive_url LIKE ? "
+            "LIMIT 1",
+            (f'%{url}%',),
+        ).fetchone()
+        if active_txn_ref:
+            continue
+        active_fmnp_ref = conn.execute(
+            "SELECT 1 FROM fmnp_entries "
+            "WHERE status != 'Deleted' "
+            "  AND photo_drive_url LIKE ? "
+            "LIMIT 1",
+            (f'%{url}%',),
+        ).fetchone()
+        if active_fmnp_ref:
+            continue
+        conn.execute(
+            "DELETE FROM photo_hashes WHERE drive_url = ?",
+            (url,),
+        )
+        removed += 1
+
+    if commit and removed:
+        conn.commit()
+    return removed
+
+
+def cleanup_orphaned_hashes_for_fmnp(
+        entry_id: int, commit: bool = True) -> int:
+    """FMNP analogue of ``cleanup_orphaned_hashes_for_transaction``.
+
+    Drops ``photo_hashes`` cache rows pointing to URLs unique to
+    this FMNP entry's current ``photo_drive_url``.  Called from:
+
+      * ``delete_fmnp_entry`` — after status flip to 'Deleted', so
+        the next ``_process_voided_photos`` cycle's VOID_-rename
+        of this entry's Drive file doesn't strand future uploads
+        of the same image content under the renamed URL.
+      * ``update_fmnp_entry`` — before clearing ``photo_drive_url``
+        on a photo_path change, so the dedup-cache reflects the
+        URLs that will no longer be referenced after the update.
+
+    Photos still shared by another active record stay cached.
+    """
+    from fam.utils.photo_paths import parse_photo_paths
+
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT photo_drive_url FROM fmnp_entries "
+        "WHERE id = ? "
+        "  AND photo_drive_url IS NOT NULL "
+        "  AND photo_drive_url != ''",
+        (entry_id,),
+    ).fetchone()
+    if not row:
+        return 0
+    urls = {u for u in parse_photo_paths(row['photo_drive_url'])
+            if u}
+    return _cleanup_orphaned_hashes_for_urls(urls, commit=commit)
+
+
+def cleanup_orphaned_hashes_for_transaction(
+        txn_id: int, commit: bool = True) -> int:
+    """Drop ``photo_hashes`` rows that pointed to URLs unique to
+    transaction *txn_id*.
+
+    Called from ``void_transaction`` so that re-uploading the same
+    image to a fresh transaction triggers a fresh Drive upload
+    instead of short-circuiting to the now-VOIDed Drive file
+    (which the next ``_process_voided_photos`` cycle will rename to
+    ``VOID_<orig>``).  Pre-fix (user-reported 2026-05-06):
+
+      1. User uploads receipt → Drive file created, hash cached
+      2. User voids the transaction → next sync renames Drive file
+         to ``VOID_*``.  hash_cache row still points to it.
+      3. User uploads SAME image to a new transaction → upload
+         dedup hits hash_cache, skips the upload, and points the
+         new transaction's ``photo_drive_url`` at the VOIDed file.
+      4. User can't find the image under the new transaction's
+         expected name on Drive.
+
+    Photos shared by another active (non-voided) transaction are
+    left in the cache — the dedup is still correct for them.
+    Returns the number of cache rows removed.
+
+    *commit*: when False the caller is bundling this cleanup into
+    a larger transaction (e.g. the void itself) and is responsible
+    for committing.
+    """
+    from fam.utils.photo_paths import parse_photo_paths
+
+    conn = get_connection()
+    # Collect every Drive URL referenced by THIS transaction's
+    # line items.  ``photo_drive_url`` may be a JSON array (multi-
+    # photo line items) so parse defensively.
+    rows = conn.execute(
+        "SELECT photo_drive_url FROM payment_line_items "
+        "WHERE transaction_id = ? "
+        "  AND photo_drive_url IS NOT NULL "
+        "  AND photo_drive_url != ''",
+        (txn_id,),
+    ).fetchall()
+    urls: set[str] = set()
+    for r in rows:
+        for u in parse_photo_paths(r['photo_drive_url']):
+            if u:
+                urls.add(u)
+    return _cleanup_orphaned_hashes_for_urls(urls, commit=commit)
+
+
 def get_all_photo_hashes() -> dict[str, str]:
     """Return all stored hashes as {content_hash: drive_url}.
 

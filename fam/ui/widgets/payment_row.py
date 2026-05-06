@@ -15,7 +15,9 @@ from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
 
 logger = logging.getLogger('fam.ui.widgets.payment_row')
 from fam.ui.styles import LIGHT_GRAY, WHITE, ERROR_COLOR, SUBTITLE_GRAY, HARVEST_GOLD, ACCENT_GREEN
-from fam.ui.helpers import NoScrollDoubleSpinBox, NoScrollComboBox
+from fam.ui.helpers import (
+    NoScrollDoubleSpinBox, NoScrollSpinBox, NoScrollComboBox,
+)
 
 
 class DenominationStepper(QWidget):
@@ -57,7 +59,13 @@ class DenominationStepper(QWidget):
         self._minus_btn.clicked.connect(self._decrement)
         layout.addWidget(self._minus_btn)
 
-        self._count_spin = QSpinBox()
+        # NoScrollSpinBox (not raw QSpinBox) so the count field
+        # gets the same overtype + cents-builder typing UX as every
+        # other numeric input in the app — consistency was the
+        # 2026-04-30 ask.  No-scroll behaviour also prevents the
+        # mouse wheel from accidentally bumping the unit count
+        # mid-payment.
+        self._count_spin = NoScrollSpinBox()
         self._count_spin.setRange(0, 9999)
         self._count_spin.setValue(0)
         self._count_spin.setAlignment(Qt.AlignCenter)
@@ -158,14 +166,43 @@ class DenominationStepper(QWidget):
 
 
 class PaymentRow(QFrame):
-    """A single payment method entry row."""
+    """A single payment method entry row.
+
+    Parameters
+    ----------
+    market_id : int, optional
+        Constrains the method dropdown to methods registered for this
+        market.
+    single_vendor_mode : bool, default False
+        When True the per-row vendor dropdown is hidden entirely.  Used
+        by AdjustmentDialog (which always edits a single transaction —
+        no vendor ambiguity) and as the natural fall-back for
+        single-transaction orders on the Payment screen.
+
+    Vendor binding (denominated rows)
+    ---------------------------------
+    Denominated payment methods (Food Bucks, FMNP-as-payment) bind to
+    a single vendor at capture time so reimbursement reports attribute
+    the physical instrument to the correct vendor.  Callers populate
+    the vendor pool via :meth:`set_order_vendors`; the row then filters
+    that pool by per-vendor eligibility (``vendor_payment_methods``)
+    and shows an inline dropdown next to the method combo whenever the
+    selected method has a denomination.
+    """
 
     changed = Signal()
     remove_requested = Signal(object)  # emits self
 
-    def __init__(self, parent=None, market_id=None):
+    def __init__(self, parent=None, market_id=None,
+                 single_vendor_mode: bool = False):
         super().__init__(parent)
         self._market_id = market_id
+        self._single_vendor_mode = bool(single_vendor_mode)
+        # Order-level vendor pool (set by parent screen via
+        # set_order_vendors).  When the selected method is denominated
+        # this list is intersected with vendor-level eligibility to
+        # populate the per-row vendor dropdown.
+        self._order_vendors: list[dict] = []
         self.setStyleSheet(f"""
             PaymentRow {{
                 background-color: {WHITE};
@@ -175,8 +212,11 @@ class PaymentRow(QFrame):
         """)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 5, 10, 5)
-        layout.setSpacing(8)
+        # Tighter inner padding + spacing per the v1.9.9 row redesign so
+        # the new vendor dropdown fits inline without forcing horizontal
+        # scrollbars on typical laptop displays.
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
 
         # Payment method combo
         self.method_combo = NoScrollComboBox()
@@ -187,13 +227,31 @@ class PaymentRow(QFrame):
 
         # Match percent label
         self.match_label = QLabel("0%")
-        self.match_label.setMinimumWidth(50)
-        self.match_label.setStyleSheet(f"font-weight: bold; color: {SUBTITLE_GRAY};")
+        self.match_label.setMinimumWidth(40)
+        self.match_label.setStyleSheet(
+            f"font-weight: bold; color: {SUBTITLE_GRAY};")
         layout.addWidget(self.match_label)
+
+        # Vendor combo — visible only when a denominated method is
+        # selected AND single_vendor_mode is False AND there are
+        # multiple vendors in the order.  Same minimum width as the
+        # method combo so the row reads as a uniform "method | vendor"
+        # pair when both are visible.
+        self.vendor_combo = NoScrollComboBox()
+        self.vendor_combo.setMinimumWidth(160)
+        self.vendor_combo.setToolTip(
+            "Vendor receiving this denominated payment.  Only vendors "
+            "registered for the selected method appear here — configure "
+            "eligibility in Settings → Vendors → Methods.")
+        self.vendor_combo.currentIndexChanged.connect(
+            lambda _: self.changed.emit())
+        self.vendor_combo.setVisible(False)
+        layout.addWidget(self.vendor_combo)
 
         # Charge input — what the customer pays for this payment method
         amount_label = QLabel("Charge:")
-        amount_label.setStyleSheet(f"font-weight: bold; color: {HARVEST_GOLD};")
+        amount_label.setStyleSheet(
+            f"font-weight: bold; color: {HARVEST_GOLD};")
         layout.addWidget(amount_label)
         self.amount_spin = NoScrollDoubleSpinBox()
         self.amount_spin.setRange(0, 99999.99)
@@ -225,7 +283,8 @@ class PaymentRow(QFrame):
 
         # Denomination hint (visible when method has denomination set but stepper not active)
         self.denom_hint = QLabel("")
-        self.denom_hint.setStyleSheet(f"font-weight: bold; color: {ACCENT_GREEN}; font-size: 13px;")
+        self.denom_hint.setStyleSheet(
+            f"font-weight: bold; color: {ACCENT_GREEN}; font-size: 13px;")
         self.denom_hint.setVisible(False)
         layout.addWidget(self.denom_hint)
 
@@ -236,17 +295,22 @@ class PaymentRow(QFrame):
         layout.addWidget(self._stepper)
         self._stepper_active = False
 
-        # Computed fields
-        layout.addWidget(QLabel("FAM Match:"))
+        # Computed fields — labels are now compact, reducing the wasted
+        # whitespace circled in the v1.9.9 mockup.
+        match_lbl = QLabel("Match:")
+        match_lbl.setStyleSheet(f"color: {SUBTITLE_GRAY}; font-size: 12px;")
+        layout.addWidget(match_lbl)
         self.match_amount_label = QLabel("$0.00")
         self.match_amount_label.setStyleSheet("font-weight: bold;")
-        self.match_amount_label.setMinimumWidth(70)
+        self.match_amount_label.setMinimumWidth(60)
         layout.addWidget(self.match_amount_label)
 
-        layout.addWidget(QLabel("Total:"))
+        total_lbl = QLabel("Total:")
+        total_lbl.setStyleSheet(f"color: {SUBTITLE_GRAY}; font-size: 12px;")
+        layout.addWidget(total_lbl)
         self.total_label = QLabel("$0.00")
         self.total_label.setStyleSheet("font-weight: bold;")
-        self.total_label.setMinimumWidth(70)
+        self.total_label.setMinimumWidth(60)
         layout.addWidget(self.total_label)
 
         # Photo button — visible when method has photo_required set
@@ -285,21 +349,111 @@ class PaymentRow(QFrame):
         self._update_match_label()
 
     def _load_methods(self):
-        self.method_combo.clear()
-        # Placeholder item — no userData so get_selected_method() returns None
-        self.method_combo.addItem("Select Payment Type...")
-        if self._market_id:
-            methods = get_payment_methods_for_market(self._market_id, active_only=True)
-            if not methods:
-                # Fallback: if no methods assigned to market, show all active
-                methods = get_all_payment_methods(active_only=True)
-        else:
-            methods = get_all_payment_methods(active_only=True)
-        for m in methods:
-            self.method_combo.addItem(
-                f"{m['name']} ({m['match_percent']:.0f}% match)",
-                userData=m
+        """Populate the method dropdown.
+
+        The pool is filtered in two passes:
+
+        1. **Market eligibility** — only methods registered for this
+           row's ``_market_id`` (existing behavior).
+        2. **Vendor eligibility** (v1.9.9+) — when
+           :meth:`set_order_vendors` has been called, additionally
+           filter to methods that *at least one* vendor in the order
+           is registered for via ``vendor_payment_methods``.  For
+           single-vendor orders this collapses to "only methods the
+           lone vendor accepts" — which prevents the volunteer from
+           selecting JH Food Bucks for a vendor that isn't registered
+           for it (the v1.9.9-onsite bug).
+        """
+        # Remember the user's current selection so we can restore it
+        # after re-loading (set_order_vendors triggers re-load).
+        current_id = self.get_selected_method_id()
+        # Block signals during the reload so we don't fire spurious
+        # ``currentIndexChanged`` events that would re-enter
+        # ``_on_changed`` while we're rebuilding state.
+        self.method_combo.blockSignals(True)
+        try:
+            self.method_combo.clear()
+            self.method_combo.addItem("Select Payment Type...")
+            # ``include_system=False`` filters out system-managed
+            # methods (Unallocated Funds, schema v25+) so coordinators
+            # can't pick them manually from the dropdown.  Unallocated
+            # Funds is only ever auto-injected by the Adjustments
+            # "customer gone" path — letting it appear here would
+            # turn a controlled FAM-absorbs-loss recovery into an
+            # ad-hoc workaround for "I don't feel like collecting".
+            if self._market_id:
+                methods = get_payment_methods_for_market(
+                    self._market_id, active_only=True,
+                    include_system=False)
+                if not methods:
+                    methods = get_all_payment_methods(
+                        active_only=True, include_system=False)
+            else:
+                methods = get_all_payment_methods(
+                    active_only=True, include_system=False)
+
+            # Vendor-eligibility narrowing.  Skip when there's no
+            # order context yet (e.g. PaymentRow constructed before
+            # the screen has loaded an order) — the parent screen
+            # will call set_order_vendors after the order loads,
+            # which triggers a re-load of this combo with the filter
+            # applied.
+            #
+            # Graceful fallback: if NO vendor in the pool has any
+            # vendor_payment_methods rows configured at all, skip the
+            # filter entirely.  Treats an uninitialized eligibility
+            # table as "permissive — anything goes" (matches the v24
+            # migration's permissive default and avoids hiding every
+            # method from databases that pre-date vendor-eligibility
+            # configuration).
+            if self._order_vendors:
+                eligible_pm_ids = self._collect_eligible_pm_ids()
+                if eligible_pm_ids is not None:
+                    methods = [m for m in methods if m['id'] in eligible_pm_ids]
+
+            for m in methods:
+                self.method_combo.addItem(
+                    f"{m['name']} ({m['match_percent']:.0f}% match)",
+                    userData=m,
+                )
+
+            # Restore prior selection if still present in the filtered
+            # pool, otherwise fall back to placeholder.
+            if current_id is not None:
+                for i in range(self.method_combo.count()):
+                    data = self.method_combo.itemData(i)
+                    if data and data.get('id') == current_id:
+                        self.method_combo.setCurrentIndex(i)
+                        break
+        finally:
+            self.method_combo.blockSignals(False)
+
+    def _collect_eligible_pm_ids(self):
+        """Return the set of payment_method ids registered for at least
+        one vendor in the current order pool.
+
+        Returns ``None`` when **no** vendor in the pool has any
+        vendor_payment_methods rows — this is the graceful permissive
+        fallback for uninitialized eligibility tables (legacy data,
+        pre-v1.9.9 test fixtures, etc.).  Callers should treat ``None``
+        as "do not filter".
+        """
+        if not self._order_vendors:
+            return None
+        try:
+            from fam.models.payment_method import (
+                get_vendor_payment_method_ids,
             )
+        except ImportError:
+            return None
+        out: set[int] = set()
+        any_configured = False
+        for v in self._order_vendors:
+            ids = get_vendor_payment_method_ids(v['id'])
+            if ids:
+                any_configured = True
+            out |= ids
+        return out if any_configured else None
 
     def reload_methods(self, market_id=None):
         """Reload the payment method dropdown, optionally filtered by market."""
@@ -317,8 +471,144 @@ class PaymentRow(QFrame):
         self._update_match_label()
         self._update_input_mode()
         self._update_photo_button()
+        self._refresh_vendor_combo()
         self._recompute()
         self.changed.emit()
+
+    # ── Vendor binding (denominated rows only) ──────────────────────
+
+    def set_order_vendors(self, vendors: list):
+        """Provide the pool of vendors that appear on the current order.
+
+        Triggers two filters:
+
+        * The **method dropdown** is re-loaded with vendor-eligibility
+          applied — methods that no vendor in the order is registered
+          for are excluded entirely.  For single-vendor orders this
+          locks the dropdown to that vendor's eligible methods.
+        * The per-row **vendor dropdown** (visible only when a
+          denominated method is selected on a multi-vendor order) is
+          repopulated with the eligible-vendor subset.
+
+        Pass ``[]`` to clear the pool (e.g. when no order is loaded);
+        the method combo falls back to the unfiltered market-level
+        pool and the vendor combo hides.
+        """
+        self._order_vendors = list(vendors or [])
+        # Re-filter the method dropdown so ineligible methods drop
+        # out the moment the order context is known.
+        self._load_methods()
+        self._refresh_vendor_combo()
+
+    def get_bound_vendor_id(self):
+        """Return the vendor id this row is bound to, or None.
+
+        Returns None when:
+        - the row's method is non-denominated (binding is implicit
+          via proportional distribution at save time),
+        - the row is in single_vendor_mode (AdjustmentDialog), or
+        - the order has only one vendor (binding is implicit).
+
+        We check the same state used to decide combo *visibility*
+        rather than Qt's ``isVisible()`` runtime flag — the latter
+        only flips True after a parent is shown, which makes
+        headless-test assertions unreliable.
+        """
+        method = self.get_selected_method()
+        is_denom = bool(
+            method and method.get('denomination')
+            and method['denomination'] > 0
+        )
+        if not is_denom:
+            return None
+        if self._single_vendor_mode:
+            return None
+        if len(self._order_vendors) <= 1:
+            return None
+        data = self.vendor_combo.currentData()
+        return data['id'] if data else None
+
+    def set_bound_vendor_id(self, vendor_id):
+        """Programmatically select a vendor in the dropdown.
+
+        Used by draft restore so reloaded denominated rows return to
+        their original vendor binding.  Falls back to the placeholder
+        if the vendor isn't in the current eligible pool.
+        """
+        if vendor_id is None:
+            self.vendor_combo.setCurrentIndex(0)
+            return
+        for i in range(self.vendor_combo.count()):
+            data = self.vendor_combo.itemData(i)
+            if data and data.get('id') == vendor_id:
+                self.vendor_combo.setCurrentIndex(i)
+                return
+        # Vendor not in current eligible pool — leave at placeholder
+        # so the eligibility guard (Layer 2 confirm-time check) flags
+        # it for the volunteer.
+        self.vendor_combo.setCurrentIndex(0)
+
+    def _refresh_vendor_combo(self):
+        """Repopulate the vendor combo against the current method.
+
+        Called from ``_on_changed`` whenever the user switches methods,
+        and from ``set_order_vendors`` when the parent screen updates
+        the vendor pool.  Preserves the user's current selection when
+        possible — only resets to placeholder if the previously-bound
+        vendor is no longer in the eligible pool.
+        """
+        method = self.get_selected_method()
+        is_denom = bool(method and method.get('denomination')
+                         and method['denomination'] > 0)
+
+        # Determine visibility:
+        # - hide entirely in single_vendor_mode (AdjustmentDialog)
+        # - hide when method is non-denominated (binding is implicit)
+        # - hide when there's only one vendor in the order pool
+        #   (auto-bound; no choice to make)
+        should_show = (is_denom
+                        and not self._single_vendor_mode
+                        and len(self._order_vendors) > 1)
+        self.vendor_combo.setVisible(should_show)
+        if not should_show:
+            return
+
+        # Filter the pool by per-vendor eligibility.
+        try:
+            from fam.models.payment_method import (
+                get_eligible_vendors_for_payment_method,
+            )
+            pool_ids = [v['id'] for v in self._order_vendors]
+            eligible = get_eligible_vendors_for_payment_method(
+                method['id'], pool_ids
+            )
+        except Exception:
+            # Fall back to the full order pool if the eligibility query
+            # fails for any reason — safer to show too many vendors than
+            # to lock the volunteer out entirely.  Layer 2 confirm-time
+            # guard still catches an ineligible binding.
+            eligible = list(self._order_vendors)
+
+        # Preserve current selection if it's still in the eligible set.
+        current_id = self.get_bound_vendor_id()
+        # Setting the combo programmatically must not refire the parent
+        # ``changed`` signal — block it during the rebuild.
+        self.vendor_combo.blockSignals(True)
+        try:
+            self.vendor_combo.clear()
+            self.vendor_combo.addItem("Select vendor…")  # placeholder
+            for v in eligible:
+                self.vendor_combo.addItem(v['name'], userData=v)
+            if current_id is not None:
+                for i in range(self.vendor_combo.count()):
+                    data = self.vendor_combo.itemData(i)
+                    if data and data.get('id') == current_id:
+                        self.vendor_combo.setCurrentIndex(i)
+                        break
+                else:
+                    self.vendor_combo.setCurrentIndex(0)
+        finally:
+            self.vendor_combo.blockSignals(False)
 
     def _update_input_mode(self):
         """Swap between stepper (denominated) and spinbox (non-denominated)."""
@@ -374,6 +664,18 @@ class PaymentRow(QFrame):
         *max_charge_cents* is in integer cents.
         Blocks signals to prevent cascading updates when setMaximum()
         clamps the current value.
+
+        Note: Qt's ``setMaximum()`` will silently clamp the current
+        value if it exceeds the new max.  This is intentional for
+        cap-aware write-back paths (where the engine adjusts
+        customer_charged due to a daily-match-cap, and the spinbox
+        must follow).  Upstream callers (``_push_row_limits``,
+        AdjustmentDialog ``_update_row_caps``) are responsible for
+        computing a correct max that reflects the row's *actual*
+        constraint — the v1.9.10 fix in ``_push_row_limits`` removed
+        the obsolete ``legacy_order_remaining`` floor for bound
+        denom rows so they no longer get a phantom max=0 when
+        cap-inflated non-denom rows over-count consumption.
         """
         if self._stepper_active:
             self._stepper.setMaxCharge(max_charge_cents)
@@ -396,7 +698,13 @@ class PaymentRow(QFrame):
         return self.method_combo.currentData()
 
     def get_data(self):
-        """Return payment data with all monetary values in integer cents."""
+        """Return payment data with all monetary values in integer cents.
+
+        ``bound_vendor_id`` carries the per-row vendor binding for
+        denominated payments; it's ``None`` for non-denominated rows
+        and for rows operating in single_vendor_mode (where the binding
+        is implicit in the caller's transaction context).
+        """
         method = self.get_selected_method()
         if not method:
             return None
@@ -415,6 +723,14 @@ class PaymentRow(QFrame):
             'match_amount': match_amount,
             'customer_charged': charge,
             'photo_source_paths': photo_paths,
+            'bound_vendor_id': self.get_bound_vendor_id(),
+            # Carrying the denomination through to the save path lets the
+            # rearchitected _distribute_and_save_payments distinguish
+            # denominated rows (commit entire amount to a single vendor's
+            # transaction) from non-denominated rows (proportional split
+            # against per-vendor remaining balance).  None / 0 means
+            # non-denominated.
+            'denomination': method.get('denomination'),
         }
 
     def get_selected_method_id(self):
@@ -425,6 +741,54 @@ class PaymentRow(QFrame):
     def has_method_selected(self):
         """Return True if a real payment method is selected (not the placeholder)."""
         return self.get_selected_method() is not None
+
+    def reset_to_default(self):
+        """Wipe the row back to its initial empty state.
+
+        Used by the Payment screen when the volunteer clicks the red X
+        on the only row in the order — prior versions silently no-op'd
+        because there must always be ≥1 row, leaving the volunteer to
+        manually clear each field.  This restores intuitive behavior:
+        X always *means something*, even on the last row.
+
+        Clears: method selection, charge amount, vendor binding, photo
+        attachments, denomination stepper state.
+        """
+        # Block signals during the reset so we don't fire a cascade of
+        # change emissions for each cleared widget — emit once at the end.
+        widgets_to_block = [self, self.method_combo, self.amount_spin,
+                            self.vendor_combo, self._stepper]
+        for w in widgets_to_block:
+            try:
+                w.blockSignals(True)
+            except Exception:
+                pass
+        try:
+            self.method_combo.setCurrentIndex(0)  # placeholder
+            self.amount_spin.setValue(0.0)
+            self._stepper.setValue(0)
+            self._stepper_active = False
+            self._stepper.setVisible(False)
+            self.amount_spin.setVisible(True)
+            self.denom_hint.setVisible(False)
+            self.vendor_combo.setCurrentIndex(0)
+            self.vendor_combo.setVisible(False)
+            # Clear photo state
+            self._photo_source_paths = []
+            self._expected_photo_count = 0
+            self._style_photo_btn(attached=False)
+            self.photo_btn.setVisible(False)
+            # Reset display labels
+            self.match_label.setText("--")
+            self.match_amount_label.setText("$0.00")
+            self.total_label.setText("$0.00")
+        finally:
+            for w in widgets_to_block:
+                try:
+                    w.blockSignals(False)
+                except Exception:
+                    pass
+        self.changed.emit()
 
     def set_excluded_methods(self, excluded_ids):
         """Gray out payment methods that are already selected in other rows.
@@ -461,20 +825,69 @@ class PaymentRow(QFrame):
         self.match_amount_label.setText(format_dollars(match_amount))
         self.total_label.setText(format_dollars(total))
 
-    def set_data(self, payment_method_id, method_amount):
-        """Set the row from existing data (method_amount is total allocation from DB)."""
+    def set_data(self, payment_method_id, method_amount,
+                 customer_charged=None, bound_vendor_id=None):
+        """Set the row from existing data (DB row).
+
+        Parameters
+        ----------
+        payment_method_id : int
+            Selects the matching method in the combo box.
+        method_amount : int
+            Total allocation in cents (charge + FAM match).
+        customer_charged : int, optional
+            The actual customer charge in cents.  When provided this is
+            written to the spinbox directly — preserving cap-inflated
+            charges across save/reload cycles.  When ``None`` (legacy
+            callers), falls back to deriving the charge from
+            ``method_amount`` via the inverse of charge_to_method_amount.
+        bound_vendor_id : int, optional
+            For denominated draft restore — selects the saved vendor
+            binding in the row's vendor dropdown.  When ``None`` the
+            dropdown stays at its placeholder.
+
+        The customer_charged fall-back path produces the wrong charge
+        whenever the daily match cap was applied: the cap inflates
+        ``customer_charged`` above ``method_amount/(1+match%)``, and
+        only the saved ``customer_charged`` field reflects what the
+        customer actually paid.  Always pass ``customer_charged`` from
+        DB rows when available.
+        """
         for i in range(self.method_combo.count()):
             m = self.method_combo.itemData(i)
             if m and m['id'] == payment_method_id:
                 self.method_combo.setCurrentIndex(i)
                 break
-        # Convert total allocation back to charge amount
-        method = self.get_selected_method()
-        if method:
-            charge = method_amount_to_charge(method_amount, method['match_percent'])
+
+        # v1.9.10 onsite-finding fix: restore vendor binding BEFORE
+        # setting charge.  The screen-level ``_update_summary`` fires
+        # after the method combo change (signal cascade) and computes
+        # this row's max via ``_push_row_limits``.  An UNBOUND denom
+        # row falls into the non-denom else-branch which uses
+        # ``order_remaining = effective_order_total - other_total``.
+        # During draft restore, prior non-denom rows can already have
+        # high method amounts loaded, so ``other_total`` exceeds the
+        # order total → ``max_charge = 0``.  Then
+        # ``_set_active_charge(customer_charged)`` is silently clamped
+        # to 0 by ``QSpinBox.setMaximum(0)``, and the FB row comes
+        # back at $0 instead of its saved customer charge.  Setting
+        # the binding first lets ``_push_row_limits`` use the bound-
+        # denom branch (per-vendor cap) when the charge write happens.
+        if bound_vendor_id is not None:
+            self.set_bound_vendor_id(bound_vendor_id)
+
+        if customer_charged is not None:
+            # Authoritative path — use the saved charge directly.
+            self._set_active_charge(customer_charged)
         else:
-            charge = method_amount
-        self._set_active_charge(charge)
+            # Legacy fall-back — derive charge from method_amount.
+            method = self.get_selected_method()
+            if method:
+                charge = method_amount_to_charge(
+                    method_amount, method['match_percent'])
+            else:
+                charge = method_amount
+            self._set_active_charge(charge)
 
     def validate_denomination(self):
         """Return error string if charge violates denomination, else None."""

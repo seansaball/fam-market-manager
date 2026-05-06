@@ -35,37 +35,251 @@ class ColorPreservingDelegate(QStyledItemDelegate):
 # ── Scroll-safe input widgets ────────────────────────────────────
 # Prevent accidental value changes when scrolling the page.
 
+def _safe_select_all(widget):
+    """Call ``widget.selectAll()`` if the underlying C++ object is
+    still alive.
+
+    ``focusInEvent`` schedules a deferred ``selectAll`` via
+    ``QTimer.singleShot(0, ...)`` so the focus's selection-collapse
+    behaviour doesn't override it.  But if the widget gets deleted
+    between focus-in and the timer firing — e.g. the user clicked a
+    spinbox in a payment row, then immediately clicked Proceed-to-
+    Payment, and ``_clear_payment_rows()``'s ``deleteLater`` destroys
+    the spinbox before the deferred ``selectAll`` runs — the bound
+    method points at a freed C++ object and raises:
+
+        RuntimeError: Internal C++ object
+        (NoScrollDoubleSpinBox) already deleted.
+
+    The exception bubbles to ``sys.excepthook`` and surfaces as the
+    "Unexpected Error" dialog the user saw on 2026-04-30.  Guarding
+    the call here is the right place: every NoScroll spin-box uses
+    the same focusIn pattern, and the call is purely cosmetic
+    (auto-select-on-focus is a UX nicety, not load-bearing).
+    """
+    try:
+        widget.selectAll()
+    except RuntimeError:
+        # C++ object already deleted between focusIn and singleShot
+        # firing.  Nothing to select; safe to swallow.
+        pass
+
+
+def _try_overtype_next_char(line_edit) -> bool:
+    """Helper: in overtype mode, before Qt inserts the typed digit at
+    the cursor position, delete the character currently sitting there
+    so the new keystroke replaces it (not push-inserts beside it).
+
+    Returns ``True`` when the helper consumed a character and the
+    caller should let ``super().keyPressEvent`` insert the typed
+    digit.  Returns ``False`` when the cursor has nothing to
+    overtype — the caller should then fall back to *cents-builder*
+    shift-left mode (``_shift_left_append``).
+
+    Behaviour:
+      * Cursor on a digit  → ``del_()`` removes that digit;
+        returns ``True``.
+      * Cursor on a decimal point → skip past the ``.`` and remove
+        the next digit; returns ``True``.
+      * Cursor at end / on non-digit non-``.`` char (e.g. prefix
+        space) → returns ``False`` so caller falls back to
+        shift-left.
+      * Selection already present → returns ``False`` so caller
+        handles the selection branch separately.
+    """
+    if line_edit.hasSelectedText():
+        return False
+    cursor_pos = line_edit.cursorPosition()
+    full_text = line_edit.text()
+    if cursor_pos >= len(full_text):
+        return False
+    ch = full_text[cursor_pos]
+    if ch.isdigit():
+        line_edit.del_()
+        return True
+    if ch == '.' and cursor_pos + 1 < len(full_text) \
+            and full_text[cursor_pos + 1].isdigit():
+        line_edit.setCursorPosition(cursor_pos + 1)
+        line_edit.del_()
+        return True
+    return False
+
+
+# Backward-compatible alias for tests that imported the original.
+_overtype_eat_next_digit = _try_overtype_next_char
+
+
+def _reformat_and_park_cursor_before_decimal(spin):
+    """After the selection-replace branch fires, the spinbox's
+    QLineEdit shows the user-typed digits raw (e.g. ``$ 1``) — Qt
+    only reformats to the full ``$ 1.00`` display on focus loss.
+
+    For the canonical user-pinned typing ladder
+    (``1 → $1.00, 1 → $1.10, 1 → $1.11, 1 → $11.11``) to work, we
+    need the lineEdit to show ``$ 1.00`` *immediately* so the second
+    keystroke sees ``.`` under the cursor and overtype-skips it.
+
+    Without this helper, ``$ 1`` (length 3) leaves cursor at end →
+    second keystroke triggers cents-builder shift-left → ``$ 10.0X``,
+    which the user reported as the receipt-total bug ("type 12 →
+    $10.02").  Reproducible only on fields with
+    ``setSpecialValueText`` set + tab-in-with-selectAll entry.
+
+    Implementation:
+      * Re-render lineEdit text from ``textFromValue(self.value())``
+        wrapped with prefix + suffix.
+      * Park cursor immediately before the ``.`` so the next
+        keystroke hits the overtype branch (skip ``.``, replace next).
+      * Suppress signals during ``setText`` so we don't trigger a
+        spurious ``valueChanged`` (the value didn't actually change).
+
+    Integer ``QSpinBox`` short-circuits — no decimal to park before;
+    cursor stays at end and shift-left is the correct next branch.
+
+    Single-decimal fields (e.g. percent, ``decimals=1``) also short-
+    circuit: their typing pattern is naturally shift-left ("type 50
+    → 50.0%") and parking on the decimal would force an extra
+    keystroke to skip past it.  Only ``decimals >= 2`` (currency)
+    benefits from the ladder pattern $1.00 → $1.10 → $1.11 → $11.11.
+    """
+    if not isinstance(spin, QDoubleSpinBox) or spin.decimals() < 2:
+        return
+    line = spin.lineEdit()
+    formatted = spin.prefix() + spin.textFromValue(spin.value()) + spin.suffix()
+    if line.text() != formatted:
+        line.blockSignals(True)
+        line.setText(formatted)
+        line.blockSignals(False)
+    dot_pos = formatted.find('.')
+    if dot_pos >= 0:
+        line.setCursorPosition(dot_pos)
+
+
+def _shift_left_append(spin, digit: int):
+    """Cents-builder fallback: shift the spinbox value left by one
+    decimal place and append the typed digit.
+
+    Activated when the user has already overtyped past the last
+    editable digit and the cursor is at end-of-text.  Without this,
+    the field would silently swallow further keystrokes (Option A
+    pure-overtype behaviour from the original UX assessment).
+
+    Pattern (currency, decimals=2 starting at $ 0.00, cursor at
+    pos 2 right after the prefix):
+
+        keystroke 1 (selection-replace):  $ 0.00 → $ 1.00
+        keystroke 2 (overtype on '.'):    $ 1.00 → $ 1.10
+        keystroke 3 (overtype on '0'):    $ 1.10 → $ 1.11
+        keystroke 4 (cursor at end →
+                     shift-left):         $ 1.11 → $ 11.11
+        keystroke 5 (cursor at end):      $ 11.11 → $ 111.11
+        ...                               (until ``maximum()``)
+
+    Math is done in integer space (multiply by ``10**decimals``)
+    so float drift can't sneak in.  Values that would exceed
+    ``spin.maximum()`` are clamped — extra keystrokes are silently
+    ignored, matching how Qt clamps step-up at the max.
+    """
+    decimals = spin.decimals() if hasattr(spin, 'decimals') else 0
+    factor = 10 ** decimals
+    current_int = round(spin.value() * factor)
+    new_int = current_int * 10 + digit
+    max_int = round(spin.maximum() * factor)
+    if new_int > max_int:
+        return  # at cap; absorb the keystroke
+    new_value = new_int / factor if decimals > 0 else new_int
+    spin.setValue(new_value)
+    # Pin cursor to end so the next keystroke continues shifting.
+    spin.lineEdit().setCursorPosition(len(spin.lineEdit().text()))
+
+
 class NoScrollSpinBox(QSpinBox):
     """QSpinBox that ignores mouse wheel events and supports
-    select-all-on-focus and type-to-replace behavior."""
+    select-all-on-focus, overtype (type-to-replace), and
+    cents-builder shift-left for keystrokes past the last digit.
+
+    Overtype: pressing a digit replaces the digit currently under
+    the cursor instead of inserting beside it.  Matches the
+    expectation a cashier brings from POS terminals — type the
+    new value over the old, no manual delete-key dance.
+
+    Shift-left fallback: once the cursor reaches the end of the
+    text, additional digits *push* existing digits left (calculator-
+    style) so the user can keep building the number naturally.
+
+    Backspace, Delete, arrows, paste, Ctrl+A, Tab, etc. all retain
+    standard Qt behaviour; only digit keys are intercepted.
+    """
 
     def wheelEvent(self, event):
         event.ignore()
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
-        QTimer.singleShot(0, self.selectAll)
+        QTimer.singleShot(0, lambda: _safe_select_all(self))
 
     def keyPressEvent(self, event):
-        if self.lineEdit().hasSelectedText() and event.text() in '0123456789':
-            self.lineEdit().del_()
+        text = event.text()
+        if text in '0123456789':
+            line = self.lineEdit()
+            if line.hasSelectedText():
+                line.del_()                          # type-to-replace
+                super().keyPressEvent(event)
+                # Integer field: no decimal to park before — cursor
+                # already at end is correct for shift-left next.
+                return
+            if _try_overtype_next_char(line):        # overtype mode
+                super().keyPressEvent(event)
+                return
+            # Cursor at end → cents-builder shift-left.
+            _shift_left_append(self, int(text))
+            return
         super().keyPressEvent(event)
 
 
 class NoScrollDoubleSpinBox(QDoubleSpinBox):
     """QDoubleSpinBox that ignores mouse wheel events and supports
-    select-all-on-focus and type-to-replace behavior."""
+    select-all-on-focus, overtype (type-to-replace), and
+    cents-builder shift-left for keystrokes past the last digit.
+
+    See ``NoScrollSpinBox`` for the rationale.  The decimal-spin
+    variant additionally skips over the ``.`` character — typing
+    a digit while sitting on the decimal point lands on the
+    fractional part rather than overwriting the period.
+    """
 
     def wheelEvent(self, event):
         event.ignore()
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
-        QTimer.singleShot(0, self.selectAll)
+        QTimer.singleShot(0, lambda: _safe_select_all(self))
 
     def keyPressEvent(self, event):
-        if self.lineEdit().hasSelectedText() and event.text() in '0123456789.':
-            self.lineEdit().del_()
+        text = event.text()
+        line = self.lineEdit()
+        if text in '0123456789':
+            if line.hasSelectedText():
+                line.del_()                          # type-to-replace
+                super().keyPressEvent(event)
+                # Force the lineEdit to show the full formatted
+                # display (e.g. "$ 1.00" instead of "$ 1") and park
+                # cursor before the decimal — without this, the next
+                # keystroke would land at end-of-text and trigger
+                # shift-left ("type 12 → $10.02" bug on fields with
+                # setSpecialValueText, reported 2026-04-30).
+                _reformat_and_park_cursor_before_decimal(self)
+                return
+            if _try_overtype_next_char(line):        # overtype mode
+                super().keyPressEvent(event)
+                return
+            # Cursor at end → cents-builder shift-left.
+            _shift_left_append(self, int(text))
+            return
+        if text == '.' and line.hasSelectedText():
+            # Existing carve-out: typing a literal "." with a
+            # selection wipes the selection so super() can insert.
+            line.del_()
         super().keyPressEvent(event)
 
 

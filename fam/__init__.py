@@ -1,3 +1,3 @@
 """FAM Market Day Transaction Manager."""
 
-__version__ = "1.9.8"
+__version__ = "2.0.6"

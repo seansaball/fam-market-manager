@@ -1,5 +1,6 @@
 """Screen F: Reports and Exports."""
 
+import logging
 import os
 import tempfile
 import webbrowser
@@ -26,7 +27,7 @@ from fam.models.payment_method import get_all_payment_methods
 from fam.utils.export import (
     export_vendor_reimbursement, export_fam_match_report, export_detailed_ledger,
     export_activity_log, export_geolocation_report, export_transaction_log,
-    export_error_log, generate_export_filename
+    export_error_log, export_generated_rewards, generate_export_filename
 )
 from fam.models.audit import get_transaction_log, ACTION_LABELS
 from fam.utils.log_reader import parse_log_file
@@ -41,6 +42,8 @@ from fam.ui.helpers import (
     make_field_label, make_item, configure_table, CheckableComboBox,
     DateRangeWidget, NoScrollComboBox
 )
+
+logger = logging.getLogger('fam.ui.reports_screen')
 from fam.utils.money import cents_to_dollars
 
 
@@ -56,6 +59,7 @@ class ReportsScreen(QWidget):
         self._geo_data = []
         self._txn_log_data = []
         self._error_log_data = []
+        self._rewards_data = []
         self._error_log_loaded = False
         self._chart_pie_data = []
         self._chart_trend_data = []
@@ -139,6 +143,14 @@ class ReportsScreen(QWidget):
         self.summary_row.add_card("customer_paid", "Customer Paid")
         self.summary_row.add_card("fam_match", "FAM Match", highlight=True)
         self.summary_row.add_card("fmnp_total", "FMNP Checks", highlight=True)
+        # FAM Absorbed (Unallocated Funds, schema v25+) — losses FAM
+        # eats when an adjustment finds a customer was undercharged
+        # but the customer has already left the market.  Shown as a
+        # distinct tile so it's clearly NOT lumped in with the regular
+        # FAM Match contribution (which is a multiplier on what the
+        # customer actually paid, not pure absorption).
+        self.summary_row.add_card("fam_absorbed", "FAM Absorbed",
+                                  highlight=True)
 
         layout.addWidget(self.summary_row)
 
@@ -159,10 +171,17 @@ class ReportsScreen(QWidget):
         self.tabs.addTab(vendor_tab, "Vendor Reimbursement")
 
         # FAM Match Report tab
+        # The "FAM Absorbed" column (4th) is non-zero ONLY for the
+        # 'Unallocated Funds' system method — for every other row it
+        # shows $0.  Keeping it as a column on every row (rather than
+        # a separate report) keeps the grid uniform and the export
+        # CSV stable in shape regardless of whether any losses
+        # occurred during the filter window.
         self.match_table = QTableWidget()
-        self.match_table.setColumnCount(3)
+        self.match_table.setColumnCount(4)
         self.match_table.setHorizontalHeaderLabels(
-            ["Payment Method", "Total Allocated", "Total FAM Match"]
+            ["Payment Method", "Total Allocated",
+             "Total FAM Match", "FAM Absorbed"]
         )
         configure_table(self.match_table, resizable=True)
 
@@ -175,11 +194,15 @@ class ReportsScreen(QWidget):
         sl.addWidget(export_btn2)
         self.tabs.addTab(match_tab, "FAM Match Report")
 
-        # Detailed Ledger tab
+        # Detailed Ledger tab.
+        # v2.0.6: added Zip Code column (between Customer and Vendor)
+        # so coordinators can correlate which customer demographics
+        # used which payment methods at which vendors.
         self.ledger_table = QTableWidget()
-        self.ledger_table.setColumnCount(9)
+        self.ledger_table.setColumnCount(10)
         self.ledger_table.setHorizontalHeaderLabels(
-            ["Transaction ID", "Timestamp", "Customer", "Vendor", "Receipt Total",
+            ["Transaction ID", "Timestamp", "Customer", "Zip Code",
+             "Vendor", "Receipt Total",
              "Customer Paid", "FAM Match", "Status", "Payment Methods"]
         )
         configure_table(self.ledger_table, resizable=True)
@@ -213,6 +236,61 @@ class ReportsScreen(QWidget):
         export_btn4.clicked.connect(lambda: self._export("activity_log"))
         al.addWidget(export_btn4)
         self.tabs.addTab(activity_tab, "Activity Log")
+
+        # Generated Rewards tab (v1.9.10+)
+        # Customer-facing rewards add-on — derived view, not stored.
+        # Hidden when the rewards feature flag is off; otherwise shows
+        # one row per (customer order × rule that fired) recomputed
+        # against the current state of the DB on every refresh.
+        # Voided/adjusted transactions reflow naturally because the
+        # underlying source-total query excludes voided txns.
+        #
+        # Disclaimer banner above the table reminds the reader this
+        # is NOT a financial report — rewards are physical scrip
+        # the FAM rep handed the customer separately and have zero
+        # impact on vendor reimbursement / FAM match.
+        rewards_tab = QWidget()
+        rewards_outer = QVBoxLayout(rewards_tab)
+        rewards_banner = QLabel(
+            "<i>Rewards are a customer-facing marketing/loyalty "
+            "add-on — physical scrip the FAM rep handed the "
+            "customer separately.  These rows are NOT part of "
+            "vendor reimbursement, NOT part of FAM match, and "
+            "NOT linked to any payment_line_item.  Each row is a "
+            "<b>write-once historical snapshot</b> of what was "
+            "given at payment-confirmation time — voids and "
+            "adjustments do NOT modify or remove these rows.</i>"
+        )
+        rewards_banner.setWordWrap(True)
+        rewards_banner.setStyleSheet(
+            "padding: 8px; background-color: #F3E5F5; "
+            "border: 1px solid #7B1FA2; border-radius: 6px; "
+            "font-size: 12px; color: #4A148C;")
+        rewards_outer.addWidget(rewards_banner)
+        # v2.0.6: Zip Code column lets coordinators see which customer
+        # demographics earned which rewards (the rewards rows already
+        # carry customer_label; pulling zip from the customer_order is
+        # a single-hop join).
+        self.rewards_table = QTableWidget()
+        self.rewards_table.setColumnCount(11)
+        self.rewards_table.setHorizontalHeaderLabels([
+            "Market Name", "Date", "Customer", "Zip Code",
+            "Source Method", "Source Total",
+            "Threshold",
+            "Reward Method", "Reward Unit",
+            "Units Earned", "Reward Total",
+        ])
+        configure_table(self.rewards_table, resizable=True)
+        rewards_outer.addWidget(self.rewards_table)
+        rewards_btn_row = QHBoxLayout()
+        export_rewards_btn = QPushButton("Export Generated Rewards CSV")
+        export_rewards_btn.setObjectName("secondary_btn")
+        export_rewards_btn.clicked.connect(
+            lambda: self._export("generated_rewards"))
+        rewards_btn_row.addWidget(export_rewards_btn)
+        rewards_btn_row.addStretch()
+        rewards_outer.addLayout(rewards_btn_row)
+        self.tabs.addTab(rewards_tab, "Generated Rewards")
 
         # Geolocation Report tab
         geo_tab = QWidget()
@@ -472,6 +550,20 @@ class ReportsScreen(QWidget):
         where, params = self._build_where()
         fmnp_where, fmnp_params = self._build_fmnp_where()
 
+        # v2.0.1: open a single read transaction so every SELECT
+        # below sees the SAME WAL snapshot.  Without this, a
+        # background sync write or another screen's mutation can
+        # land between independent SELECTs and the Vendor /
+        # Detailed Ledger / Match Report tables end up reflecting
+        # different points in time.
+        _opened_read_txn = False
+        try:
+            conn.execute("BEGIN")
+            _opened_read_txn = True
+        except Exception:
+            logger.debug("Could not BEGIN read transaction in "
+                         "_generate_reports", exc_info=True)
+
         # ── Vendor reimbursement ─────────────────────────────────
         # Check if v19 vendor columns exist
         try:
@@ -498,11 +590,16 @@ class ReportsScreen(QWidget):
             ORDER BY m.name, v.name
         """, params).fetchall()
 
-        # Dynamic payment method breakdown per (market, vendor)
+        # Per-method physical-instrument totals + per-vendor FAM Match.
+        # See ``_collect_vendor_reimbursement`` for the column-semantics
+        # rationale (v1.9.10+: per-method columns show customer_charged,
+        # FAM Match is its own dedicated column).
         method_rows = conn.execute(f"""
             SELECT v.name AS vendor,
                    m.name AS market_name,
                    pl.method_name_snapshot AS method,
+                   COALESCE(SUM(pl.customer_charged), 0) AS customer_total,
+                   COALESCE(SUM(pl.match_amount), 0) AS match_total,
                    COALESCE(SUM(pl.method_amount), 0) AS method_total
             FROM payment_line_items pl
             JOIN transactions t ON pl.transaction_id = t.id
@@ -513,11 +610,25 @@ class ReportsScreen(QWidget):
             GROUP BY m.id, v.id, v.name, pl.method_name_snapshot
         """, params).fetchall()
 
+        # Per-method column shows customer_charged for ordinary
+        # methods; for the system-managed Unallocated Funds row it
+        # shows ``method_amount`` (= the absorbed loss) so the row
+        # identity ``Σ method-cols + FAM Match + FMNP_External =
+        # Total Due`` holds.  Mirrors the same fix in
+        # ``_collect_vendor_reimbursement``.
+        from fam.models.payment_method import UNALLOCATED_FUNDS_NAME
         all_methods = sorted({r['method'] for r in method_rows})
         method_by_vendor: dict[tuple, dict[str, float]] = {}
+        fam_match_by_vendor: dict[tuple, int] = {}
         for r in method_rows:
             key = (r['market_name'], r['vendor'])
-            method_by_vendor.setdefault(key, {})[r['method']] = r['method_total']
+            if r['method'] == UNALLOCATED_FUNDS_NAME:
+                value = r['method_total']
+            else:
+                value = r['customer_total']
+            method_by_vendor.setdefault(key, {})[r['method']] = value
+            fam_match_by_vendor[key] = (
+                fam_match_by_vendor.get(key, 0) + r['match_total'])
 
         # Build combined vendor dict from transactions
         def _build_addr(row):
@@ -535,6 +646,10 @@ class ReportsScreen(QWidget):
                 parts.append(csz)
             return ', '.join(parts)
 
+        # v1.9.10 follow-up (2026-05-01): keep money in integer
+        # cents internally; emit floats only at the final pass.
+        # See _collect_vendor_reimbursement in data_collector.py
+        # for the same fix and the float-drift rationale.
         vendor_dict = {}
         for r in vendor_rows:
             month_str = ''
@@ -549,9 +664,10 @@ class ReportsScreen(QWidget):
                 'address': _build_addr(r),
                 'month': month_str,
                 'dates': r['transaction_dates'] or '',
-                'total_due': cents_to_dollars(r['gross_sales']),
-                'methods': {m: cents_to_dollars(a) for m, a in method_by_vendor.get(key, {}).items()},
-                'fmnp_external': 0,
+                '_total_due_cents': r['gross_sales'],
+                '_fam_match_cents': fam_match_by_vendor.get(key, 0),
+                '_method_cents': dict(method_by_vendor.get(key, {})),
+                '_fmnp_external_cents': 0,
             }
 
         # Merge external FMNP entries (from fmnp_entries table)
@@ -572,10 +688,10 @@ class ReportsScreen(QWidget):
 
         for r in fmnp_vendor_rows:
             key = (r['market_name'], r['vendor'])
-            fmnp_dollars = cents_to_dollars(r['fmnp_entry_total'])
+            fmnp_cents = r['fmnp_entry_total']
             if key in vendor_dict:
-                vendor_dict[key]['fmnp_external'] = fmnp_dollars
-                vendor_dict[key]['total_due'] += fmnp_dollars
+                vendor_dict[key]['_fmnp_external_cents'] = fmnp_cents
+                vendor_dict[key]['_total_due_cents'] += fmnp_cents
                 existing = set(vendor_dict[key]['dates'].split(',')) \
                     if vendor_dict[key]['dates'] else set()
                 new_dates = set((r['fmnp_dates'] or '').split(','))
@@ -593,16 +709,40 @@ class ReportsScreen(QWidget):
                     'address': _build_addr(r),
                     'month': month_str,
                     'dates': r['fmnp_dates'] or '',
-                    'total_due': fmnp_dollars,
-                    'methods': {},
-                    'fmnp_external': fmnp_dollars,
+                    '_total_due_cents': fmnp_cents,
+                    '_fam_match_cents': 0,
+                    '_method_cents': {},
+                    '_fmnp_external_cents': fmnp_cents,
                 }
 
-        vendor_list = sorted(vendor_dict.values(), key=lambda x: (x['market_name'], x['vendor']))
+        # Final emission: cents → dollars, exactly once per field.
+        vendor_list = []
+        for key in sorted(vendor_dict.keys()):
+            rc = vendor_dict[key]
+            vendor_list.append({
+                'market_name': rc['market_name'],
+                'vendor': rc['vendor'],
+                'check_payable_to': rc['check_payable_to'],
+                'address': rc['address'],
+                'month': rc['month'],
+                'dates': rc['dates'],
+                'total_due': cents_to_dollars(rc['_total_due_cents']),
+                'fam_match': cents_to_dollars(rc['_fam_match_cents']),
+                'methods': {m: cents_to_dollars(c)
+                             for m, c in rc['_method_cents'].items()},
+                'fmnp_external': cents_to_dollars(
+                    rc['_fmnp_external_cents']),
+            })
 
-        # Build dynamic table columns
+        # Build dynamic table columns.
+        # v1.9.10 layout: 'FAM Match' is its own column between
+        # 'Total Due to Vendor' and the per-method columns so the
+        # manager can see FAM's contribution at a glance without
+        # having to subtract.  Per-method columns now show
+        # customer_charged (physical-instrument count × face value).
         fixed_cols = ['Market Name', 'Vendor',
-                      'Month', 'Date(s)', 'Total Due to Vendor']
+                      'Month', 'Date(s)', 'Total Due to Vendor',
+                      'FAM Match']
         method_cols = list(all_methods)
         tail_cols = ['FMNP (External)', 'Check Payable To', 'Address']
         all_cols = fixed_cols + method_cols + tail_cols
@@ -627,6 +767,8 @@ class ReportsScreen(QWidget):
             self.vendor_table.setItem(i, col, make_item(v['dates'])); col += 1
             self.vendor_table.setItem(i, col, make_item(
                 f"${v['total_due']:.2f}", v['total_due'])); col += 1
+            self.vendor_table.setItem(i, col, make_item(
+                f"${v['fam_match']:.2f}", v['fam_match'])); col += 1
 
             for m in method_cols:
                 amt = v['methods'].get(m, 0)
@@ -644,6 +786,7 @@ class ReportsScreen(QWidget):
                 'Month': v['month'],
                 'Date(s)': v['dates'],
                 'Total Due to Vendor': v['total_due'],
+                'FAM Match': v['fam_match'],
             }
             for m in method_cols:
                 row_data[m] = v['methods'].get(m, 0)
@@ -684,20 +827,45 @@ class ReportsScreen(QWidget):
         self.match_table.setRowCount(len(match_rows))
         total_customer = 0
         total_fam_match = 0
+        total_fam_absorbed = 0
+        # v2.0.1: the "FMNP Checks" summary tile must include
+        # FMNP captured via Payment Screen (Path 1) AND via the
+        # FMNP Entry screen (Path 2 — fmnp_external below).
+        # Earlier versions tallied only Path 2, showing $0 on
+        # markets that record FMNP exclusively through the
+        # Payment Screen.  Path 1 physical face value =
+        # (method_amount - match_amount) = customer_charged.
+        total_fmnp_path1 = 0
+        from fam.models.payment_method import UNALLOCATED_FUNDS_NAME
         for i, r in enumerate(match_rows):
             allocated = cents_to_dollars(r['total_allocated'])
             fam_match = cents_to_dollars(r['total_fam_match'])
-            total_customer += (allocated - fam_match)
-            total_fam_match += fam_match
+            # Unallocated Funds method_amount IS the absorbed loss —
+            # FAM funds the entire amount because the customer didn't
+            # pay it.  Keep it OUT of "customer_paid" (the customer
+            # paid $0 of it) and OUT of "total_fam_match" (it isn't a
+            # match — it's pure absorption).
+            is_absorbed = (r['method'] == UNALLOCATED_FUNDS_NAME)
+            fam_absorbed = allocated if is_absorbed else 0
+            if is_absorbed:
+                total_fam_absorbed += fam_absorbed
+            else:
+                total_customer += (allocated - fam_match)
+                total_fam_match += fam_match
+                if r['method'] == 'FMNP':
+                    total_fmnp_path1 += (allocated - fam_match)
 
             self.match_table.setItem(i, 0, make_item(r['method']))
             self.match_table.setItem(i, 1, make_item(f"${allocated:.2f}", allocated))
             self.match_table.setItem(i, 2, make_item(f"${fam_match:.2f}", fam_match))
+            self.match_table.setItem(i, 3, make_item(
+                f"${fam_absorbed:.2f}", fam_absorbed))
 
             self._match_data.append({
                 'Payment Method': r['method'],
                 'Total Allocated': allocated,
-                'Total FAM Match': fam_match
+                'Total FAM Match': fam_match,
+                'FAM Absorbed': fam_absorbed,
             })
 
         # Add external FMNP entries to FAM Match report
@@ -717,27 +885,38 @@ class ReportsScreen(QWidget):
                 f"${fmnp_ext_dollars:.2f}", fmnp_ext_dollars))
             self.match_table.setItem(row_idx, 2, make_item(
                 "$0.00", 0))
+            self.match_table.setItem(row_idx, 3, make_item(
+                "$0.00", 0))
             # No FAM match — external checks are vendor reimbursements only
 
             self._match_data.append({
                 'Payment Method': 'FMNP (External)',
                 'Total Allocated': fmnp_ext_dollars,
                 'Total FAM Match': 0,
+                'FAM Absorbed': 0,
             })
         self.match_table.resizeColumnsToContents()
         self.match_table.setSortingEnabled(True)
 
-        # Update summary cards
+        # Update summary cards.  ``total_fmnp`` aggregates Path 2
+        # (fmnp_entries.amount, accumulated above) and Path 1
+        # (FMNP captured via Payment Screen — physical face
+        # value = customer_charged — accumulated as
+        # ``total_fmnp_path1``).
         self.summary_row.update_card("total_receipts", f"${total_gross:.2f}")
         self.summary_row.update_card("customer_paid", f"${total_customer:.2f}")
         self.summary_row.update_card("fam_match", f"${total_fam_match:.2f}")
-        self.summary_row.update_card("fmnp_total", f"${total_fmnp:.2f}")
+        self.summary_row.update_card(
+            "fmnp_total", f"${total_fmnp + total_fmnp_path1:.2f}")
+        self.summary_row.update_card("fam_absorbed",
+                                     f"${total_fam_absorbed:.2f}")
 
         # ── Detailed ledger ──────────────────────────────────────
         ledger_rows = conn.execute(f"""
             SELECT t.fam_transaction_id, v.name as vendor,
                    t.receipt_total, t.status, t.created_at,
                    COALESCE(co.customer_label, '') as customer_id,
+                   COALESCE(co.zip_code, '') as zip_code,
                    COALESCE(SUM(pl.customer_charged), 0) as customer_paid,
                    COALESCE(SUM(pl.match_amount), 0) as fam_match,
                    GROUP_CONCAT(pl.method_name_snapshot || ': $' ||
@@ -762,17 +941,19 @@ class ReportsScreen(QWidget):
             self.ledger_table.setItem(i, 0, make_item(r['fam_transaction_id']))
             self.ledger_table.setItem(i, 1, make_item(r['created_at'] or ''))
             self.ledger_table.setItem(i, 2, make_item(r['customer_id']))
-            self.ledger_table.setItem(i, 3, make_item(r['vendor']))
-            self.ledger_table.setItem(i, 4, make_item(f"${rt:.2f}", rt))
-            self.ledger_table.setItem(i, 5, make_item(f"${cp:.2f}", cp))
-            self.ledger_table.setItem(i, 6, make_item(f"${fm:.2f}", fm))
-            self.ledger_table.setItem(i, 7, make_item(r['status']))
-            self.ledger_table.setItem(i, 8, make_item(r['methods'] or ''))
+            self.ledger_table.setItem(i, 3, make_item(r['zip_code'] or ''))
+            self.ledger_table.setItem(i, 4, make_item(r['vendor']))
+            self.ledger_table.setItem(i, 5, make_item(f"${rt:.2f}", rt))
+            self.ledger_table.setItem(i, 6, make_item(f"${cp:.2f}", cp))
+            self.ledger_table.setItem(i, 7, make_item(f"${fm:.2f}", fm))
+            self.ledger_table.setItem(i, 8, make_item(r['status']))
+            self.ledger_table.setItem(i, 9, make_item(r['methods'] or ''))
 
             self._ledger_data.append({
                 'Transaction ID': r['fam_transaction_id'],
                 'Timestamp': r['created_at'] or '',
                 'Customer': r['customer_id'],
+                'Zip Code': r['zip_code'] or '',
                 'Vendor': r['vendor'],
                 'Receipt Total': rt,
                 'Customer Paid': cp,
@@ -806,19 +987,23 @@ class ReportsScreen(QWidget):
                 self.ledger_table.setItem(row_idx, 0, make_item(f"FMNP-{r['id']}"))
                 self.ledger_table.setItem(row_idx, 1, make_item(r['created_at'] or ''))
                 self.ledger_table.setItem(row_idx, 2, make_item(''))
-                self.ledger_table.setItem(row_idx, 3, make_item(r['vendor']))
-                self.ledger_table.setItem(row_idx, 4, make_item(
+                # Zip Code (column 3) — empty for external FMNP entries,
+                # which aren't tied to a customer order.
+                self.ledger_table.setItem(row_idx, 3, make_item(''))
+                self.ledger_table.setItem(row_idx, 4, make_item(r['vendor']))
+                self.ledger_table.setItem(row_idx, 5, make_item(
                     f"${amt:.2f}", amt))
-                self.ledger_table.setItem(row_idx, 5, make_item("$0.00", 0))
-                self.ledger_table.setItem(row_idx, 6, make_item(
+                self.ledger_table.setItem(row_idx, 6, make_item("$0.00", 0))
+                self.ledger_table.setItem(row_idx, 7, make_item(
                     f"${amt:.2f}", amt))
-                self.ledger_table.setItem(row_idx, 7, make_item("FMNP Entry"))
-                self.ledger_table.setItem(row_idx, 8, make_item(check_info))
+                self.ledger_table.setItem(row_idx, 8, make_item("FMNP Entry"))
+                self.ledger_table.setItem(row_idx, 9, make_item(check_info))
 
                 self._ledger_data.append({
                     'Transaction ID': f"FMNP-{r['id']}",
                     'Timestamp': r['created_at'] or '',
                     'Customer': '',
+                    'Zip Code': '',
                     'Vendor': r['vendor'],
                     'Receipt Total': amt,
                     'Customer Paid': 0,
@@ -950,17 +1135,47 @@ class ReportsScreen(QWidget):
         # ── Activity log (full extract — no filters) ──────────────
         self._load_activity_log(conn)
 
+        # ── Generated Rewards (full extract — no filters in v1) ─
+        # Recomputed on every refresh from current state — no
+        # per-filter reflow yet (deliberate v1 simplicity per the
+        # 2026-04-30 spec: "supplemental info, doesn't need to be
+        # complicated").
+        self._load_generated_rewards(conn)
+
         # ── Transaction log (human-friendly audit view) ───────────
         self._load_transaction_log()
 
+        # End the snapshot read transaction.
+        if _opened_read_txn:
+            try:
+                conn.commit()
+            except Exception:
+                logger.debug("Could not commit read transaction",
+                             exc_info=True)
+
     def _load_activity_log(self, conn):
-        """Load all audit log entries into the Activity Log tab."""
+        """Load the most recent audit log entries into the Activity
+        Log tab.
+
+        v2.0.3 fix (NEW-CRIT-2): cap the result at 1000 rows.  Pre-fix
+        this read EVERY ``audit_log`` row into Python memory and built
+        a QTableWidgetItem per cell.  At year 2-3 of usage with
+        500K+ audit rows this froze the UI thread for 30-60 seconds
+        when the operator opened Reports → Activity Log.  The peer
+        ``_load_transaction_log`` already uses ``limit=500``; this was
+        the lone unbounded loader.
+
+        The Transaction Log tab and the cloud-synced Audit Log sheet
+        retain the full history; the Activity Log here is a "what
+        happened recently" view, not the canonical audit record.
+        """
         rows = conn.execute("""
             SELECT id, table_name, record_id, action, field_name,
                    old_value, new_value, reason_code, notes,
                    changed_by, changed_at
             FROM audit_log
-            ORDER BY changed_at DESC
+            ORDER BY changed_at DESC, id DESC
+            LIMIT 1000
         """).fetchall()
 
         self._activity_data = []
@@ -994,6 +1209,77 @@ class ReportsScreen(QWidget):
             })
         self.activity_table.resizeColumnsToContents()
         self.activity_table.setSortingEnabled(True)
+
+    # ------------------------------------------------------------------
+    # Generated Rewards (v1.9.10+)
+    # ------------------------------------------------------------------
+    def _load_generated_rewards(self, conn):
+        """Read the persisted generated_rewards snapshot rows for
+        the report.  Iterates every market_day via the same
+        collector used by cloud sync so report and sheet show
+        identical rows.
+
+        Read-only: the underlying ``generated_rewards`` table is
+        write-once (see ``fam/models/generated_reward.py``), so
+        this report reflects the historical record of what the
+        cashier handed out at the time of payment, NOT a
+        recomputation against current data.  Disabling the
+        rewards feature does NOT remove rows here, and rule edits
+        do NOT retro-apply.
+        """
+        from fam.sync.data_collector import _collect_generated_rewards
+        all_rows: list[dict] = []
+        try:
+            md_rows = conn.execute(
+                "SELECT id FROM market_days ORDER BY date"
+            ).fetchall()
+            for md in md_rows:
+                try:
+                    all_rows.extend(
+                        _collect_generated_rewards(conn, md['id']))
+                except Exception:
+                    logger.exception(
+                        "Failed to derive rewards for market_day %s",
+                        md['id'])
+        except Exception:
+            logger.exception("Failed to load generated rewards")
+
+        self._rewards_data = all_rows
+        self.rewards_table.setSortingEnabled(False)
+        self.rewards_table.setRowCount(len(all_rows))
+        for i, r in enumerate(all_rows):
+            self.rewards_table.setItem(
+                i, 0, make_item(r.get('Market Name') or ''))
+            self.rewards_table.setItem(
+                i, 1, make_item(r.get('Date') or ''))
+            self.rewards_table.setItem(
+                i, 2, make_item(r.get('Customer') or ''))
+            # v2.0.6: Zip Code (column 3) — sourced from the same
+            # _collect_generated_rewards collector that feeds the
+            # cloud sheet, so report + sheet stay in sync.
+            self.rewards_table.setItem(
+                i, 3, make_item(r.get('Zip Code') or ''))
+            self.rewards_table.setItem(
+                i, 4, make_item(r.get('Source Method') or ''))
+            self.rewards_table.setItem(i, 5, make_item(
+                f"${r.get('Source Total', 0):.2f}",
+                r.get('Source Total', 0)))
+            self.rewards_table.setItem(i, 6, make_item(
+                f"${r.get('Threshold', 0):.2f}",
+                r.get('Threshold', 0)))
+            self.rewards_table.setItem(
+                i, 7, make_item(r.get('Reward Method') or ''))
+            self.rewards_table.setItem(i, 8, make_item(
+                f"${r.get('Reward Unit', 0):.2f}",
+                r.get('Reward Unit', 0)))
+            self.rewards_table.setItem(i, 9, make_item(
+                str(r.get('Units Earned', 0)),
+                r.get('Units Earned', 0)))
+            self.rewards_table.setItem(i, 10, make_item(
+                f"${r.get('Reward Total', 0):.2f}",
+                r.get('Reward Total', 0)))
+        self.rewards_table.resizeColumnsToContents()
+        self.rewards_table.setSortingEnabled(True)
 
     # ------------------------------------------------------------------
     # Geolocation
@@ -1460,6 +1746,9 @@ class ReportsScreen(QWidget):
                 export_transaction_log(self._txn_log_data, filepath)
             elif report_type == "error_log":
                 export_error_log(self._error_log_data, filepath)
+            elif report_type == "generated_rewards":
+                export_generated_rewards(
+                    self._rewards_data or [], filepath)
             QMessageBox.information(self, "Export Complete", f"Report saved to:\n{filepath}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
@@ -1522,10 +1811,13 @@ class ReportsScreen(QWidget):
         layout.addLayout(filter_row)
 
         # ── Table ─────────────────────────────────────────────────
+        # v2.0.6: added Customer + Zip Code columns so audit-trail
+        # entries can be correlated with customer demographics.
         self.txn_log_table = QTableWidget()
-        self.txn_log_table.setColumnCount(6)
+        self.txn_log_table.setColumnCount(8)
         self.txn_log_table.setHorizontalHeaderLabels(
-            ["Time", "Action", "Transaction", "Vendor", "Details", "By"]
+            ["Time", "Action", "Transaction", "Customer", "Zip Code",
+             "Vendor", "Details", "By"]
         )
         configure_table(self.txn_log_table, resizable=True)
         layout.addWidget(self.txn_log_table)
@@ -1581,22 +1873,32 @@ class ReportsScreen(QWidget):
             txn_id = r.get('fam_transaction_id', '') or ''
             self.txn_log_table.setItem(i, 2, make_item(txn_id))
 
+            # Customer + Zip Code (v2.0.6) — joined from
+            # customer_orders via the audit row's transaction.
+            # Empty for non-transaction audit entries.
+            customer = r.get('customer_label', '') or ''
+            zip_code = r.get('zip_code', '') or ''
+            self.txn_log_table.setItem(i, 3, make_item(customer))
+            self.txn_log_table.setItem(i, 4, make_item(zip_code))
+
             # Vendor
             vendor = r.get('vendor_name', '') or ''
-            self.txn_log_table.setItem(i, 3, make_item(vendor))
+            self.txn_log_table.setItem(i, 5, make_item(vendor))
 
             # Details — built from field changes and notes
             detail = self._format_txn_detail(r)
-            self.txn_log_table.setItem(i, 4, make_item(detail))
+            self.txn_log_table.setItem(i, 6, make_item(detail))
 
             # By
             changed_by = r.get('changed_by', '') or ''
-            self.txn_log_table.setItem(i, 5, make_item(changed_by))
+            self.txn_log_table.setItem(i, 7, make_item(changed_by))
 
             self._txn_log_data.append({
                 'Time': timestamp,
                 'Action': action_label,
                 'Transaction': txn_id,
+                'Customer': customer,
+                'Zip Code': zip_code,
                 'Vendor': vendor,
                 'Details': detail,
                 'By': changed_by,
@@ -1685,6 +1987,11 @@ class ReportsScreen(QWidget):
         filter_row.addWidget(level_lbl)
 
         self._error_level_combo = NoScrollComboBox()
+        # "Errors" here means CRITICAL + ERROR (both indicate
+        # broken behavior).  Pre-v2.0.2 "Errors Only" silently
+        # excluded CRITICAL — kept the label short for the dropdown
+        # but the filter logic in ``_apply_error_log_filters`` now
+        # correctly matches both levels.
         self._error_level_combo.addItem("Errors & Warnings", "both")
         self._error_level_combo.addItem("Errors Only", "errors")
         self._error_level_combo.addItem("Warnings Only", "warnings")
@@ -1776,6 +2083,36 @@ class ReportsScreen(QWidget):
         btn_row.addWidget(export_btn)
 
         btn_row.addStretch()
+
+        # Clear Errors — destructive, lives on the right side of the
+        # row (visually separated from refresh/export) and styled red
+        # to match other danger actions.  Truncates fam_manager.log
+        # locally + rotated backups, and (when sync is configured)
+        # clears the "Error Log" Google Sheets tab so coordinators
+        # don't have to scroll past stale entries when triaging.
+        clear_btn = QPushButton("Clear Errors")
+        clear_btn.setObjectName("danger_btn")
+        clear_btn.setStyleSheet(f"""
+            #danger_btn {{
+                background-color: {WHITE};
+                color: {ERROR_COLOR};
+                border: 1.5px solid {ERROR_COLOR};
+                border-radius: 6px;
+                padding: 6px 14px;
+                font-weight: bold;
+            }}
+            #danger_btn:hover {{
+                background-color: {ERROR_COLOR};
+                color: {WHITE};
+            }}
+        """)
+        clear_btn.setToolTip(
+            "Erase all entries from fam_manager.log (local) AND from "
+            "the Error Log tab on Google Sheets.  This action cannot "
+            "be undone.")
+        clear_btn.clicked.connect(self._clear_error_log)
+        btn_row.addWidget(clear_btn)
+
         layout.addLayout(btn_row)
 
         return tab
@@ -1811,10 +2148,21 @@ class ReportsScreen(QWidget):
         """Filter and display error log entries based on current filter state."""
         entries = getattr(self, '_error_log_entries', [])
 
-        # Level filter
+        # Level filter.
+        #
+        # v2.0.2 fix: "Errors Only" must include CRITICAL.  The
+        # ``_global_exception_handler`` writes unhandled crashes at
+        # CRITICAL (``fam/app.py:36``) and the v2.0.1 log_reader
+        # default level set explicitly added CRITICAL.  Pre-fix,
+        # this comparator silently dropped every CRITICAL entry —
+        # so "Errors Only" hid exactly the failures users care
+        # most about.  The cloud-side Error Log sync at
+        # ``data_collector.py:836`` correctly includes CRITICAL,
+        # so before this fix local UI and cloud diverged on the
+        # most important class of entry.
         level_filter = self._error_level_combo.currentData()
         if level_filter == "errors":
-            entries = [e for e in entries if e['level'] == 'ERROR']
+            entries = [e for e in entries if e['level'] in ('ERROR', 'CRITICAL')]
         elif level_filter == "warnings":
             entries = [e for e in entries if e['level'] == 'WARNING']
 
@@ -1909,12 +2257,170 @@ class ReportsScreen(QWidget):
         self._load_error_log()
         self._error_log_loaded = True
 
+    def _clear_error_log(self):
+        """Erase the error log everywhere a coordinator might see it.
+
+        Targets (v1.9.9+):
+        * **Local file** — ``fam_manager.log`` and any rotated
+          backups (``.1``, ``.2``, ``.3``).  Reuses
+          :func:`fam.utils.logging_config.clear_log_files`, which
+          also handles the open-handler-on-Windows quirk by
+          releasing the active stream before truncation.
+        * **Google Sheets** — clears the "Error Log" tab via the
+          existing sync infrastructure.  Best-effort: a network
+          failure or missing credentials never prevents the local
+          truncation from completing.
+
+        Confirmation dialog uses two-stage destruction so the
+        action can't be triggered by an accidental double-click.
+
+        The audit log (Reports → Activity Log) is intentionally
+        NOT touched here — that's regulatory/business audit
+        history, not error noise.
+        """
+        # First confirmation — explain what's about to happen.
+        first = QMessageBox.warning(
+            self, "Clear Error Log?",
+            "This will erase ALL entries from:\n\n"
+            "  •  fam_manager.log on this laptop (and rotated backups)\n"
+            "  •  the 'Error Log' tab on your Google Sheet, if sync is "
+            "configured\n\n"
+            "It will NOT touch the Activity Log (audit history of "
+            "transactions, voids, adjustments) — that lives in a "
+            "different place and is preserved.\n\n"
+            "This action CANNOT be undone.  Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if first != QMessageBox.Yes:
+            return
+
+        # Second confirmation — last chance.
+        second = QMessageBox.critical(
+            self, "Confirm Clear",
+            "Last chance — proceed with clearing the error log?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if second != QMessageBox.Yes:
+            return
+
+        # ── Local file truncate ──────────────────────────────
+        local_ok = False
+        local_msg = ''
+        try:
+            from fam.utils.logging_config import clear_log_files
+            local_ok, local_msg = clear_log_files()
+        except Exception as e:
+            local_ok = False
+            local_msg = f"Could not clear local log: {e}"
+
+        # ── Google Sheets clear ──────────────────────────────
+        sheets_status = self._clear_sheets_error_log_tab()
+
+        # ── Refresh the in-app view ──────────────────────────
+        try:
+            self._reload_error_log()
+        except Exception:
+            pass
+
+        # ── Report back to the user ──────────────────────────
+        lines = []
+        if local_ok:
+            lines.append("✅  Local fam_manager.log cleared.")
+        else:
+            lines.append(f"⚠  Local clear had issues: {local_msg}")
+        lines.append(sheets_status)
+        QMessageBox.information(
+            self, "Error Log Cleared",
+            "\n".join(lines),
+        )
+
+    def _clear_sheets_error_log_tab(self) -> str:
+        """Clear THIS DEVICE's rows from the 'Error Log' tab on the
+        configured Google Sheet.
+
+        IMPORTANT: this is intentionally **device-scoped** via
+        ``delete_rows(sheet, market_code, device_id)``.  In a
+        multi-device deployment, every coordinator's laptop syncs to
+        the same Google Sheet — using gspread's ``ws.clear()`` would
+        wipe other devices' error rows along with our own.  Coordinators
+        wanted "clear noise from MY laptop", not "delete every
+        device's history from the shared sheet".
+
+        Returns a one-line status string for the post-action dialog
+        — never raises, so a sync failure can't block the local
+        truncation that already succeeded.
+        """
+        # Lazy-import the backend so installs that never sync don't
+        # pay the cost on the Reports screen render path.
+        try:
+            from fam.sync.gsheets import GoogleSheetsBackend
+            from fam.utils.app_settings import (
+                get_market_code, get_device_id)
+        except Exception as e:
+            return f"ℹ  Google Sheets backend not available: {e}"
+
+        backend = GoogleSheetsBackend()
+        if not backend.is_configured():
+            return "ℹ  Google Sheets not configured for sync — skipped."
+
+        market_code = str(get_market_code() or '')
+        device_id = str(get_device_id() or '')
+        if not market_code or not device_id:
+            # No identity → no rows on the sheet are attributed to
+            # us.  Skip rather than risk an unscoped wipe.
+            return ("ℹ  Device identity not configured yet — no "
+                    "rows on the sheet are attributed to this device, "
+                    "so nothing to clear there.")
+
+        # delete_rows() handles the lazy-import + authorize internally
+        # and returns SyncResult instead of raising.  It only deletes
+        # rows where market_code + device_id match the current device,
+        # so other devices' rows are preserved.
+        try:
+            result = backend.delete_rows(
+                'Error Log', market_code, device_id)
+        except Exception as e:
+            logger.warning(
+                "Failed to clear Error Log worksheet contents",
+                exc_info=True)
+            return (f"⚠  Could not clear Google Sheets tab: {e}. "
+                    f"Local file was still cleared.")
+
+        if not result.success:
+            return (f"⚠  Could not clear Google Sheets tab: "
+                    f"{result.error}. Local file was still cleared.")
+
+        return (f"✅  Google Sheets 'Error Log' tab: removed "
+                f"{result.rows_synced} row(s) for this device "
+                f"(other devices' rows preserved).")
+
     # ------------------------------------------------------------------
-    # Tab change handler (lazy-load Error Log)
+    # Tab change handler (lazy + auto-refresh Error Log)
     # ------------------------------------------------------------------
     def _on_tab_changed(self, index):
-        """Lazy-load the Error Log when its tab is first selected."""
+        """Lazy-load the Error Log on first selection AND re-load it
+        on every subsequent selection so new log entries appended
+        since the last view become visible without an explicit
+        refresh click.
+
+        v2.0.6 fix (2026-05-06): pre-fix the Error Log was loaded
+        ONCE on first click and only refreshed via the manual
+        Refresh button.  The cloud-side Error Log sync re-parses
+        ``fam_manager.log`` fresh on every sync cycle, so the cloud
+        sheet showed entries that the local UI silently dropped —
+        coordinator-reported divergence (DB-fragmentation WARNING
+        present in Sheets, missing from local Error Log tab).
+        Re-loading on tab switch keeps the UI and cloud aligned
+        without forcing the operator to click refresh.
+
+        Performance note: ``parse_log_file`` is capped at 500
+        entries and reads the rotating log file (typically <1MB
+        even at year-3 scale), so the per-tab-switch cost is in the
+        single-digit-ms range — far below interaction noise.
+        """
         tab_text = self.tabs.tabText(index)
-        if tab_text == "Error Log" and not self._error_log_loaded:
+        if tab_text == "Error Log":
             self._load_error_log()
             self._error_log_loaded = True

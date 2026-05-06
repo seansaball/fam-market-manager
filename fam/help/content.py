@@ -1618,6 +1618,22 @@ After save, assign the vendor to specific markets via **Settings →
 Markets → {market name} → Vendors**.  Only assigned vendors appear in
 the Receipt Intake vendor dropdown for that market.
 
+## Setting eligible payment methods (v1.9.9+)
+
+Click the **Methods** button on the vendor row to choose which payment
+methods this vendor is eligible to accept.  This is required for
+**denominated** instruments like Food Bucks or FMNP-as-payment that
+bind to one specific vendor when the customer hands them over.
+
+Example: if Food Bucks are only valid at produce stalls, check Food
+Bucks for produce vendors and leave it unchecked for bakeries — when
+a volunteer enters Food Bucks on the Payment screen the per-row
+vendor dropdown will only list the eligible produce vendors.
+
+By default every vendor is registered for every method (so existing
+flows keep working); use the dialog to tighten this to your market's
+real rules.
+
 ## Editing
 
 Pencil icon on the vendor row.  Most fields editable.  Renaming a
@@ -1629,9 +1645,70 @@ Toggle the vendor's active state to remove them from new transaction
 options without losing history.  Inactive vendors don't appear in
 Receipt Intake but their historical transactions remain in reports.
 """,
-        keywords=('vendor', 'add', 'create', 'new', 'farmer'),
-        related_articles=('add-market', 'add-payment-method'),
+        keywords=('vendor', 'add', 'create', 'new', 'farmer',
+                  'eligible', 'methods', 'food bucks', 'denominated'),
+        related_articles=('add-market', 'add-payment-method',
+                           'denominated-payment-vendor-binding'),
         screen='settings',
+    ),
+
+    Article(
+        id='denominated-payment-vendor-binding',
+        category_id='during-market',
+        title='Denominated payments and the vendor dropdown',
+        body="""\
+**Why a payment row sometimes asks "which vendor?"**
+
+Denominated payment methods like **Food Bucks** and **FMNP** (when
+configured as a payment method) are physical paper instruments — a
+$5 Food Bucks check is one specific piece of paper handed to one
+specific vendor.  Unlike SNAP or Cash (which are aggregate sums of
+money), a denominated instrument can't be "spread" across vendors.
+
+When a customer's order has multiple vendors AND the payment method
+is denominated, the row shows an inline **vendor dropdown** between
+the method and the charge field.  Pick the vendor that received this
+particular instrument.
+
+## What appears in the dropdown
+
+Only vendors that meet **both** of these conditions:
+
+1. They appear on the current customer's order (they have a receipt)
+2. They are registered for this method via **Settings → Vendors →
+   Methods** (the eligibility checklist)
+
+If the dropdown is empty, the customer's chosen instrument isn't
+accepted by anyone on this order — verify the eligibility config or
+have the customer pay another way.
+
+## Multiple denominated payments to different vendors
+
+You can add the **same** denominated method on multiple rows, with
+each row bound to a different vendor.  Example: a $5 Food Bucks for
+the produce stall + a $5 Food Bucks for the cidery → two rows, each
+with the same method but different vendor dropdowns.
+
+Non-denominated methods (SNAP, Cash) stay one-row-per-method by
+design — those distribute across vendors automatically.
+
+## Single-vendor orders
+
+When the customer's order has only one receipt, the vendor dropdown
+disappears — there's no choice to make, and the binding is implicit.
+
+## Why this matters for reports
+
+The Vendor Reimbursement report attributes each denominated payment
+to exactly the vendor it was given to — no fractional spreads, no
+phantom Food Bucks on bakeries.  This was the architectural fix in
+v1.9.9.
+""",
+        keywords=('denominated', 'food bucks', 'fmnp', 'vendor',
+                  'dropdown', 'binding', 'multi-vendor', 'split'),
+        related_articles=('split-payment', 'vendor-reimbursement',
+                           'add-vendor'),
+        screen='payment',
     ),
 
     Article(
@@ -2249,6 +2326,1549 @@ Total typical: well under 5 GB.
         keywords=('data', 'location', 'folder', 'appdata', 'where', 'files'),
         related_articles=('backups', 'manual-install'),
     ),
+
+    # ── v1.9.9 articles ─────────────────────────────────────────────
+
+    Article(
+        id='device-tag',
+        category_id='settings',
+        title='Device Tag — what the "Device: A1B" chip in the header means',
+        body="""
+The header bar shows a chip labelled **Device: A1B** (or similar
+3-character tag).  This is your laptop's **device tag** — a short
+identifier appended to every customer label generated on this
+machine.
+
+## Why it exists
+
+When five laptops are running at one market, every laptop is
+independently generating sequential customer labels: C-001, C-002,
+C-003 ...  Without a device tag, "look up customer C-005" is
+ambiguous across the five devices, and the synced Google Sheets
+report shows five different rows that all *display* as C-005
+(separated by a hidden device_id column, but visually identical to
+humans).
+
+The device tag fixes that: every label this laptop generates ends
+in `-{TAG}` so labels stay globally unique even in heavy-laptop
+deployments.  Examples:
+
+- Laptop A generates `C-005-A1B`
+- Laptop B generates `C-005-LB1`
+- Same sequence number, different labels, no ambiguity
+
+## Where the tag comes from
+
+By default, the tag is **auto-derived** from this machine's
+unique hardware ID (Windows MachineGuid) — first 3 hex characters
+of a SHA1 hash, uppercased.  It's stable per-device, so the same
+laptop always gets the same tag without any setup.
+
+You can override it with a friendly name in **Settings →
+Preferences → Device Identity → Device Tag**.  Useful when you
+want labels that match the physical sticker on each laptop:
+
+- `LB1` for "Laptop 1"
+- `MGR` for the manager's machine
+- `OFC` for the office laptop
+
+The override input accepts 1-4 alphanumeric characters; punctuation
+and spaces are rejected.  Leaving it blank reverts to the
+auto-derived tag.
+
+## Where the tag appears
+
+- The header chip — visible from every screen
+- Every new customer label after the override is set
+  (existing labels keep whatever tag they were created with)
+- The "Customer ID" column in the Detailed Ledger and Geolocation
+  Sheets reports
+
+## When to override
+
+Set a friendly tag if:
+
+- You want labels coordinators can read at a glance ("L1 took 12
+  customers today")
+- You print physical labels and want the printed tag to match the
+  laptop's sticker
+- You're standardizing a multi-laptop deployment and want the
+  tags consistent across markets
+
+Leave the auto tag if:
+
+- You only run one laptop per market (the tag still appears, just
+  cosmetically — it never matters)
+- You don't care which laptop captured which customer
+
+## Things to know
+
+- The tag is **per-device**, not per-market.  Two markets running
+  on the same laptop share the same tag (which is fine — customer
+  labels are scoped per market day, so cross-market collisions
+  don't happen).
+- Existing customer labels in your database from before v1.9.9 keep
+  their old `C-NNN` format.  Only newly-created labels carry the
+  tag.
+- Changing the override does NOT rewrite existing labels.  It only
+  affects labels generated from that point forward.
+""",
+        keywords=('device', 'tag', 'laptop', 'multi-device', 'collision',
+                  'customer label', 'identifier', 'hash', 'override',
+                  'multi-laptop'),
+        related_articles=('returning-customer', 'sync-overview'),
+        screen='settings',
+    ),
+
+    Article(
+        id='unallocated-funds',
+        category_id='corrections',
+        title='Unallocated Funds — when an adjustment can\'t be collected',
+        body="""
+**Unallocated Funds** is a special payment category that records
+money FAM absorbed because an adjustment increased what the
+customer owed but the customer was no longer there to pay.
+
+## When you'll see it
+
+You'll be prompted on the **Adjustments page** whenever an
+adjustment would require the customer to physically pay more than
+they originally did.  Three scenarios trigger the prompt:
+
+1. **Receipt total raised, breakdown not adjusted** — vendor
+   reconciliation showed a higher total than originally entered;
+   the customer would need to pay the gap.
+2. **Customer payment increased in the breakdown** — you raised a
+   payment row's amount while the receipt total stayed the same
+   (e.g. correcting an under-recorded count of physical Food
+   Bucks).
+3. **Denomination overage** — physical instruments (Food Bucks,
+   FMNP checks) overshoot the receipt by less than one full unit.
+   Customer hands over a $5 check against $9 remaining → would
+   pay $5 instead of $4 in real life.
+
+## How the prompt works
+
+A popup appears explaining the situation, with two options:
+
+- **Yes — customer paid the additional amount** → save proceeds
+  as you entered it.  Reports show the customer paying the higher
+  total.
+- **No — customer is gone, log as Unallocated Funds** → save
+  records what the customer ACTUALLY paid (the original amount),
+  and FAM absorbs the difference as Unallocated Funds.  The
+  vendor still gets reimbursed in full so they're never short.
+
+## What "absorbing" means
+
+When you choose No:
+
+- The customer's recorded payment stays at the original amount —
+  the adjustment doesn't fabricate cash they never handed over.
+- FAM contributes the difference (vendor still gets paid the full
+  receipt).
+- The Audit Log gets a dedicated `UNALLOCATED_FUNDS` entry
+  describing exactly how much was absorbed.
+
+## Where it appears in reports
+
+- **FAM Match Report** — new "FAM Absorbed" column shows the
+  total absorbed during the filter window, and the summary cards
+  include a "FAM Absorbed" tile alongside "FAM Match".  These are
+  intentionally separate: FAM Match is a multiplier on what the
+  customer paid; FAM Absorbed is pure FAM funding that no customer
+  contribution triggered.
+- **Vendor Reimbursement** and **Detailed Ledger** — Unallocated
+  Funds appears as a per-method column automatically (those tabs
+  pivot dynamically on the method name).
+- **Activity Log** — every Unallocated Funds injection shows up
+  with the `UNALLOCATED_FUNDS` action and the dollar amount.
+
+## Why this matters
+
+Before this feature, an adjustment that increased what the
+customer owed either:
+
+- Saved a fictional "customer paid more" state (lying to the
+  books), or
+- Blocked the save with a "Payment Mismatch" error and forced
+  the manager to manually rebuild the breakdown to match
+  reality
+
+Either way, FAM's books quietly absorbed the loss with **zero
+accounting trail**.  Now every absorbed dollar shows up in the
+audit log and the reports — coordinators can run a year-end
+"how much did we absorb due to data-entry errors" tally directly.
+
+## How to clean up later
+
+If a customer DOES come back and pay an absorbed amount, treat it
+as a fresh transaction (open a new market day, capture the
+receipt, etc.) — don't try to retroactively edit the absorption
+out.  The audit trail of "we absorbed it because they were gone,
+later they paid" tells a cleaner story than "we never absorbed
+anything in the first place".
+""",
+        keywords=('unallocated', 'absorbed', 'absorbing', 'customer gone',
+                  'forfeit', 'fam absorbed', 'adjustment', 'lost funds',
+                  'data entry error'),
+        related_articles=('adjust-transaction', 'fam-match-report',
+                          'denomination-forfeit'),
+        screen='admin',
+    ),
+
+    Article(
+        id='denomination-forfeit',
+        category_id='during-market',
+        title='Denomination forfeit — when a check overshoots the receipt',
+        body="""
+Some payment methods are **denominated** — they exist only in
+fixed dollar increments.  FMNP checks come in $5 units; some Food
+Bucks programs use $2 or $5 units.  You can't make change against
+a denominated instrument: a customer hands over a whole $5 check
+or doesn't, period.
+
+## What happens when checks overshoot
+
+If the receipt is $9 and the customer hands over two $5 FMNP
+checks ($10 face value, 100% match), the math doesn't fit cleanly:
+
+- Total method value: $10 customer + $10 FAM match = $20 of
+  receipt coverage
+- Receipt total: $9
+- Overshoot: $11 — way more than the receipt warrants
+
+The Payment screen and Adjustments page both handle this with a
+**denomination forfeit**: FAM caps its match contribution at what
+fits, and the customer "forfeits" the unmatched portion of FAM
+match they would have gotten.
+
+In the example above:
+
+- Customer hands over $10 in checks ($10 customer_charged) — they
+  paid the full face value
+- FAM matches only $9 - $10 = nope, FAM contributes $0 because
+  the customer's payment alone covers the receipt
+- Vendor gets reimbursed $9 (the receipt) — which is less than
+  the $10 face value handed over → customer effectively
+  "donated" $1 toward the receipt
+
+In a more realistic case (receipt $11, three $5 checks $15
+face value, 100% match):
+
+- Customer hands $15 + FAM $15 = $30 of value, but only $11 of
+  receipt
+- Forfeit: $19 of FAM match
+- Saved record: customer $15, FAM match $0, vendor reimbursed $11
+- The breakdown stays at three checks (the physical units the
+  vendor actually has in hand) but the FAM match shrinks
+
+## The popup at save time
+
+When you confirm a payment that triggers a denomination forfeit,
+a popup appears explaining the math and asking you to confirm:
+
+- "This adjustment over-allocates the receipt by $X because the
+  denominated payment cannot be broken into smaller increments."
+- "The customer forfeits $X of FAM match (vendor still receives
+  the full receipt amount)."
+- If the customer's required payment ALSO went up vs. the original
+  transaction (e.g. you recorded an extra check on adjustment),
+  the popup additionally asks "Can the customer be charged the
+  additional amount?" — Yes saves as-entered, No logs the gap as
+  **Unallocated Funds**.
+
+## Why "forfeit" not "refund"
+
+The customer paid in real, indivisible physical instruments.
+Refunding the difference would require giving the customer cash,
+which most market booths can't do mid-shift.  The forfeit pattern
+mirrors how the program runs in practice: customers occasionally
+hand over a check whose value exceeds what they're buying, and
+the program quietly absorbs the gap as goodwill.
+
+## Tips for volunteers
+
+- **You can't enter "half a check"** — the input stepper will
+  only let you enter whole units.  If a customer's order is $9
+  and they only have one $5 check, that's fine: capture the $5
+  check + $4 from another payment method.
+- **The cap is +1 unit, not unlimited** — the input lets you
+  enter ONE unit beyond what would fit cleanly (the natural
+  forfeit case), but rejects multiple-unit overshoots.  If the
+  vendor reports more units than the receipt can absorb, that's
+  a real over-allocation, not a denomination forfeit — re-check
+  the count.
+- **The forfeit popup lets you cancel** — clicking the "X" or
+  the Cancel button returns to the breakdown so you can adjust.
+""",
+        keywords=('denomination', 'forfeit', 'fmnp', 'food bucks',
+                  'overage', 'overshoot', 'check', 'token', 'physical',
+                  'capped match', 'refund'),
+        related_articles=('fmnp-via-payment', 'unallocated-funds',
+                          'penny-reconciliation'),
+        screen='payment',
+    ),
+
+    Article(
+        id='adjustments-date-filter',
+        category_id='corrections',
+        title='Adjustments date filter — finding the transactions you worked on',
+        body="""
+The Adjustments page has a **Last Updated** date filter at the
+top of the screen.  It's intentionally different from the Reports
+screen's date filter — and that difference matters.
+
+## What the filter targets
+
+**Reports screen**: filters by **Market Date** (the business day a
+transaction belongs to) — that's the right grouping for revenue
+aggregation.
+
+**Adjustments screen**: filters by **Last Updated** — the most
+recent activity on the transaction.  That's the right grouping
+for "what did I work on this week".
+
+If you adjusted a 6-month-old transaction this morning, today's
+filter window includes that transaction, even though its market
+day was 6 months ago.  Pre-v1.9.9 the filter targeted market day,
+which made the screen unusable for session review.
+
+## What "Last Updated" means
+
+It's the most recent of:
+
+- The transaction's `created_at` (when it was first entered)
+- Any audit_log entry referencing the transaction (adjustments,
+  voids, payment changes — every audit action counts)
+
+## Three dates per row
+
+The Adjustments table now shows three dates per transaction so you
+can correlate the filter to what you see:
+
+| Column | What it shows | Example |
+|---|---|---|
+| **Market Date** | The business day this transaction's revenue belongs to | 2026-04-27 |
+| **Created** | When the transaction was first entered into the app | 2026-04-29 11:42 |
+| **Last Updated** | The most recent activity (filter target) | 2026-04-29 15:14 |
+
+A transaction created on Monday and adjusted on Wednesday would
+have Created = Monday, Last Updated = Wednesday.  Filtering for
+"Wednesday" surfaces it; filtering for "Monday" does not.
+
+## How to use it
+
+- **"Show me what I worked on today"** — set both endpoints to
+  today.  You'll see the day's new transactions and any adjustments
+  to older ones.
+- **"Show me the receipts I haven't reconciled this week"** — set
+  the start of the week as the lower bound, leave the upper bound
+  open.
+- **"Show me a specific market day's transactions"** — instead of
+  the date filter, use the Market dropdown.  The Market filter
+  scopes to a single market_day_id; the date filter scopes to
+  activity windows.
+
+The filter triggers a live re-search every time the range changes
+(no Search button needed for the date filter — the other filters
+still respect the Search button).
+""",
+        keywords=('adjustments', 'date', 'filter', 'last updated',
+                  'created', 'market date', 'session', 'reconciliation'),
+        related_articles=('adjust-transaction', 'filter-reports',
+                          'returning-customer'),
+        screen='admin',
+    ),
+
+    Article(
+        id='market-delete',
+        category_id='settings',
+        title='Deleting a market — when it\'s allowed',
+        body="""
+**Settings → Markets** offers two distinct ways to remove a
+market: **Deactivate** and **Delete**.  They behave differently
+on purpose.
+
+## Deactivate
+
+- Hides the market from new entry flows (it won't show up in the
+  Market Day Setup dropdown anymore)
+- **Keeps all historical data intact** — past market days,
+  transactions, audit log entries all stay readable from Reports
+- Reversible: click "Activate" to bring it back
+- Use this when a market location closes for the season but you
+  may want to reopen it next year
+
+## Delete (red button)
+
+- **Permanently removes** the market row
+- **Only allowed when no `market_days` reference the market** —
+  the handler runs a safety check before doing anything
+- If the market has any history, you'll see a "Cannot Delete"
+  warning explaining why and pointing you toward Deactivate
+- Cascades cleanup of `market_vendors` and
+  `market_payment_methods` junction rows (those are
+  configuration, not data, so dropping them with the market is
+  correct)
+- Use this for accidentally-created entries that have never had
+  a market day opened against them
+
+## Why delete is gated
+
+Markets don't carry a name snapshot on transactions or audit
+entries — those rows reference `market_id` by foreign key.
+Deleting a market with history would orphan its transactions
+(they'd still exist in the database but couldn't be joined back
+to a market name in reports).  The Deactivate path avoids this
+trap entirely; Delete is only safe for never-used rows.
+
+## A common scenario
+
+Legacy entries from very early development sometimes survive in
+real installs (e.g. a market named "M" with a $1.00 match limit
+from the pre-v22 column default).  Such rows have no
+transactional history and can be safely deleted via the new
+button.
+
+## What happens if you try
+
+1. Click Delete on a market row
+2. The handler queries `market_days` for any reference
+3. If history exists → blocking warning, no action
+4. If clean → confirmation dialog ("Delete 'X' permanently? This
+   cannot be undone.")
+5. Confirm → cascade-cleans junction rows, deletes the market,
+   refreshes the table
+
+The whole sequence is atomic: if any step fails, nothing changes.
+""",
+        keywords=('market', 'delete', 'remove', 'deactivate',
+                  'cleanup', 'safety', 'orphan'),
+        related_articles=('add-market', 'market-day-open'),
+        screen='settings',
+    ),
+
+    Article(
+        id='clear-error-log',
+        category_id='reports',
+        title='Clearing the Error Log',
+        body="""
+The **Error Log** tab on the Reports screen has a red **Clear
+Errors** button.  It clears noise from the local log files AND
+from the synced Google Sheets — but only the rows attributed to
+THIS device.
+
+## What gets cleared
+
+- **`fam_manager.log`** in the data directory and any rotated
+  backups (`fam_manager.log.1`, `.2`, ...) — truncated to empty
+- **The "Error Log" tab on the configured Google Sheet** — only
+  rows whose `device_id` column matches THIS laptop's device_id
+  are removed; other devices' rows are preserved
+
+## What is NOT cleared
+
+- **The Audit Log / Activity Log** — those are regulatory history
+  (every transaction adjustment, void, payment change) and stay
+  intact.  Clear Errors only touches the technical error log.
+- **Other devices' rows in the Sheets Error Log tab** — the
+  cleanup is device-scoped on purpose.  In multi-laptop
+  deployments, one coordinator's "clear my noise" should not wipe
+  another laptop's diagnostic history.
+
+## When to use it
+
+- After investigating an issue you've already resolved
+- When the Error Log has accumulated stale warnings from a fixed
+  bug
+- Before a fresh audit pass when you want to see only new errors
+
+## Two-stage confirmation
+
+The button asks twice before doing anything — once to confirm you
+want to clear, and a second time to confirm you understand it
+can't be undone.  After both confirmations, the local truncate
+runs first, then the device-scoped Sheets cleanup, then the
+in-app Error Log table refreshes.
+
+## What happens if Sheets clearing fails
+
+The local file truncation is independent of the Sheets cleanup.
+If the Sheets call fails (no internet, permissions, etc.), the
+local log is still cleared and the dialog reports the partial
+success: *"Local file was still cleared.  The next sync will
+overwrite the sheet with the (now empty) log."*
+
+## Version-stamped error history
+
+Every line in `fam_manager.log` carries a `[vX.Y.Z]` token
+between the level and the logger name.  When you upgrade the app,
+old log lines keep their original version stamp — the synced
+Error Log report's "App Version" column shows exactly which
+version produced each error.  This used to be silently rewritten
+to the current version on every upgrade; v1.9.9 fixed that
+provenance bug.
+""",
+        keywords=('error log', 'clear', 'clear errors', 'noise',
+                  'diagnostic', 'fam_manager.log', 'version', 'sync',
+                  'device-scoped'),
+        related_articles=('export-reports', 'sync-overview'),
+        screen='reports',
+    ),
+
+    # ══════════════════════════════════════════════════════════════════
+    #   v1.9.10 ADDITIONS — Rewards, recovery runbooks, glossary, etc.
+    # ══════════════════════════════════════════════════════════════════
+    #
+    # Added 2026-05-01 to close the gaps identified in the
+    # documentation audit.  Most of these articles are written for a
+    # market-day volunteer with no engineering background and no
+    # immediate access to the project owner.  Each article opens with
+    # a "What to do right now" summary so the actionable answer is
+    # never more than a paragraph deep.
+
+    Article(
+        id='rewards-overview',
+        category_id='settings',
+        title='Customer Rewards — what they are',
+        body="""\
+**What to do right now:** Rewards are tokens, vouchers, or
+extra dollars that you give the customer at the booth.  The app
+records *what was earned* so the coordinator can reconcile;
+giving the physical tokens is something you do in person.
+
+## What rewards are
+
+Rewards are an **add-on** that some markets run on top of the
+FAM match — for example, "every $10 of SNAP earns $2 in produce
+tokens."  Rules are configured by the coordinator in
+**Settings → Rewards**.  When a payment confirms, the app:
+
+- Computes which rules fired for this customer
+- Shows a "GIVE TO CUSTOMER" zone on the confirmation dialog
+- Records the rewards in the **Generated Rewards** report tab
+- Includes a "Rewards Earned" block on the printed receipt
+
+## Important — not financial
+
+Rewards are **informational only**.  The app does not adjust
+totals, vendor reimbursements, or FAM match math when rewards
+fire.  The "Rewards Earned" line on a receipt is a *record* of
+what you handed the customer; it is not subtracted from
+anywhere.
+
+## What you do at the booth
+
+1. Confirm the payment as normal
+2. Look at the GIVE TO CUSTOMER zone on the confirmation dialog
+3. Hand the customer the listed tokens / vouchers
+4. Click OK / Done
+
+That's it — the app already wrote the row.
+
+## What the coordinator sees
+
+The **Generated Rewards** report tab and Google Sheet tab show
+one row per (order × rule that fired).  Coordinators reconcile
+this against physical token inventory.
+""",
+        keywords=('reward', 'rewards', 'tokens', 'voucher', 'food bucks',
+                  'incentive', 'give'),
+        related_articles=('rewards-configure', 'rewards-given-then-voided',
+                          'enter-receipt', 'split-payment'),
+        screen='settings',
+    ),
+
+    Article(
+        id='rewards-configure',
+        category_id='settings',
+        title='Configuring Rewards rules (coordinator)',
+        body="""\
+**For coordinators only.**  If you are a volunteer at the
+market, you don't need to configure anything — the rules are
+already set up before market day.
+
+## Where
+
+**Settings → Rewards** tab.
+
+## What a rule looks like
+
+Each rule has:
+
+- **Name** — what it's called (shown on receipts)
+- **Trigger payment method** — which method, when used,
+  fires the rule (e.g. SNAP)
+- **Threshold** — how many dollars in that method must be
+  used to earn one reward
+- **Reward payment method** — which method represents the
+  reward (e.g. "Produce Tokens")
+- **Reward amount** — how many dollars per threshold met
+- **Active** — toggle on/off without deleting
+
+## Example
+
+> "For every $5 of SNAP, the customer earns $2 in Produce Tokens"
+> Trigger = SNAP, Threshold = 5, Reward = Produce Tokens, Amount = 2
+
+A customer paying $13 of SNAP triggers the rule **2 times**
+($5 + $5 fits twice; the trailing $3 doesn't reach the next
+$5).  The customer earns 2 × $2 = **$4 of Produce Tokens**.
+
+## Editing rules during a market day
+
+It's safe to edit a rule mid-market — past confirmed orders
+keep the rewards they were already given (the app stores the
+rule snapshot at confirmation time).
+
+## Disabling all rewards
+
+Uncheck the master "Rewards enabled" toggle at the top of the
+tab.  Confirmation dialogs will no longer show a GIVE TO
+CUSTOMER zone, and printed receipts will skip the Rewards
+Earned block.
+""",
+        keywords=('reward', 'rules', 'configure', 'threshold', 'rewards setup',
+                  'add reward'),
+        related_articles=('rewards-overview', 'rewards-given-then-voided',
+                          'add-payment-method'),
+        screen='settings',
+    ),
+
+    Article(
+        id='rewards-given-then-voided',
+        category_id='corrections',
+        title='I gave tokens but the order was voided',
+        body="""\
+**What to do right now:** Note the customer label and how many
+tokens you handed over.  Tell the coordinator at end-of-day so
+they can subtract from inventory manually.  Don't try to
+recover the tokens from the customer.
+
+## Why this is tricky
+
+Rewards are **physical objects** — once you've handed paper
+tokens or a voucher to the customer, you can't put them back in
+the drawer.  When the order is later voided (e.g. customer
+changed their mind, you keyed it wrong), the app:
+
+- Keeps the **Generated Rewards row** on the original date
+  (it's a historical record of what you handed out)
+- Marks the parent order Voided
+- Does **not** add a "negative reward" or undo
+
+This is intentional — pretending the tokens went back hides a
+real inventory shortage from the coordinator.
+
+## End-of-day reconciliation
+
+The coordinator's process:
+
+1. Pull the Generated Rewards report for the day
+2. Count physical tokens given out (by you and other volunteers)
+3. The two numbers should match
+4. Any voided orders that gave tokens are flagged as
+   "rewards-out, no-revenue" and reconciled against inventory
+   or a small loss
+
+## What to write on a sticky note
+
+Customer label, tokens handed out, the void reason.  Hand it
+to the coordinator with the day's deposit — ten seconds of
+attention now beats a half-hour audit later.
+""",
+        keywords=('reward', 'voided', 'tokens', 'inventory', 'mistake'),
+        related_articles=('rewards-overview', 'void-customer-order',
+                          'void-vs-adjust'),
+    ),
+
+    Article(
+        id='instance-lock-already-running',
+        category_id='maintenance',
+        title='"Another instance is already running" — what to do',
+        body="""\
+**What to do right now:**
+
+1. Look at the Windows taskbar — is FAM Manager already open?
+   Click it; you don't need to start a second copy.
+2. If you don't see the app anywhere, open **Task Manager**
+   (Ctrl + Shift + Esc), find any line that says **"FAM
+   Manager.exe"**, click it, click **End task**.
+3. Try launching FAM Manager again.
+
+That fixes it 19 times out of 20.
+
+## Why this happens
+
+To protect your data, FAM Manager refuses to run two copies
+against the same data folder at the same time.  Two running
+copies could overwrite each other's records on the shared
+Google Sheet.
+
+The app enforces this with a small lock file at
+`%APPDATA%\\FAM Market Manager\\.fam_instance.lock`.  When the
+app launches, it claims the lock; when it exits cleanly, it
+releases the lock.
+
+## When the message lies
+
+Sometimes Windows doesn't fully clean up when the app crashes,
+and the lock looks held even though no process is actually
+running.  In that case:
+
+1. Confirm via Task Manager that **no** `FAM Manager.exe`
+   process is running (kill any you find)
+2. Open File Explorer, paste this path:
+   `%APPDATA%\\FAM Market Manager\\`
+3. Find the file **`.fam_instance.lock`**
+4. Delete it
+5. Launch FAM Manager normally
+
+The lock will be re-created automatically on next launch.
+
+## Don't do this if
+
+If you're sure another volunteer or coordinator is running the
+app on this same laptop, stop here — deleting the lock file
+while the other copy is open is exactly what it's there to
+prevent.
+
+## When to call the coordinator
+
+If the message keeps coming back even after Task Manager shows
+no `FAM Manager.exe` and you've deleted the lock file, send a
+diagnostic via **Help → System Status → Copy Diagnostic Info**.
+""",
+        keywords=('already running', 'instance', 'lock', "won't open",
+                  "won't start", 'second copy', 'duplicate'),
+        related_articles=('where-data-lives', 'pending-update-marker'),
+    ),
+
+    Article(
+        id='pending-update-marker',
+        category_id='maintenance',
+        title='"Update did not complete" dialog — what to do',
+        body="""\
+**What to do right now:**
+
+1. Note what the dialog says (especially the version numbers).
+2. Click **OK** to dismiss.  Your data is safe — nothing was
+   damaged.
+3. Try one more update from **Settings → Updates → Check for
+   Updates**.  If the app downloads and installs successfully,
+   you're done.
+4. If the second attempt fails the same way, follow the
+   **manual update** steps below.
+
+## What this dialog means
+
+After you click "Download & Install", the app:
+
+1. Writes a tiny note in your data folder saying "expecting to
+   come back as version X.Y.Z"
+2. Quits
+3. The installer script copies the new files in
+4. Relaunches the app
+5. The new app reads the note, compares against its actual
+   version
+
+If the running version doesn't match what was expected, the
+"Update did not complete" dialog fires.  This protects you from
+**silent updater failures** — situations where the installer
+exited cleanly but actually didn't replace the files.
+
+## Why it might fail
+
+- **Antivirus / SmartScreen** locked the new exe partway through
+- **Disk was full** or the install drive was unplugged
+- **The release zip didn't unpack correctly** (very rare since
+  v1.9.4)
+- **A second copy was running** during update and held the
+  files open
+
+## Manual update (when in-app fails)
+
+1. Quit FAM Manager (close the window)
+2. Open the Releases page in your browser:
+   https://github.com/seansaball/fam-market-manager/releases
+3. Download the latest `FAM_Manager_vX.Y.Z.zip`
+4. Right-click the zip → Extract All
+5. The extracted folder contains `FAM Manager.exe` — copy
+   everything from that folder over your existing
+   `C:\\Program Files\\FAM Manager\\` (or wherever the app is
+   installed; right-click the desktop shortcut → Open file
+   location to find out)
+6. When Windows asks "replace these files?" click **Yes**
+7. Launch from your usual shortcut
+
+Your data folder
+(`%APPDATA%\\FAM Market Manager\\`) is **never touched** by an
+update — neither the in-app updater nor a manual install will
+delete or rewrite your transactions.
+
+## Rolling back (if the new version is broken)
+
+The app keeps a backup of the previous installation at:
+
+`%APPDATA%\\FAM Market Manager\\_update_backup\\`
+
+If the new version misbehaves and you need to revert:
+
+1. Quit FAM Manager
+2. Copy everything from `_update_backup` over the install
+   directory (same as manual update, but from the backup
+   folder)
+3. Launch — you're now back on the previous version
+
+The data folder is still untouched.
+""",
+        keywords=('update failed', 'pending update', 'did not complete',
+                  'rollback', 'revert', 'manual update', 'silent failure'),
+        related_articles=('check-for-updates', 'manual-install',
+                          'where-data-lives'),
+    ),
+
+    Article(
+        id='offline-saturday-runbook',
+        category_id='during-market',
+        title='Working a market with no internet — full runbook',
+        body="""\
+**What to do right now:** Keep working.  The app is fully
+functional offline.  Sync will happen automatically when
+internet returns.
+
+## What works offline
+
+Everything you do at the booth:
+
+- Open / close market days
+- Receipt Intake
+- Payment Screen with FAM match calculation
+- FMNP Entry (taking the photo too — Windows stores it
+  locally; the upload to Drive is what's deferred)
+- Adjustments
+- Reports (every tab works on local data)
+- Printing receipts (if your printer is connected via USB)
+
+## What doesn't work offline
+
+Only sync.  Specifically:
+
+- "Sync to Cloud" button — disabled until internet is back
+- Auto-sync timer — quietly skips and tries again later
+- Auto-update check — quietly skips
+- The shared Google Sheet won't update with your data until
+  you sync
+
+## How you know it's safe
+
+The bottom-right indicator chip in the title bar:
+
+- **Gray dot, "No network"** — Windows reports no internet.
+  This is normal offline.  Local data is fine.
+- **Yellow / red** — internet is back but a sync attempt
+  failed.  Different problem; see *The sync indicator is red*
+  troubleshooting flow.
+
+## Belt-and-suspenders backup
+
+Even before your laptop's internet returns, the app is writing
+to **two** backups every time you confirm a transaction:
+
+1. **Database snapshot** in
+   `%APPDATA%\\FAM Market Manager\\backups\\`
+2. **Plain-text ledger** in
+   `%APPDATA%\\FAM Market Manager\\fam_ledger_backup.txt` —
+   you can open it in Notepad to see the day's transactions
+   in plain text (useful as a sanity check)
+
+If your laptop dies completely mid-market, those two files
+are how the next laptop reconstructs the day.
+
+## End-of-market checklist (offline day)
+
+1. Close the market day as normal
+2. Take the laptop somewhere with Wi-Fi (your home router is
+   ideal)
+3. Wait a minute — auto-sync runs every 5 minutes once
+   internet is back
+4. Open Settings → Cloud Sync, click **Sync to Cloud** to
+   force the sync immediately if you don't want to wait
+5. Confirm the indicator chip turns green
+6. Verify the day's data appears in the shared Google Sheet
+   (filter by today's date)
+
+## Common worry: "did I lose anything?"
+
+No.  The app's local SQLite database is the source of truth.
+Sync only **mirrors** that data to the Sheet.  As long as the
+SQLite file is intact (which it is unless your laptop's hard
+drive failed), you have everything.
+""",
+        keywords=('offline', 'no internet', 'wifi', 'no network', 'no signal',
+                  'works offline', 'lost data', 'sync later', 'saturday'),
+        related_articles=('no-network-data-safe', 'offline-operation',
+                          'backups', 'data-not-on-sheet'),
+    ),
+
+    Article(
+        id='data-not-on-sheet',
+        category_id='sync',
+        title='My transactions are not showing on the shared Sheet',
+        body="""\
+**What to do right now:** Check three things in order — most
+of the time it's #1.
+
+## 1. Did sync actually run?
+
+Look at the chip in the title bar.
+
+- **Green** = last sync succeeded.  Your rows ARE on the
+  sheet — see step 2 if you can't find them.
+- **Red / yellow / gray** = sync hasn't reached the sheet
+  yet.  See *The sync indicator is red* or *Sync indicator
+  says "No network"* troubleshooting flows.
+
+If the chip is green but you don't see the data on the sheet:
+**force a re-sync.**  Settings → Cloud Sync → Sync to Cloud.
+Wait for the green confirmation, refresh your browser.
+
+## 2. Are you looking at the right tab and the right day?
+
+The shared Google Sheet has multiple tabs.  Each report goes
+to its own tab:
+
+| Looking for...                | Tab name              |
+|-------------------------------|-----------------------|
+| Vendor totals                 | Vendor Reimbursement  |
+| FAM match by payment method   | FAM Match Report      |
+| Every transaction             | Detailed Ledger       |
+| Confirms / voids history      | Transaction Log       |
+| FMNP check entries            | FMNP Entries          |
+| Rewards given                 | Generated Rewards     |
+| End-of-day market summary     | Market Day Summary    |
+
+Open the right tab and filter by today's date.  Each row also
+has **`market_code`** and **`device_id`** columns at the far
+left — those tell you which market and which laptop produced
+the row.
+
+## 3. Are multiple laptops syncing to the same Sheet?
+
+If your market runs more than one laptop, each laptop
+contributes its own rows.  Filter the Sheet by your laptop's
+**`device_id`** to see only your rows.  Open Help → System
+Status to find this laptop's device_id.
+
+## The "missing rows came back" mystery
+
+Sometimes a row appears, gets edited locally, gets synced
+again, and a coordinator looking at the sheet between syncs
+sees an inconsistent state.  This is normal — give it a
+minute.  The sync engine writes the row from your device's
+"latest known" state every time it runs.
+
+## The "I see someone else's rows" non-mystery
+
+The shared Sheet is *shared*.  You see every market and every
+laptop that uses the same Spreadsheet ID.  Filter by
+`market_code` (the 4-letter code in the title bar of FAM
+Manager) to see only your market's rows.
+
+## When to escalate
+
+If after force-syncing, checking the right tab, and filtering
+by your `device_id` you still don't see today's rows:
+
+1. Help → System Status → Copy Diagnostic Info
+2. Paste it into an email along with the day's date and the
+   tab you're looking at
+3. Send to your coordinator
+
+Your local data is safe regardless of what's on the Sheet —
+re-syncing later cannot lose it.
+""",
+        keywords=('not showing', 'missing', 'sheet empty', 'rows missing',
+                  "can't find", 'not on sheet', 'where is my data', 'verify sync'),
+        related_articles=('sync-overview', 'sync-indicator', 'connect-sheets',
+                          'sync-failed'),
+    ),
+
+    Article(
+        id='restore-from-backup',
+        category_id='maintenance',
+        title='Restoring data from a backup — step by step',
+        body="""\
+**Read first:** This is a recovery procedure, not a routine
+operation.  Only follow these steps if your data is actually
+gone or visibly wrong.  If you're unsure, take a copy of the
+data folder before doing anything else.
+
+## When to use this
+
+- The app launches but Reports show zero transactions for a
+  market day you know happened
+- The app crashes immediately on launch with a database error
+  (see step 1 below to confirm before restoring)
+- A coordinator has explicitly told you to restore
+
+## When NOT to use this
+
+- The shared Google Sheet looks wrong but the app's local
+  Reports are fine.  This is a sync problem, not a database
+  problem — see *My transactions are not showing on the
+  shared Sheet*.
+- A specific transaction is wrong.  Use **Adjustments**
+  instead — see *Editing a confirmed transaction*.
+- Photos are missing from Drive.  See *Photo says "Pending"
+  forever*.
+
+## Step 0 — Make a safety copy
+
+Before restoring anything:
+
+1. Quit FAM Manager (close the window completely)
+2. Open File Explorer, paste this path into the address bar:
+   `%APPDATA%\\FAM Market Manager\\`
+3. **Copy the entire folder** to your Desktop (right-click →
+   Copy → paste on Desktop).  Name the copy
+   `FAM Backup BEFORE RESTORE 2026-MM-DD`.
+
+If anything goes wrong, you can put this safety copy back.
+
+## Step 1 — Confirm a backup exists
+
+Inside `%APPDATA%\\FAM Market Manager\\backups\\` you should
+see a list of files named like:
+
+- `fam_2026-05-01_09-15-00.db` (auto-backup at 9:15 AM)
+- `fam_2026-05-01_09-20-00.db` (5 minutes later)
+- `fam_2026-05-01_market_open.db` (one-shot at market open)
+
+Backups are taken every 5 minutes during a market day, plus
+one extra at market_open and market_close.  Pick the most
+recent backup that pre-dates the problem.
+
+## Step 2 — Restore
+
+1. With FAM Manager closed, navigate to
+   `%APPDATA%\\FAM Market Manager\\`
+2. **Rename** the existing `fam_data.db` to
+   `fam_data_BROKEN.db` (don't delete it yet — you might need
+   to look at it later)
+3. **Copy** your chosen backup file from
+   `backups\\fam_2026-XX-XX_XX-XX-XX.db` up one level into
+   `%APPDATA%\\FAM Market Manager\\`
+4. **Rename** the copy to exactly `fam_data.db`
+5. Launch FAM Manager
+6. Open Reports — verify the data looks correct as of the
+   backup time you picked
+
+## Step 3 — Reconcile
+
+If the backup is recent (within 5 minutes of the problem),
+you may not need to do anything else.  If it's older, you'll
+need to re-enter transactions that happened between the
+backup time and the failure.
+
+The plain-text **ledger backup** at
+`%APPDATA%\\FAM Market Manager\\fam_ledger_backup.txt`
+preserves a record of every confirmed transaction in plain
+English.  Open it in Notepad — anything past the backup's
+timestamp is what you'll need to re-enter.
+
+## Step 4 — Push to the Sheet
+
+After you've restored and re-entered as needed, click
+Settings → Cloud Sync → Sync to Cloud to bring the shared
+sheet into agreement with your local state.
+
+## When this doesn't help
+
+If even the backups are corrupt, or `fam_data.db` is fine but
+the app refuses to launch:
+
+1. Help → System Status → Copy Diagnostic Info (you can do
+   this from a fresh laptop pointing at the broken data
+   folder)
+2. Email it with the timestamp of when things went wrong
+3. The coordinator can recover from the **Detailed Ledger
+   tab on the shared Google Sheet** if it was syncing — the
+   sheet is a complete external record.
+""",
+        keywords=('restore', 'backup', 'recover', 'data lost', 'corrupted',
+                  'database', 'rollback', 'broken', 'crashed'),
+        related_articles=('backups', 'where-data-lives',
+                          'pending-update-marker'),
+    ),
+
+    Article(
+        id='glossary',
+        category_id='getting-started',
+        title='Glossary — what every term means',
+        body="""\
+Plain-English definitions of every term that shows up in the
+app, the printed receipt, the Google Sheet, and these help
+articles.
+
+## App and people
+
+**FAM** — Food Assistance Match.  The subsidy program your
+market participates in.  When the app says "FAM match," it
+means the dollars FAM contributes on top of what the customer
+pays.
+
+**FMNP** — Farmers' Market Nutrition Program.  A state-funded
+voucher / check program separate from FAM.  See *FMNP
+overview*.
+
+**Vendor** — a farmer / seller at the market.
+
+**Customer** — the shopper.  The app uses a short label
+(e.g. C-005) to track them across multiple receipts on the
+same day.
+
+**Coordinator** — the person who runs the market or the FAM
+program.  Configures Settings, troubleshoots issues, and
+reconciles end-of-day reports.
+
+**Volunteer** — that's you, at the booth.
+
+## Identifiers
+
+**market_code** — the 4-letter code for your market location
+(e.g. `BPFM` for Bethel Park, `BVFM` for Bellevue).  Set in
+Settings → Markets.  Shows in the title bar in brackets.
+
+**device_id** — a short tag identifying *this laptop*.  Used
+on the shared Google Sheet to tell which laptop produced
+which row.  Defaults to a 3-character auto-derived tag; you
+can customize in Settings → Preferences → Device Identity.
+
+**fam_transaction_id** — the unique ID for a transaction,
+formatted like `FAM-BPFM-20260501-0001`.  Means: FAM | the
+market_code | the date | a 4-digit number for the day.
+Adjustments search this field.
+
+## Concepts
+
+**Composite key** — when the shared sheet matches a row by
+multiple columns at once (e.g. market_code + device_id +
+date + customer label), preventing two laptops from
+accidentally overwriting each other's data.
+
+**Upsert** — short for "update or insert."  When syncing,
+the app updates a row if one with the same composite key
+already exists, or inserts a new row if not.
+
+**Audit log** — an append-only history of every change in
+the database (confirms, voids, adjustments, edits).
+"Append-only" means rows are added but never modified or
+deleted, so it's a permanent record.
+
+**Service account** — a Google identity used by the app to
+authenticate to Sheets and Drive.  Created in the Google
+Cloud console; the credentials JSON file is the secret that
+proves the identity.  Coordinators handle this; volunteers
+just receive the file once and load it.
+
+**Drive folder ID** — the long string in a Google Drive
+folder URL.  The app uploads photos to this folder.
+
+**Spreadsheet ID** — the long string in a Google Sheets URL.
+Identifies the shared workbook the app syncs to.
+
+## Money math
+
+**Match cap** — the maximum FAM dollars a single market day
+can spend.  Configured per market in Settings.  Once hit,
+new orders show "Cap reached" and FAM contributes 0.
+
+**Daily match cap** — same as match cap.
+
+**Match percent** — for each payment method, the percentage
+FAM matches.  E.g. SNAP at 100% means $1 SNAP earns $1 FAM
+match.  FMNP at 50% means $5 FMNP earns $2.50 FAM.
+
+**Penny reconciliation** — rounding cents so that the totals
+on a multi-method payment add up exactly to the receipt
+total.  The app handles this automatically.
+
+**Drift / drift cent** — the 1¢ rounding leftover that the
+app distributes between methods to keep totals exact.
+
+**Denominated payment** — a payment where the amount can
+only be a multiple of a fixed denomination (e.g. Food Bucks
+in $5 increments).  The app prevents you from entering a
+non-multiple.
+
+**Forfeit** — when a denominated payment overshoots the
+receipt (customer hands over $15 of FMNP for an $11
+receipt).  The vendor gets the full $11; the customer
+"forfeits" the unmatched $4 of physical paper.  See
+*Denomination forfeit*.
+
+**Unallocated funds** — money that was on a confirmed
+transaction but isn't covered by any line after an
+adjustment.  Shows in the audit log as a UNALLOCATED_FUNDS
+action.
+
+## Sync
+
+**Composite-key upsert** — see Composite key + Upsert above.
+What the sync engine does to merge multi-laptop data without
+collisions.
+
+**Sync indicator chip** — the colored dot in the title bar
+showing the latest sync state (green/yellow/red/gray).
+
+**60-write/min quota** — Google's rate limit on Sheets
+writes.  The app paces itself to stay under this.
+
+**5-minute auto-sync** — the timer that triggers sync
+automatically while a market day is open.
+
+## Files and folders
+
+**Data folder** — `%APPDATA%\\FAM Market Manager\\` —
+where everything lives.
+
+**fam_data.db** — the main SQLite database file.  Source of
+truth.
+
+**WAL** — Write-Ahead Log, a file SQLite uses while
+committing.  You'll see `fam_data.db-wal` and
+`fam_data.db-shm` next to the main file.  Don't move or
+delete them while the app is running.
+
+**Backup** — a `.db` file copied to `backups/` at fixed
+intervals during a market day.
+
+**Ledger backup** — `fam_ledger_backup.txt`, a plain-text
+human-readable copy of every confirmed transaction.
+
+**Pending-update marker** — `_pending_update.json`.  A short
+note left behind by the updater so the new version can
+verify it actually installed.
+
+**Instance lock** — `.fam_instance.lock`.  Prevents two
+copies of the app from running against the same data folder.
+
+## Status words
+
+**Confirmed** — the operator clicked Confirm; FAM has
+committed match dollars.
+
+**Voided** — the transaction was cancelled.  Match dollars
+are released; the customer didn't pay.
+
+**Adjusted** — a confirmed transaction was edited later.
+The audit log records what changed.
+
+**Soft delete** — the row stays in the database but is
+hidden from normal views.  Used when something is "deleted"
+but still needs to be referenced for history.
+""",
+        keywords=('glossary', 'definitions', 'terms', 'meaning', 'jargon',
+                  'what does', 'vocabulary'),
+        related_articles=('what-is-fam-manager', 'sync-overview',
+                          'where-data-lives', 'fmnp-overview',
+                          'penny-reconciliation'),
+    ),
+
+    Article(
+        id='multi-laptop-deployment',
+        category_id='settings',
+        title='Running multiple laptops at the same market',
+        body="""\
+**What to do right now:** As long as each laptop has been
+configured by the coordinator with the right `market_code`
+and a unique `device_id`, you can use them at the same time
+without coordination.  Just keep working — the app handles
+the rest.
+
+## How it works
+
+When two or more laptops share the same `market_code` (same
+market) and each has a different `device_id` (different
+laptop), the shared Google Sheet treats them as **independent
+contributors**.  Each row carries both fields, so even when
+two volunteers confirm orders at the same instant on
+different laptops, their rows don't overwrite each other.
+
+## Customer labels can repeat
+
+Each laptop assigns its own customer labels (C-001, C-002,
+…).  Two laptops will both have a customer "C-005" — these
+are different customers.  This is fine: every transaction
+also carries the device_id, so reports keep them separate.
+
+The coordinator's view of the sheet shows all of them
+together.  Filter by `device_id` to see one laptop's
+customers in isolation.
+
+## When you switch laptops mid-day
+
+If you start the day on laptop A and switch to laptop B for
+the second half:
+
+- Laptop B can keep working — same market, different
+  device_id
+- Laptop B does NOT see laptop A's customers in its local
+  Reports (they live in laptop A's database)
+- The shared Google Sheet shows everyone's data merged
+- For end-of-day, run reports on each laptop separately, or
+  pull from the sheet
+
+## What NOT to do
+
+**Don't run two copies on the same laptop.**  The app blocks
+this with the instance lock.  See *"Another instance is
+already running"*.
+
+**Don't copy the database file between laptops.**  Doing so
+clones the device_id and breaks the sheet's ability to tell
+the laptops apart.  Use the export-settings / import-settings
+mechanism for sharing setup, not the database.
+
+**Don't reconfigure device_id mid-day.**  If you change the
+device_id while the day is in progress, the sheet will see
+two "different" devices contributing the same data — your
+rows will appear to duplicate.
+
+## Coordinator setup checklist
+
+For each laptop before its first market day:
+
+1. Install the app
+2. Load defaults or import the standard `.fam` settings file
+3. Set the **market_code** in Settings → Markets to match the
+   market this laptop covers
+4. Set a unique **device tag** in Settings → Preferences →
+   Device Identity (e.g. `LB1`, `LB2`)
+5. Load Cloud Sync credentials and Spreadsheet ID
+6. Test sync — confirm a row appears on the sheet with the
+   right device_id
+
+## End-of-day for multi-laptop markets
+
+The shared Google Sheet is the merged view.  Pull reports
+from there, not from individual laptops, when you need
+totals across the whole market.
+""",
+        keywords=('multi-laptop', 'two laptops', 'multiple devices',
+                  'shared market', 'two volunteers', 'second laptop'),
+        related_articles=('device-tag', 'sync-overview',
+                          'instance-lock-already-running',
+                          'data-not-on-sheet'),
+    ),
+
+    Article(
+        id='diagnostic-info-no-internet',
+        category_id='maintenance',
+        title='Sending diagnostic info without internet',
+        body="""\
+**What to do right now:** Open Help → System Status → click
+**Copy Diagnostic Info** → paste into a Notepad file → save
+the Notepad file with the day's date in the name → carry it
+home on a USB stick or just type it up later.  No internet
+needed.
+
+## The clipboard approach (when you have at least a phone)
+
+1. Help → System Status → Copy Diagnostic Info
+2. Open Notes / Mail on your phone
+3. Type your message
+4. Long-press → Paste
+5. Send when you have signal
+
+## The "no signal at all" approach
+
+1. Help → System Status → Copy Diagnostic Info
+2. Open **Notepad** on the laptop (Start menu, type "notepad")
+3. Paste (Ctrl + V)
+4. File → Save As → save to Desktop with a name like
+   `FAM diagnostic 2026-05-01.txt`
+5. Either:
+   - Plug a USB stick in, copy the file to it, take it home
+   - Email it later when you have Wi-Fi
+   - Photograph the screen with your phone and send the photo
+
+## What to include alongside the diagnostic
+
+The diagnostic block tells the coordinator what the system
+*looks* like.  Add what *happened* in your own words:
+
+- What you were trying to do when it went wrong
+- What you saw on screen (any error message, take a phone
+  photo)
+- The customer label / vendor / time if relevant
+- Whether you had a workaround (kept going, or had to stop)
+
+## What's in a diagnostic info block
+
+Useful fields a coordinator will look for:
+
+- App version (e.g. `1.9.10`)
+- Last sync timestamp (was it minutes ago or days?)
+- Last sync error (if any)
+- Open market day (was one open when the issue happened?)
+- Counts of confirmed / voided transactions
+- Disk space used by the database / photos / backups
+
+The block does not contain any customer names, payment-card
+numbers, or personally identifying information.
+""",
+        keywords=('diagnostic', 'support', 'send log', 'no signal', 'usb',
+                  'system status', 'help', 'no internet'),
+        related_articles=('where-data-lives', 'offline-saturday-runbook',
+                          'rotate-credentials'),
+    ),
+
+    Article(
+        id='rotate-credentials',
+        category_id='sync',
+        title='Replacing the Google credentials file (coordinator)',
+        body="""\
+**For coordinators only.**  Volunteers don't need to do this.
+
+## When you need to do it
+
+- The service account was rotated (security policy)
+- A new market joined and got its own service account
+- The old file expired or was revoked
+- A coordinator handover and the new person creates a new
+  service account
+
+## What you need
+
+A new credentials JSON file from Google Cloud Console.
+Generate it from the same project that owns the shared
+Google Sheet, or from a new project — either works as long
+as the new service account email is shared on the sheet
+**with Editor access**.
+
+## Steps (per laptop)
+
+1. Settings → Cloud Sync → click **Load Credentials**
+2. Pick the new `.json` file
+3. Click **Save Sync Settings**
+4. Click **Sync to Cloud** to verify
+
+If sync succeeds (green chip, no error in tooltip), you're
+done.  If sync fails with a permission error, the new
+service account email isn't shared on the Sheet — fix that
+in Google Sheets first (Share → paste the service account
+email → set to Editor → no notification needed).
+
+## Where the file ends up
+
+The credentials are copied into
+`%APPDATA%\\FAM Market Manager\\google_credentials.json`
+on each laptop.  Do not edit this file by hand.
+
+## Rolling back
+
+If the new credentials don't work, just Load Credentials
+again with the old file (assuming you kept a copy).  Nothing
+in the data folder cares about credential identity — only
+the active credentials matter.
+
+## Multi-laptop deployment
+
+You'll need to repeat Load Credentials on every laptop the
+new credentials should work on.  There's no way to push the
+new file to all laptops remotely — it's a per-machine action.
+""",
+        keywords=('credentials', 'rotate', 'service account', 'new key',
+                  'expired', 'auth error', 'revoked'),
+        related_articles=('connect-sheets', 'connect-drive',
+                          'sync-overview', 'data-not-on-sheet'),
+    ),
+
+    Article(
+        id='end-of-day-handoff',
+        category_id='reports',
+        title='End-of-day coordinator hand-off checklist',
+        body="""\
+**Use this at market close.**  A 5-minute checklist to
+guarantee the coordinator has everything they need.
+
+## At the booth
+
+1. **Close the market day** (Market screen → Close button)
+2. Take a photo of the deposit slip / cash count if your
+   market does cash reconciliation
+3. **Sync to Cloud** (Settings → Cloud Sync → button) — wait
+   for green
+4. Verify the indicator chip is green
+
+## In the app
+
+Open Reports.  Take a screenshot or print each of these:
+
+- **Vendor Reimbursement** — what each vendor is owed
+- **FAM Match Report** — total match dollars by payment
+  method
+- **FMNP Entries** — FMNP checks taken (if your market does
+  FMNP)
+- **Detailed Ledger** — every transaction
+- **Generated Rewards** — any tokens given out (if your
+  market does rewards)
+
+If your laptop has a printer, the **Print Reports** menu
+prints all of these in one go.
+
+## Things to send the coordinator
+
+In one email:
+
+- The day's date and market location
+- The number of confirmed transactions (from System Status
+  → "Confirmed transactions")
+- Any voided orders that gave rewards (handwritten note
+  during the day — see *I gave tokens but the order was
+  voided*)
+- Any in-app errors you saw (paste from Help → System
+  Status if anything was off)
+- The cash deposit photo if relevant
+
+If your market uses the shared Google Sheet, the coordinator
+already has all the row-level data — you don't need to send
+the reports themselves; the email is just a "here's what
+happened today" summary.
+
+## Last steps
+
+1. Quit FAM Manager normally (close the window)
+2. Confirm the laptop's lock file is gone
+   (`%APPDATA%\\FAM Market Manager\\.fam_instance.lock`
+   should not exist after a clean shutdown — see
+   *"Another instance is already running"* if you're
+   troubleshooting)
+3. Power off the laptop
+
+## Multi-laptop markets
+
+Each laptop runs its own end-of-day.  The shared Sheet
+merges everything; the coordinator pulls totals from there.
+
+## When you can't reach the coordinator
+
+If you're locked out of email or the coordinator is
+unreachable, **Help → System Status → Copy Diagnostic Info**
+captures everything they'd need to triage remotely.  Save
+that to a USB stick or your phone — see *Sending diagnostic
+info without internet*.
+""",
+        keywords=('end of day', 'handoff', 'close market', 'reports',
+                  'coordinator', 'reconcile', 'finish'),
+        related_articles=('market-day-close', 'sync-overview',
+                          'rewards-given-then-voided', 'export-reports',
+                          'diagnostic-info-no-internet'),
+        screen='reports',
+    ),
 )
 
 
@@ -2421,6 +4041,190 @@ TROUBLESHOOTING_FLOWS: tuple[TroubleshootingFlow, ...] = (
         ),
         keywords=('fmnp', 'missing', 'not showing', 'payment screen', 'option'),
         related_articles=('fmnp-activate-payment', 'fmnp-overview', 'add-payment-method'),
+    ),
+
+    # ── v1.9.9 troubleshooting flows ────────────────────────────────
+
+    TroubleshootingFlow(
+        id='ts-customer-id-collisions',
+        title='Multiple laptops have the same customer ID',
+        symptom='Coordinators report that "C-005" exists on more than one laptop, or the synced sheet shows duplicate-looking customer IDs',
+        steps=(
+            "1. Confirm you're on v1.9.9 or later — the device tag fix shipped in v1.9.9. Help → System Status shows the app version.",
+            "2. Check the header chip on each laptop — every device shows a 'Device: XXX' chip. The 3-char tag should be different on every machine.",
+            "3. If two laptops show the SAME tag, one of them has a manual override set to a colliding value — Settings → Preferences → Device Identity → Device Tag.  Clear the override on one and set a unique one (e.g. 'LB1' on one, 'LB2' on the other).",
+            "4. Customer labels generated AFTER the fix carry the tag (e.g. 'C-005-A1B').  Existing labels from before v1.9.9 keep their old format ('C-005') — those collisions can't be retroactively fixed but no new ones will appear.",
+            "5. To rename pre-v1.9.9 labels for clarity, you'd need a database edit (out of scope for in-app workflows).  Most installs just live with the historical legacy labels and let the new ones disambiguate going forward.",
+        ),
+        keywords=('customer id', 'collision', 'duplicate', 'multi-laptop',
+                  'device tag', 'C-005', 'multiple', 'same'),
+        related_articles=('device-tag', 'returning-customer'),
+    ),
+
+    TroubleshootingFlow(
+        id='ts-cant-delete-market',
+        title='I can\'t delete a market — only Deactivate is offered',
+        symptom='A market in Settings → Markets only has a Deactivate button visible, no Delete',
+        steps=(
+            "1. Verify you're on v1.9.9 or later — the Delete button shipped in v1.9.9. Help → System Status shows the app version.",
+            "2. The Delete button is a separate red button next to Deactivate. If it's not appearing, the actions column may be too narrow — try resizing the Settings window wider or scrolling the row horizontally.",
+            "3. Click Delete. If you get a 'Cannot Delete' warning, the market has historical market_days (and therefore transactions) referenced — those would orphan if the market were dropped. Use Deactivate instead.",
+            "4. If the warning surprises you (you don't recall ever opening a market day for this entry), click the row's Edit button to confirm you're looking at the right market, then check Reports → Detailed Ledger filtered by that market name to see what history exists.",
+            "5. If the market truly has no history (e.g. an accidental entry never used), Delete will offer a confirmation dialog and remove it cleanly along with its junction-table configuration.",
+        ),
+        keywords=('market', 'delete', 'cannot delete', 'remove',
+                  'orphan', 'M', 'legacy'),
+        related_articles=('market-delete', 'add-market'),
+    ),
+
+    TroubleshootingFlow(
+        id='ts-adjustment-blocked-by-mismatch',
+        title='Adjustment save is blocked with "Payment Row Mismatch"',
+        symptom='You hit OK on an Adjustment dialog and get a "Payment Row Mismatch" warning instead of save',
+        steps=(
+            "1. Read the dollar amounts in the warning — it shows the row's typed value AND the engine's computed charge (e.g. shows $50 but engine computed $60).",
+            "2. The mismatch usually means the daily match cap inflated the customer's required payment past what's typed.  Click ⚡ Auto-Distribute on the Adjustment dialog — that runs the engine and writes the correct values back into the rows.",
+            "3. Alternatively, manually adjust the row to match the engine's expected charge (the value shown in the customer-impact panel below the rows).",
+            "4. Save again — the guard should now pass.",
+            "5. This guard exists to prevent silent under-charging.  It mirrors the same protection on the Payment screen and is intentional: if the typed value disagrees with the engine, the saved record would be wrong.",
+        ),
+        keywords=('payment row mismatch', 'adjustment', 'cap', 'auto-distribute',
+                  'charge integrity', 'guard'),
+        related_articles=('adjust-transaction', 'penny-reconciliation'),
+    ),
+
+    TroubleshootingFlow(
+        id='ts-stale-market-day-popup',
+        title='App says "Stale market day was auto-closed" at startup',
+        symptom='Opening the app shows a notification that an older market day was closed automatically',
+        steps=(
+            "1. This is normal v1.9.9 behaviour, not a bug.  A market day was left Open with a date earlier than today, so the app closed it automatically to prevent new transactions from being mis-attributed to a past day.",
+            "2. The closed day's transactions are intact — no data was lost.  Check Reports → Detailed Ledger for that date to confirm.",
+            "3. To start work today, open a new market day on the Market Day Setup screen.  Pick today's market location and volunteer name, then Open Market Day.",
+            "4. The dialog typically shows the market name and date that was auto-closed so you know exactly what happened.",
+            "5. Going forward: close the day at the end of every market.  Settings → Reset doesn't auto-close days for you; the auto-close only kicks in at startup when the existing Open day's date is in the past.",
+        ),
+        keywords=('stale', 'auto-close', 'market day', 'past date',
+                  'startup', 'forced close'),
+        related_articles=('market-day-open', 'market-day-close',
+                          'market-day-reopen'),
+    ),
+
+    # ── v1.9.10 additions ──────────────────────────────────────────
+
+    TroubleshootingFlow(
+        id='ts-update-failed',
+        title='"Update did not complete" dialog at startup',
+        symptom='After clicking Download & Install, the app reopens but shows a yellow warning that the update did not finish',
+        steps=(
+            "1. Click OK to dismiss.  Your data is safe — this dialog is the safety net, not a sign of damage.",
+            "2. Settings → Updates → click 'Check for Updates' once more.  Most of the time the second attempt succeeds.",
+            "3. If it fails the same way, look at the version numbers in the dialog.  If the 'expected' and 'actual' differ by a major version (e.g. 1.9.10 expected, 1.9.5 actual), the installer probably hit antivirus or SmartScreen.",
+            "4. Open Help → Browse → 'Update did not complete' for the manual install steps.",
+            "5. To rollback to the previous version: quit the app, copy everything from %APPDATA%\\FAM Market Manager\\_update_backup\\ over your install directory.",
+            "6. If you remain stuck, Help → System Status → Copy Diagnostic Info and email it to your coordinator.  Include the contents of %APPDATA%\\FAM Market Manager\\_fam_update.log if it exists — that file is the updater's own log.",
+        ),
+        keywords=('update', 'failed', 'pending', 'not complete', 'rollback',
+                  'wrong version'),
+        related_articles=('pending-update-marker', 'check-for-updates',
+                          'manual-install'),
+    ),
+
+    TroubleshootingFlow(
+        id='ts-instance-lock',
+        title='"Another FAM Market Manager instance is already running"',
+        symptom='When you try to launch the app, an error dialog refuses to open it',
+        steps=(
+            "1. Look at your Windows taskbar.  Is FAM Manager already open in another window?  If yes, click that window — you don't need a second copy.",
+            "2. If not, open Task Manager (Ctrl + Shift + Esc).  In the Processes tab, look for any line named 'FAM Manager.exe'.",
+            "3. If you see one, click it and click 'End task'.  Wait 5 seconds.",
+            "4. Try launching FAM Manager again.  This fixes it most of the time.",
+            "5. If it still won't launch and Task Manager shows no FAM Manager.exe: open File Explorer, paste %APPDATA%\\FAM Market Manager\\ into the address bar, find the file '.fam_instance.lock', delete it.",
+            "6. Launch the app.  The lock file will be re-created automatically.",
+            "7. If the message keeps coming back even after step 6, send a diagnostic via Help → System Status → Copy Diagnostic Info.",
+        ),
+        keywords=('already running', 'instance', 'lock', "won't open",
+                  'second copy', 'duplicate'),
+        related_articles=('instance-lock-already-running',
+                          'where-data-lives'),
+    ),
+
+    TroubleshootingFlow(
+        id='ts-data-not-on-sheet',
+        title="My transactions aren't showing on the shared Google Sheet",
+        symptom="The app shows confirmed transactions, but they don't appear on the shared Google Sheet",
+        steps=(
+            "1. Look at the indicator chip in the title bar.  Green = synced.  Anything else = sync hasn't reached the sheet yet — handle that first (see 'The sync indicator is red' or 'Sync indicator says No network').",
+            "2. If the chip is green: force a re-sync.  Settings → Cloud Sync → Sync to Cloud.  Wait for the green confirmation.",
+            "3. Refresh your browser's view of the Google Sheet (Ctrl + R in Chrome).",
+            "4. Make sure you're on the right tab.  Receipts → 'Detailed Ledger' tab.  Vendor totals → 'Vendor Reimbursement' tab.  FMNP checks → 'FMNP Entries' tab.  Rewards → 'Generated Rewards' tab.",
+            "5. Each row has 'market_code' and 'device_id' columns at the far left.  Filter by your laptop's device_id (find it under Help → System Status) to see only your rows.",
+            "6. If your market runs multiple laptops: each laptop has a unique device_id, so the same customer label (e.g. C-005) might appear from two different laptops — they're different customers.  Filter by device_id.",
+            "7. Still missing?  Help → System Status → Copy Diagnostic Info → email coordinator with the date and the tab you're looking at.",
+            "8. Your local data is safe regardless of what's on the sheet.  Re-syncing later cannot lose anything.",
+        ),
+        keywords=('not showing', 'missing', 'sheet empty', 'rows missing',
+                  "can't find", 'not on sheet', 'where is my data'),
+        related_articles=('data-not-on-sheet', 'sync-indicator',
+                          'sync-overview', 'multi-laptop-deployment'),
+    ),
+
+    TroubleshootingFlow(
+        id='ts-offline-saturday',
+        title='Working a market with no internet at all',
+        symptom='Wi-Fi at the market venue is down or you have no signal',
+        steps=(
+            "1. Keep working.  The app is fully functional offline — Receipt Intake, Payment, FMNP Entry, Adjustments, Reports, even printing receipts.",
+            "2. The indicator chip will show gray ('No network').  This is normal offline.  Local data is safe.",
+            "3. Sync is automatically deferred until internet returns.  You don't have to do anything.",
+            "4. The plain-text ledger backup at %APPDATA%\\FAM Market Manager\\fam_ledger_backup.txt records every confirmed transaction in plain English — open it in Notepad if you want to verify.",
+            "5. At end-of-day: close the market day, take the laptop home (or any Wi-Fi), wait a minute, then click 'Sync to Cloud' to push the day's data immediately.",
+            "6. Verify the indicator chip turns green and the rows appear on the shared Google Sheet.",
+            "7. If sync fails after you reach Wi-Fi, see 'The sync indicator is red'.",
+        ),
+        keywords=('offline', 'no internet', 'wifi down', 'no signal',
+                  'venue', 'works offline'),
+        related_articles=('offline-saturday-runbook', 'no-network-data-safe',
+                          'backups'),
+    ),
+
+    TroubleshootingFlow(
+        id='ts-rewards-empty',
+        title='Generated Rewards report is empty even though we gave tokens',
+        symptom='Reports → Generated Rewards tab shows no rows, but you handed customers tokens during the day',
+        steps=(
+            "1. Confirm rewards is actually enabled.  Settings → Rewards tab — the master 'Rewards enabled' toggle at top must be checked.",
+            "2. Confirm at least one rule is Active.  Each rule has an Active toggle in the rules table.",
+            "3. Were the customer's payments using a method that triggers a rule?  E.g. if your rules trigger on SNAP only, a Cash-only order won't generate rewards.",
+            "4. Did the customer's payment hit the threshold?  E.g. a $5 SNAP threshold rule won't fire on $4.50 of SNAP.",
+            "5. Check Help → System Status — confirm the 'Rewards' line shows enabled and the rule count matches what you expect.",
+            "6. If rules look right but the report is empty: Settings → Cloud Sync → Sync to Cloud, then re-check.  The Generated Rewards tab is local; the report is built from confirmed orders.",
+            "7. If you're sure tokens were given but the report disagrees, the order was likely voided after rewards fired.  See 'I gave tokens but the order was voided'.",
+        ),
+        keywords=('rewards', 'empty', 'tokens', 'not showing', 'rules',
+                  'generated rewards', 'no rows'),
+        related_articles=('rewards-overview', 'rewards-configure',
+                          'rewards-given-then-voided'),
+    ),
+
+    TroubleshootingFlow(
+        id='ts-no-coordinator',
+        title='Something is wrong and I cannot reach the coordinator',
+        symptom='You need help right now and the project owner / coordinator is not reachable',
+        steps=(
+            "1. Don't panic.  Local data is almost always fine — the app's safety design means SQLite + ledger + backups all preserve transactions independently.",
+            "2. Help → System Status → Copy Diagnostic Info.  Save the text to Notepad (Desktop, name it 'FAM diagnostic <today>.txt') — you'll want it later.",
+            "3. Help → Browse — search for the symptom in your own words.  Try synonyms (e.g. 'photo' AND 'picture', 'sync' AND 'upload').",
+            "4. Help → Troubleshooting — scan the symptom titles; the closest match is your starting point.",
+            "5. If you're seeing an error dialog, take a phone photo of it.  The dialog wording is often the answer to 'what to search for'.",
+            "6. The most common true emergencies and their answers: app won't open → 'ts-app-wont-start'.  Update broken → 'ts-update-failed'.  Already-running message → 'ts-instance-lock'.  Data missing → 'restore-from-backup' article.",
+            "7. If the workflow is broken (you can't enter receipts), the printed offline runbook in docs/EMERGENCY_RUNBOOK.md (a coordinator should have a printed copy at the booth) covers paper-based fallback.",
+            "8. Take notes on what you did.  Tomorrow / next week, send the diagnostic + your notes to the coordinator.  Auditing what happened reproduces correctly later because everything is in the audit log.",
+        ),
+        keywords=('emergency', 'no help', 'coordinator', 'sean', 'urgent',
+                  'unreachable', 'alone', 'panic'),
+        related_articles=('diagnostic-info-no-internet', 'where-data-lives',
+                          'restore-from-backup', 'offline-saturday-runbook'),
     ),
 )
 

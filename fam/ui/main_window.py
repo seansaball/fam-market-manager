@@ -186,6 +186,40 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(16, 4, 16, 4)
         header_layout.addStretch()
 
+        # ── Device tag (multi-laptop disambiguator) ─────────────
+        # Customer labels carry a 3-char device tag (e.g.
+        # "C-005-A1B"); displaying the tag here lets a coordinator
+        # see at a glance which device they're on without opening
+        # Settings.  Critical when 5 laptops are deployed at one
+        # market — without this, "I'm working on C-007" is
+        # ambiguous about which laptop.
+        from fam.utils.app_settings import get_device_tag
+        self._device_tag_label = QLabel(f"Device: {get_device_tag()}")
+        self._device_tag_label.setStyleSheet(f"""
+            QLabel {{
+                font-size: 12px;
+                font-weight: bold;
+                color: {SUBTITLE_GRAY};
+                padding: 4px 10px;
+                border: 1px solid {LIGHT_GRAY};
+                border-radius: 6px;
+                background-color: {WHITE};
+                margin-right: 8px;
+            }}
+        """)
+        self._device_tag_label.setToolTip(
+            "This device's tag.  Every customer label generated on "
+            "this laptop ends in '-{tag}' (e.g. C-005-{tag}) so "
+            "labels stay unique even when multiple laptops are "
+            "deployed at the same market.\n\n"
+            "Override the tag in Settings → About this Device "
+            "(useful when you want a friendly label like 'LB1' "
+            "instead of the auto-generated hash).".format(
+                tag=get_device_tag()
+            )
+        )
+        header_layout.addWidget(self._device_tag_label)
+
         # ── Sync indicator + button (hidden until configured) ───
         self._sync_indicator = QLabel("")
         self._sync_indicator.setVisible(False)
@@ -281,9 +315,49 @@ class MainWindow(QMainWindow):
         # the sync indicator reflects reality after any user action.
         self.payment_screen.payment_confirmed.connect(self._trigger_sync)
         self.payment_screen.draft_saved.connect(self._trigger_sync)
-        self.fmnp_screen.entry_saved.connect(self._trigger_sync)
-        self.admin_screen.data_changed.connect(self._trigger_sync)
+        # v2.0.6: FMNP and Admin signals carry the affected
+        # market_day_id so mutations against CLOSED market days
+        # (FMNP after-the-fact entries, Admin adjustments / voids
+        # of historical receipts) reach the cloud.  See
+        # ``_on_fmnp_entry_saved`` and ``_on_admin_data_changed``
+        # for the scope-override logic.  Receipt Intake's
+        # data_changed always fires on the OPEN day (the screen
+        # is bound to ``_active_market_day``) so it stays on the
+        # bare ``_trigger_sync`` slot.
+        self.fmnp_screen.entry_saved.connect(self._on_fmnp_entry_saved)
+        self.admin_screen.data_changed.connect(self._on_admin_data_changed)
         self.receipt_intake_screen.data_changed.connect(self._trigger_sync)
+        # v2.0.6: Settings mutations (vendor / market / payment-method
+        # adds, edits, toggles, assignments, reward rules) affect rows
+        # across ALL markets and time, so they need a full-scope sync —
+        # not the narrow per-md auto-sync used for receipt intake.
+        # ``_on_settings_changed`` forces ``delete_stale=True`` so
+        # whole-dataset tabs (Vendor Reimbursement, Error Log)
+        # re-converge on the new config.
+        self.settings_screen.settings_changed.connect(
+            self._on_settings_changed)
+
+        # Reports refresh — every financial mutation also bumps the
+        # Reports screen so its tables (Vendor Reimbursement, FAM
+        # Match, Detailed Ledger, summary cards including FAM
+        # Absorbed) reflect new data without the operator having
+        # to re-navigate.  v1.9.10 follow-up (2026-05-01, onsite
+        # report): a manager adjusted a transaction to "customer
+        # is gone" and saw an Unallocated Funds line item committed
+        # to the DB, but the FAM Absorbed card on the Reports tab
+        # remained at its old value because navigation-driven
+        # refresh only fires on tab switch.  Now any of these
+        # signals also re-runs ``reports_screen.refresh()``.
+        self.payment_screen.payment_confirmed.connect(
+            self.reports_screen.refresh)
+        self.payment_screen.draft_saved.connect(
+            self.reports_screen.refresh)
+        self.fmnp_screen.entry_saved.connect(
+            self.reports_screen.refresh)
+        self.admin_screen.data_changed.connect(
+            self.reports_screen.refresh)
+        self.receipt_intake_screen.data_changed.connect(
+            self.reports_screen.refresh)
 
         # Select first screen
         first_btn = self.nav_group.button(0)
@@ -294,6 +368,13 @@ class MainWindow(QMainWindow):
         # Tutorial overlay (created on demand)
         self._tutorial_overlay = None
         self.centralWidget().installEventFilter(self)
+
+        # v1.9.9+ stale-market-day auto-close: if any market days were
+        # left open across calendar boundaries, close them now and
+        # surface a one-time dialog so the volunteer knows what
+        # happened.  Defer past the first paint so the dialog has a
+        # parent window to anchor to.
+        QTimer.singleShot(300, self._check_stale_market_days)
 
         # Auto-launch tutorial on first run (after the window is painted)
         QTimer.singleShot(500, self._maybe_auto_tutorial)
@@ -433,6 +514,24 @@ class MainWindow(QMainWindow):
 
     # ── Cloud sync ─────────────────────────────────────────────
 
+    def refresh_device_tag_display(self):
+        """Re-read the device tag and update the header label.
+
+        Called by the Settings screen after the override is changed
+        so the header reflects the new value without an app restart.
+        Idempotent — safe to call when nothing has changed.
+        """
+        from fam.utils.app_settings import get_device_tag
+        if hasattr(self, '_device_tag_label'):
+            tag = get_device_tag()
+            self._device_tag_label.setText(f"Device: {tag}")
+            self._device_tag_label.setToolTip(
+                f"This device's tag.  Every customer label generated "
+                f"on this laptop ends in '-{tag}' (e.g. C-005-{tag}) "
+                f"so labels stay unique even when multiple laptops "
+                f"are deployed at the same market.\n\n"
+                f"Override the tag in Settings → About this Device.")
+
     def _set_sync_indicator(self, state: str, detail: str = ""):
         """Update the sync-health / network indicator.
 
@@ -547,12 +646,87 @@ class MainWindow(QMainWindow):
         """Periodic sync while market day is open."""
         self._trigger_sync()
 
-    def _trigger_sync(self, force=False):
+    def _on_fmnp_entry_saved(self, md_id: int):
+        """Slot for ``fmnp_screen.entry_saved(int)``.
+
+        v2.0.6 fix: trigger a sync scoped to the FMNP entry's market
+        day rather than the currently-open market day.  Coordinators
+        regularly add FMNP entries to CLOSED market days after the
+        fact (paper checks delivered later, end-of-month batch
+        entry).  Pre-fix, the auto-sync narrowed scope to the open
+        market day and silently skipped the closed day's new
+        entries — they wouldn't reach the cloud sheet until a manual
+        full sync was triggered.  Now the affected day is collected
+        regardless of open/closed state.
+
+        ``md_id == 0`` means the signal couldn't determine the
+        affected day (defensive default) — fall back to the standard
+        narrow-scope behavior in that case.
+        """
+        if md_id and md_id > 0:
+            self._trigger_sync(scope_md_id_override=md_id)
+        else:
+            self._trigger_sync()
+
+    def _on_admin_data_changed(self, md_id: int):
+        """Slot for ``admin_screen.data_changed(int)``.
+
+        v2.0.6 fix: same problem-shape as FMNP.  Adjustments and
+        voids in the Admin tab routinely target transactions on
+        CLOSED market days (coordinators reconciling historical
+        receipts).  Pre-fix the auto-sync narrowed scope to the
+        currently-open day and silently skipped the closed-day
+        mutation.  AdminScreen now passes the affected
+        market_day_id through this slot so the sync collects from
+        THAT day.
+
+        ``md_id == 0`` falls back to the standard narrow-scope
+        behavior (defensive default).
+        """
+        if md_id and md_id > 0:
+            self._trigger_sync(scope_md_id_override=md_id)
+        else:
+            self._trigger_sync()
+
+    def _on_settings_changed(self):
+        """Slot for ``settings_screen.settings_changed()``.
+
+        v2.0.6: settings mutations (vendor adds/edits/toggles, market
+        adds/edits/toggles, payment-method adds/edits/toggles, market↔
+        vendor / market↔payment-method assignments, vendor↔payment-
+        method eligibility, reward rules) affect rows ACROSS markets
+        and time:
+
+          * Renaming a vendor changes the Vendor column on Vendor
+            Reimbursement (whole-dataset) and on FMNP Entries / per-md
+            tabs going forward
+          * Changing market name / address can shift the derived
+            ``market_code`` (warned in-line) — historical cloud rows
+            under the old code may need cleanup
+          * Toggling a payment method or changing reward rules
+            affects which Generated Rewards rows materialize on
+            future transactions
+
+        A narrow per-md auto-sync would miss whole-dataset tabs.  We
+        force a full-scope sync so ``delete_stale=True`` drives the
+        whole-dataset cleanup and the cloud sheet re-converges on the
+        new config.  The 60-second cooldown still applies — rapid
+        clicks in Settings won't hammer the Sheets API.
+        """
+        self._trigger_sync(force=True)
+
+    def _trigger_sync(self, force=False, scope_md_id_override: int | None = None):
         """Execute a background sync. Never blocks the UI.
 
         When *force* is False (auto-triggers) a 60-second cooldown
         prevents rapid-fire calls that exhaust the Sheets API quota.
         The manual sync button passes *force=True* to bypass this.
+
+        *scope_md_id_override* (v2.0.6): when set, scopes the auto-sync
+        to that specific market_day_id instead of looking up the
+        currently-open market day.  Used by ``_on_fmnp_entry_saved``
+        so entries added to CLOSED market days reach the cloud.
+        Ignored when *force=True* (manual full sweeps cover everything).
         """
         if self._sync_thread and self._sync_thread.isRunning():
             logger.info("Sync already in progress — skipping")
@@ -576,8 +750,44 @@ class MainWindow(QMainWindow):
 
             manager = SyncManager(backend)
             self._sync_thread = QThread()
-            # Data collection now happens on the worker thread (not here)
-            self._sync_worker = SyncWorker(manager)
+            # Data collection now happens on the worker thread (not here).
+            #
+            # Scoping (v1.9.10 follow-up, 2026-05-01): auto-triggered
+            # syncs (any mutation signal — confirm/adjust/void/FMNP/
+            # draft/intake) restrict the collection to the **open
+            # market day only**.  At year-scale a full collection
+            # walks every historical market day (50+ per year ×
+            # 8 per-md-collectors = 400 SQL queries) every time a
+            # single $5 transaction is confirmed — gross overkill
+            # AND a real risk of bumping the Sheets API rate limit.
+            #
+            # Manual ``Sync to Cloud`` button passes ``force=True``
+            # which still triggers a full sweep; same for the
+            # market-close auto-sync.  The diff-based upsert in
+            # ``upsert_rows`` already prevents wire writes for
+            # untouched rows, but the LOCAL collection cost was
+            # unscoped — this fixes that.
+            #
+            # When no market day is open, ``open_md`` is None and we
+            # collect everything (the no-open-md state is rare —
+            # outside market hours, mutations are unusual).
+            #
+            # v2.0.6: ``scope_md_id_override`` takes precedence over
+            # the open-market-day lookup.  Used by
+            # ``_on_fmnp_entry_saved`` so an FMNP entry added to a
+            # CLOSED market day still reaches the cloud — the
+            # affected day's id is passed in directly.
+            scope_md_id = None
+            if not force:
+                if scope_md_id_override is not None:
+                    scope_md_id = scope_md_id_override
+                else:
+                    from fam.models.market_day import get_open_market_day
+                    open_md = get_open_market_day()
+                    if open_md:
+                        scope_md_id = open_md.get('id')
+            self._sync_worker = SyncWorker(
+                manager, market_day_id=scope_md_id)
             self._sync_worker.moveToThread(self._sync_thread)
             self._sync_thread.started.connect(self._sync_worker.run)
             self._sync_worker.finished.connect(self._on_sync_finished)
@@ -676,13 +886,44 @@ class MainWindow(QMainWindow):
     # Auto-update check on launch
     # ------------------------------------------------------------------
 
+    # v2.0.1: auto-update notification behavior
+    # ──────────────────────────────────────────────────────────────
+    # Lifetime of an update notification:
+    #   1. ``_auto_check_for_updates`` runs ~5s after launch.
+    #   2. It first **replays a cached pending update** — if a prior
+    #      check (this session or a previous launch) found a remote
+    #      version newer than ours and the user didn't permanently
+    #      Ignore it, we show the popup using the cached info
+    #      *without making a network call*.  Replay honors a
+    #      "remind me later" snooze (set by clicking OK on the
+    #      popup).
+    #   3. After replay, if the on-the-wire cooldown has expired
+    #      (6 hours since the last successful API call), a fresh
+    #      check fires in a background QThread.
+    #   4. The popup shows two buttons:
+    #         OK     → snooze for 6h (``update_remind_after``)
+    #         Ignore → silence this exact version forever
+    #                 (``update_dismissed_version``)
+    #
+    # This replaces the pre-v2.0.1 flow where the popup was tied
+    # 1-to-1 to the network check.  If you closed the app within
+    # the 24-hour cooldown, you'd never see the popup again until
+    # a full day passed — easy to miss a release entirely.
+
+    _AUTO_CHECK_COOLDOWN_HOURS = 6
+    _SNOOZE_HOURS = 6
+
     def _auto_check_for_updates(self):
-        """Silently check for app updates on launch (once per 24 hours)."""
+        """Silently check for app updates on launch.
+
+        Two-stage:
+          1. Replay any cached pending update immediately (no API call).
+          2. If on-the-wire cooldown has expired, run a fresh check.
+        """
         try:
             from fam.utils.app_settings import (
                 get_update_repo_url, is_auto_update_check_enabled,
-                get_last_update_check, get_setting, set_setting,
-                set_last_update_check,
+                get_last_update_check,
             )
 
             if not is_auto_update_check_enabled():
@@ -691,16 +932,23 @@ class MainWindow(QMainWindow):
             if not repo_url:
                 return
 
-            # Rate limit: max once per 24 hours
+            # Stage 1: replay cached pending update (fast, no network).
+            self._maybe_replay_cached_update()
+
+            # Stage 2: rate-limited fresh check.
+            from datetime import timedelta
+            from fam.utils.timezone import eastern_now, EASTERN
+            from datetime import datetime as _dt
             last = get_last_update_check()
             if last:
-                from datetime import datetime, timedelta
-                from fam.utils.timezone import eastern_now, EASTERN
                 try:
-                    last_dt = datetime.fromisoformat(last)
+                    last_dt = _dt.fromisoformat(last)
                     if last_dt.tzinfo is None:
                         last_dt = last_dt.replace(tzinfo=EASTERN)
-                    if eastern_now() - last_dt < timedelta(hours=24):
+                    if eastern_now() - last_dt < timedelta(
+                            hours=self._AUTO_CHECK_COOLDOWN_HOURS):
+                        logger.debug(
+                            "Auto-update fresh check skipped (cooldown)")
                         return
                 except (ValueError, TypeError):
                     pass
@@ -742,6 +990,55 @@ class MainWindow(QMainWindow):
         except Exception:
             logger.debug("Auto-update check skipped", exc_info=True)
 
+    def _maybe_replay_cached_update(self):
+        """Re-show the update-available popup using cached info from a
+        prior check.
+
+        Skipped when:
+          * No cached version is recorded (never checked, or always failed)
+          * Cached version isn't newer than ``__version__`` (we caught up)
+          * User permanently Ignored that exact version
+          * User clicked OK recently and the snooze hasn't expired
+
+        Network-free: doesn't hit the GitHub API.  This is what makes
+        the popup actually surface — without it, the network check is
+        silenced by the cooldown for the entire window between releases.
+        """
+        try:
+            from fam.utils.app_settings import get_setting
+            from fam.update.checker import compare_versions
+            from fam import __version__
+
+            cached_ver = get_setting('update_last_version')
+            if not cached_ver:
+                return  # never seen any remote version
+            if compare_versions(__version__, cached_ver) >= 0:
+                return  # local has caught up to or surpassed cache
+            dismissed = get_setting('update_dismissed_version')
+            if dismissed == cached_ver:
+                return  # user clicked Ignore on this exact version
+            # Honor "remind me later" snooze (set by clicking OK).
+            remind_after = get_setting('update_remind_after')
+            if remind_after:
+                from datetime import datetime as _dt
+                from fam.utils.timezone import eastern_now, EASTERN
+                try:
+                    after_dt = _dt.fromisoformat(remind_after)
+                    if after_dt.tzinfo is None:
+                        after_dt = after_dt.replace(tzinfo=EASTERN)
+                    if eastern_now() < after_dt:
+                        logger.debug(
+                            "Auto-update popup snoozed until %s",
+                            remind_after)
+                        return
+                except (ValueError, TypeError):
+                    pass
+            logger.info("Auto-update replay: cached pending v%s",
+                        cached_ver)
+            self._show_update_available_popup(cached_ver)
+        except Exception:
+            logger.debug("Cached-update replay failed", exc_info=True)
+
     def _on_auto_update_check_finished(self, result: dict):
         """Handle the background update check result."""
         from fam.utils.timezone import eastern_timestamp
@@ -757,19 +1054,47 @@ class MainWindow(QMainWindow):
         version = result.get('version', '?')
         set_setting('update_last_version', version)
 
-        # Don't nag if the user dismissed this version
+        # Don't nag if the user permanently Ignored this version, or
+        # clicked OK recently and we're still inside the snooze.
         dismissed = get_setting('update_dismissed_version')
         if dismissed == version:
             return
+        remind_after = get_setting('update_remind_after')
+        if remind_after:
+            from datetime import datetime as _dt
+            from fam.utils.timezone import eastern_now, EASTERN
+            try:
+                after_dt = _dt.fromisoformat(remind_after)
+                if after_dt.tzinfo is None:
+                    after_dt = after_dt.replace(tzinfo=EASTERN)
+                if eastern_now() < after_dt:
+                    return
+            except (ValueError, TypeError):
+                pass
 
+        self._show_update_available_popup(version)
+
+    def _show_update_available_popup(self, version: str):
+        """Modal "Update Available" dialog with OK (snooze 6h) /
+        Ignore (silence forever) buttons.
+
+        Called by both the cache-replay path and the post-network-check
+        path so the user-facing message is identical regardless of
+        whether the check was fresh or cached.
+        """
+        from fam.utils.app_settings import set_setting
         from fam import __version__
+        from PySide6.QtWidgets import QMessageBox
+
         reply = QMessageBox.information(
             self,
             "Update Available",
             f"A new version of FAM Manager is available!\n\n"
             f"Current version: v{__version__}\n"
             f"Latest version:  v{version}\n\n"
-            f"Go to Settings → Updates to download and install.",
+            f"Go to Settings → Updates to download and install.\n\n"
+            f"Click OK to be reminded later, or Ignore to silence "
+            f"this version permanently.",
             QMessageBox.StandardButton.Ok |
             QMessageBox.StandardButton.Ignore,
             QMessageBox.StandardButton.Ok,
@@ -777,7 +1102,21 @@ class MainWindow(QMainWindow):
 
         if reply == QMessageBox.StandardButton.Ignore:
             set_setting('update_dismissed_version', version)
-            logger.info("User dismissed update notification for v%s", version)
+            # Clear any prior snooze so a future newer version
+            # isn't accidentally suppressed.
+            set_setting('update_remind_after', '')
+            logger.info(
+                "User permanently dismissed update notification "
+                "for v%s", version)
+        else:
+            # OK = snooze for ``_SNOOZE_HOURS`` hours.
+            from datetime import timedelta
+            from fam.utils.timezone import eastern_now
+            until = eastern_now() + timedelta(hours=self._SNOOZE_HOURS)
+            set_setting('update_remind_after', until.isoformat())
+            logger.info(
+                "User snoozed update notification for v%s until %s",
+                version, until.isoformat())
 
     def _on_customer_order_ready(self, order_id):
         """Navigate to payment screen with the customer order."""
@@ -988,6 +1327,69 @@ class MainWindow(QMainWindow):
         if self._is_first_run():
             self.start_tutorial()
 
+    def _check_stale_market_days(self):
+        """Auto-close any market days left Open past their own date and
+        surface a friendly notification (v1.9.9+).
+
+        The model layer's ``auto_close_stale_market_days`` does the
+        actual work and returns descriptors of what was closed; if
+        anything was closed we route the user to the Market Day screen
+        so they can open today's market.  No-op when nothing was
+        stale (the typical case).
+        """
+        try:
+            from fam.models.market_day import auto_close_stale_market_days
+            closed = auto_close_stale_market_days()
+        except Exception:
+            logger.exception("Stale market-day auto-close failed")
+            return
+        if not closed:
+            return
+
+        # Refresh the market-day screen so the closed days reflect
+        # in its UI immediately.
+        try:
+            self.market_day_screen.refresh()
+        except Exception:
+            pass
+
+        # Build the message.  Cap the per-day list to keep the
+        # dialog readable when many days got closed at once.
+        from PySide6.QtWidgets import QMessageBox
+        lines = [
+            "One or more market days were left open past their own "
+            "calendar date.  To prevent transactions from being "
+            "mis-attributed to a previous date, the system has "
+            "automatically closed them:\n"
+        ]
+        for c in closed[:5]:
+            lines.append(
+                f"  •  {c['market_name']} — date {c['date']}"
+                f" (originally opened by {c.get('opened_by') or 'unknown'})"
+            )
+        if len(closed) > 5:
+            lines.append(f"  …and {len(closed) - 5} more.")
+        lines.append(
+            "\nTo continue recording transactions, open today's "
+            "market day from the Market Day screen.  Tip: close the "
+            "market at the end of each day (or use Cloud Sync, which "
+            "implies an end-of-day workflow) so this doesn't happen "
+            "again."
+        )
+
+        QMessageBox.warning(
+            self, "Stale Market Day Auto-Closed",
+            "\n".join(lines)
+        )
+
+        # Route the user to the Market Day screen.
+        for idx, btn in enumerate(self.nav_group.buttons()):
+            # Market Day is the first nav item (index 0).
+            if idx == 0:
+                btn.setChecked(True)
+                break
+        self.stack.setCurrentIndex(0)
+
     def start_tutorial(self):
         """Launch the guided tutorial overlay."""
         from fam.ui.tutorial_overlay import TutorialOverlay, TUTORIAL_STEPS
@@ -1043,6 +1445,29 @@ class MainWindow(QMainWindow):
         if self._update_check_thread and self._update_check_thread.isRunning():
             self._update_check_thread.quit()
             self._update_check_thread.wait(3_000)
+
+        # v2.0.3 fix (NEW-CRIT-1): wait for the download thread that
+        # lives on SettingsScreen.  Pre-fix the closeEvent walked the
+        # main_window's two threads but never touched
+        # ``settings_screen._update_dl_thread``.  A volunteer closing
+        # the app mid-download (10–60 MB ZIP, 30s–min on conference
+        # Wi-Fi) left an orphan QThread.  When the download eventually
+        # finished, ``_on_download_finished`` would fire against a
+        # destroyed parent widget — uncaught C++ exception or zombie.
+        try:
+            settings = getattr(self, 'settings_screen', None)
+            dl_thread = getattr(settings, '_update_dl_thread', None) if settings else None
+            if dl_thread is not None and dl_thread.isRunning():
+                logger.info(
+                    "Waiting for update download to complete before exit…")
+                dl_thread.quit()
+                if not dl_thread.wait(10_000):
+                    logger.warning(
+                        "Update download thread did not finish in 10s — terminating")
+                    dl_thread.terminate()
+                    dl_thread.wait(2_000)
+        except RuntimeError:
+            pass  # C++ already deleted — nothing to wait on
 
         # Close the main-thread database connection
         from fam.database.connection import close_connection
