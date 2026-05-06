@@ -210,8 +210,6 @@ blocker, not a rounding curiosity.
 
 * `docs/FINANCIAL_FORMULA.md` — formula reference with `file:line`
   citations.
-* `docs/PRODUCTION_READINESS_v1.9.9.md` — inaugural full audit report
-  (April 2026); template for future audits.
 * `tests/test_production_stress.py` — comprehensive stress tests.
 * `tests/test_audit_coverage_gaps.py` — pinned audit coverage and
   documented gaps.

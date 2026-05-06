@@ -661,9 +661,7 @@ When 100% match methods split an odd-cent total (e.g., $56.77), exact halving is
 > The runner executes three gates: full pytest suite, production
 > simulation (`scripts/production_sim.py`), and v1.9.9 stress
 > simulation (`scripts/v1_9_9_stress_sim.py`).  See
-> `docs/RELEASE_AUDIT_PROCEDURE.md` for the full procedure and
-> `docs/PRODUCTION_READINESS_v1.9.9.md` for the inaugural audit
-> report.
+> `docs/RELEASE_AUDIT_PROCEDURE.md` for the full procedure.
 
 ### 13.1 Test files
 

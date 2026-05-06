@@ -119,7 +119,7 @@ echo  Randomized fuzz simulation found a failure.  Re-run with:
 echo      python -m scripts.fuzz_simulator --seed N --actions 100
 echo  using the failing seed printed above.  The reproduction
 echo  artifact (JSON action log) is saved in the temp dir.
-echo  See docs\FUZZ_AUDIT.md for the fuzz framework guide.
+echo  Fuzz framework: see scripts\fuzz_simulator.py source.
 echo ============================================================
 popd
 endlocal

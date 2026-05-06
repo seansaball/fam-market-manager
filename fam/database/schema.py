@@ -1166,8 +1166,8 @@ def _migrate_v27_to_v28(conn):
     The application engine (``calculate_payment_breakdown`` and
     ``save_payment_line_items``) maintains this on every write; up
     through v27, SQLite did NOT enforce it.  v1.9.9's nightmare
-    audit (``docs/NIGHTMARE_AUDIT_v1.9.9.md`` Finding H-3) flagged
-    this as a defense-in-depth gap: a future engine bug or a
+    audit (Finding H-3) flagged this as a defense-in-depth gap:
+    a future engine bug or a
     direct SQL write could land an inconsistent row.
 
     This migration adds matching ``BEFORE INSERT`` and

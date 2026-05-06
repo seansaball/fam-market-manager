@@ -101,9 +101,8 @@ This runs three gates in sequence and halts on the first failure:
 2. **Production simulation** — `python -m scripts.production_sim` (43 reconciliation invariants over 300+ simulated transactions)
 3. **v1.9.9 stress simulation** — `python -m scripts.v1_9_9_stress_sim` (34 invariants in a 10-vendor mega order, returning customer, adjustment chain, void integrity, edge cases)
 
-Procedure documented at `docs/RELEASE_AUDIT_PROCEDURE.md`.  Inaugural
-audit report: `docs/PRODUCTION_READINESS_v1.9.9.md`.  Financial formula
-reference: `docs/FINANCIAL_FORMULA.md`.
+Procedure documented at `docs/RELEASE_AUDIT_PROCEDURE.md`.  Financial
+formula reference: `docs/FINANCIAL_FORMULA.md`.
 
 ## Building the Executable
 
