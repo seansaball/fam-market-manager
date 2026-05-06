@@ -173,7 +173,7 @@ The test suite has grown from **1,822 tests** (v1.9.8) to **3,387 tests** across
 3. Double-click **FAM Manager.exe**
 4. Follow the tutorial → configure markets, vendors, and payment methods in **Settings**
 
-Windows SmartScreen may prompt on first run. Click "More info" then "Run anyway."
+The v2.0.6 executable is code-signed. Windows SmartScreen may still prompt on first run for some users — Microsoft's reputation system needs download volume on a new release before it stops warning. Click "More info" then "Run anyway"; the prompt fades as more devices install the same signed build.
 
 ## Upgrading (Existing PC)
 
@@ -214,6 +214,6 @@ If a device hits this on first launch of v2.0.6, you'll see a "Device Identity R
 
 ## Known Limitations
 
-- No code-signing yet — Windows SmartScreen may show a "publisher unknown" warning on first install.
+- Windows SmartScreen reputation building — the v2.0.6 executable is code-signed, but Microsoft's reputation system tracks each signed build separately and needs install volume before SmartScreen stops warning new users. Early installers may still see "Windows protected your PC" on first run; clicking "More info → Run anyway" is safe and the prompt subsides as more devices install the same signed build.
 - FMNP method is hardcoded to the literal name "FMNP" in two report queries. Renaming the FMNP method in Settings is not supported — the activation warning explicitly asks operators not to.
 - Vendor Reimbursement does not auto-merge across devices. When two laptops sync at the same market, each laptop's contribution to a vendor appears as its own row on the synced sheet. Coordinators sum across rows when cutting checks.
