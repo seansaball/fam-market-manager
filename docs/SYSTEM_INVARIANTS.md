@@ -39,16 +39,31 @@
 | **E6** | `result.fam_subsidy_total == Σ_li match_amount`. |
 | **E7** | `result.customer_total_paid == Σ_li customer_charged`. |
 
-## Layer 2 — Forfeit pass (post `_apply_denomination_forfeit`)
+## Layer 2 — Forfeit pass (post `apply_denomination_forfeit`)
+
+The canonical forfeit function lives in `fam.utils.calculations`
+(v2.0.7-final consolidation, schema v36). Two phases:
+
+* **Phase A** — FAM match reduction. Silent in the UI; no
+  customer-side loss. The customer never had the FAM match money
+  to lose; FAM is just contributing less because the receipt has
+  no headroom. NOT counted in `customer_forfeit_cents`.
+* **Phase B** — customer-side token-value forfeit. Real customer
+  loss. When the denomination unit overshoots the receipt even
+  after Phase A consumes all match, the excess portion of the
+  customer's physical token doesn't reach the vendor. Tracked in
+  `customer_forfeit_cents` on the line item AND surfaced in the
+  Customer Forfeit summary card AND the Customer Forfeit
+  reports column.
 
 | ID | Invariant |
 |---|---|
 | **F1** | After forfeit, `Σ_li method_amount == receipt_total`. |
 | **F2** | After forfeit, every per-vendor allocation `≤ vendor_receipt + 1¢`. |
 | **F3** | `customer_forfeit_cents >= 0` for every line item. |
-| **F4** | `customer_forfeit_cents > 0` only on denominated rows. |
-| **F5** | When forfeit was applied: `(customer_charged + customer_forfeit_cents)` equals the row's pre-forfeit customer (= unit_count × denomination). |
-| **F6** | Per-line invariant `customer_charged + match_amount == method_amount` survives forfeit (Phase A reduces match+method together; Phase B reduces customer+method together). |
+| **F4** | `customer_forfeit_cents > 0` only on denominated rows (Phase B is denom-only). |
+| **F5** | **Phase B invariant:** when `customer_forfeit_cents > 0`, `(customer_charged + customer_forfeit_cents)` is an integer multiple of `denomination` (= unit_count × face value). The customer's physical token count is recoverable from the saved row. |
+| **F6** | Per-line invariant `customer_charged + match_amount == method_amount` survives forfeit. **Phase A:** reduces `match_amount` + `method_amount` together (customer untouched). **Phase B:** reduces `customer_charged` + `method_amount` together (match was already 0). |
 
 ## Layer 3 — Engine ↔ DB
 
@@ -71,14 +86,19 @@ is in a stable state, not mid-transition).
 | **U2** | `row.match_label_cents + row.charge_cents == row.total_label_cents` (V5 — per-row visible math). |
 | **U3** | When `forfeit_cents == 0`: `row.match_label == engine_li.match_amount` AND `row.total_label == engine_li.method_amount`. |
 | **U4** | When `forfeit_cents > 0`: row labels show pre-forfeit (= `charge × pct`); the post-forfeit reduction surfaces only in summary cards / Collect panel. |
-| **U5** | `summary_card['fam_match'] == result.fam_subsidy_total`. |
-| **U6** | `summary_card['customer_pays'] == result.customer_total_paid`. |
-| **U7** | `summary_card['allocated'] == result.allocated_total` (pre-forfeit when overage active; post-forfeit when not). |
+| **U5** | **Phase A/B post-forfeit:** `summary_card['fam_match'] == result.fam_subsidy_total` (after the forfeit pass has run; Phase A reduces this; Phase B doesn't). |
+| **U6** | **Phase A/B post-forfeit:** `summary_card['customer_pays'] == result.customer_total_paid` (after the forfeit pass has run; Phase A doesn't touch this; Phase B reduces it). |
+| **U7** | **v2.0.7-final unconditional:** `summary_card['allocated'] == result.allocated_total` (always post-forfeit). The card NEVER displays a phantom-negative remaining due to about-to-be-forfeited FAM match. The forfeit pass runs unconditionally in `_update_summary_impl` before the card is written. See FINANCIAL_FORMULA.md §6.6. |
 | **U8** | For each row in `vendor_breakdown_table`: `Remaining = receipt - allocated_for_this_vendor`. |
 | **U9** | `Σ vendor_breakdown.allocated == result.allocated_total` (within ±1¢). |
 | **U10** | The "Collect from Customer" panel rows sum to `result.customer_total_paid`. |
-| **U11** | The denomination-overage warning is visible iff `denom_overage > 0`. |
+| **U11** | **v2.0.7-final (Option B):** The legacy `denom_overage_warning` label is permanently hidden. Customer Forfeit information lives exclusively in the Customer Forfeit summary card (U13) and the PaymentConfirmationDialog warning zone. |
 | **U12** | The Confirm button is disabled iff there's a hard error or required checkbox unchecked. |
+| **U13** | **Customer Forfeit card (v2.0.7-final, Option B):** `summary_card['customer_forfeit'] == Σ_li customer_forfeit_cents`. Always visible; shows $0.00 when no Phase B forfeit. Phase A is NEVER counted here — only Phase B token-value loss. |
+| **U14** | **User-cap engine respect (v2.0.7+, schema v37):** A non-denom row marked `user_capped=True` MUST have `engine_li.customer_charged == row.spinbox_value` regardless of cap state. The engine never inflates customer_charged on a user-capped row; cap-shrinkage surfaces as `allocation_remaining > 0` (Confirm blocked by `is_valid=False`). Enforced at every entries-build site (`_update_summary_impl`, `_confirm_payment`, `resolve_payment_state`, AdjustmentDialog `_update_customer_impact`). |
+| **U15** | **User-cap UI lifecycle (v2.0.7+):** `row._user_capped` flips True when `amount_spin.valueChanged` fires (programmatic writes via `_set_active_charge` block signals on amount_spin so this handler fires only on genuine user typing). The flag persists across method changes, programmatic writes, engine round-trips, and DB save/restore (schema v37). Released only by `clear_user_cap()`, by clicking the ⚡ toggle Locked → Active, or by removing the row. |
+| **U16** | **Radio invariant for overflow target (v2.0.7+):** AT MOST ONE non-denom row has `user_capped=False` (= Active, green ⚡) at any time. Enforced at row-add (defaults new rows to Locked when an Active exists) and on explicit ⚡ click (Locked → Active locks all OTHER non-denom rows via `_enforce_single_active_overflow_target`). Auto-Distribute targets the single Active row. |
+| **U17** | **Set-max-charge floor (v2.0.7+):** `PaymentRow.set_max_charge(N)` on a non-denom row where `_user_capped=True` MUST NOT clamp the spinbox value below its current charge. Floor = `max(N, current_charge)`. Lowest-layer defence: protects against any caller (`_push_row_limits`, `AdjustmentDialog._update_row_caps`, future code) that might compute a sub-current max for a user-capped row. |
 
 ## Layer 5 — Per-vendor reconciliation (Layer 2C)
 
@@ -97,10 +117,11 @@ This is the financial promise to vendors. Penny drift here is
 |---|---|
 | **R1** | `_collect_vendor_reimbursement(conn, [md_ids])` per-vendor `Total Due to Vendor == Σ T.receipt_total` for that vendor's confirmed/adjusted transactions. |
 | **R2** | `Σ Total Due to Vendor == Σ T.receipt_total` across the market day(s). |
-| **R3** | Per-method column `c[name] == Σ payment_line_items.customer_charged` for that method on that vendor. |
+| **R3** | **Denomination-integrity (v2.0.7+):** Per-method column `c[name] == Σ payment_line_items.(customer_charged + customer_forfeit_cents)` for that method on that vendor. For non-denom methods this equals `Σ customer_charged` (forfeit is always 0); for denom methods it equals `tokens × denomination` (the customer's true physical handout). EXCEPTION: the system-managed `Unallocated Funds` method uses `Σ method_amount` instead, since `customer_charged = 0` (FAM absorbs the gap). |
 | **R4** | `c['FAM Match'] == Σ payment_line_items.match_amount` across all methods on that vendor. |
-| **R5** | `Σ per-method-cols + FAM Match + FMNP_External == Total Due to Vendor` (within ±1¢). |
+| **R5** | **Reconciliation (v2.0.7+):** `Σ per-method-cols + FAM Match - Customer Forfeit + FMNP_External == Total Due to Vendor` (within ±1¢). The Customer Forfeit subtraction is the closure: per-method columns show denomination-true customer payment, forfeit is the over-tendered portion that didn't reach the vendor. |
 | **R6** | Voided transactions excluded from R1-R5. |
+| **R7** | **Customer Forfeit column (v2.0.7+):** `c['Customer Forfeit'] == Σ payment_line_items.customer_forfeit_cents` for that vendor (Phase B only — Phase A FAM-match reduction is NEVER reported here). |
 | **R7** | Adding/voiding a transaction immediately reflects in R1 on next read (no caching). |
 
 ## Layer 7 — State preservation (drafts)

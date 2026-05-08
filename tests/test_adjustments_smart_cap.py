@@ -359,18 +359,42 @@ class TestSaveFlowDenominationForfeit:
             "over-allocations as 'forfeit'.")
 
     def test_forfeit_reduces_match_not_customer_charged(self):
-        """The customer paid in real physical instruments — the
+        """The customer paid in real physical instruments — Phase A
         forfeit must come out of FAM match, never out of what the
-        customer paid."""
+        customer paid.  Phase B (token-value forfeit) intentionally
+        DOES reduce customer_charged but only when match is fully
+        consumed first (see Phase A vs Phase B distinction in
+        FINANCIAL_FORMULA.md §3b.1).
+
+        v2.0.7-final consolidation (Option B): the inline first-
+        with-match Phase-A-only loop in AdjustmentDialog has been
+        replaced with a delegate to the canonical
+        ``apply_denomination_forfeit`` function.  This pin source-
+        checks the canonical function instead.  The canonical
+        function reduces match BEFORE customer (Phase A then
+        Phase B) so the customer is never under-credited unless
+        FAM match is already exhausted."""
+        from fam.utils.calculations import apply_denomination_forfeit
+        canonical_src = inspect.getsource(apply_denomination_forfeit)
+        # Phase A: match reduction comes first.
+        assert "li['match_amount'] -= match_red" in canonical_src
+        assert "li['method_amount'] -= match_red" in canonical_src
+        # Phase B: customer reduction only after match is exhausted
+        # (gated on `v_remain > 0 and li['customer_charged'] > 0`).
+        assert "if v_remain > 0 and li['customer_charged'] > 0" in canonical_src
+        assert "li['customer_charged'] -= cust_red" in canonical_src
+        # AdjustmentDialog now delegates — no inline match
+        # reduction loop in _adjust_transaction.
         src = self._src()
-        # Reduction targets match_amount + method_amount, NOT
-        # customer_charged.  Pin via the variable assignments.
-        assert "it['match_amount'] -= reduction" in src
-        assert "it['method_amount'] -= reduction" in src
-        # And explicitly assert customer_charged is NOT touched.
-        assert "it['customer_charged'] -= reduction" not in src, (
-            "Forfeit must NOT reduce customer_charged — that'd "
-            "fabricate a refund the customer never received.")
+        assert "it['match_amount'] -= reduction" not in src, (
+            "AdjustmentDialog must NOT have an inline forfeit "
+            "loop after the v2.0.7-final consolidation — it "
+            "delegates to the canonical apply_denomination_forfeit "
+            "function in fam.utils.calculations.")
+        assert 'apply_denomination_forfeit' in src, (
+            "AdjustmentDialog must delegate to the canonical "
+            "apply_denomination_forfeit function so its forfeit "
+            "logic stays in lock-step with PaymentScreen's.")
 
     def test_user_cancels_forfeit_returns_without_save(self):
         """Pin the cancellation path: when the manager dismisses the
@@ -397,14 +421,27 @@ class TestSaveFlowDenominationForfeit:
 
     def test_post_save_message_distinguishes_forfeit_from_unallocated(
             self):
-        """The post-save dialog must say 'Denomination Forfeit
-        Saved', not 'Customer Impact' (which would tell the manager
-        to collect more) or 'Unallocated Funds Logged' (which is
-        the orthogonal customer-gone path)."""
+        """The post-save dialog for the denomination-overage path
+        must be a distinct branch — not 'Customer Impact' (which
+        would tell the manager to collect more) and not the
+        'Unallocated Funds Logged' branch (orthogonal customer-
+        gone path).
+
+        v2.0.7 (user-reported 2026-05-07): the dialog title is
+        'Adjustment Saved' (NOT 'Denomination Forfeit Saved') —
+        Phase A FAM-match reduction is no longer labeled as a
+        'forfeit' anywhere in the user-facing surface.  'Customer
+        Forfeit' terminology is reserved for Phase B token-value
+        loss (which only fires from the PaymentScreen flow,
+        never from Adjustment).
+        """
         src = self._src()
-        assert 'Denomination Forfeit Saved' in src
-        # Triggered only when denom_overage_cents > 0.
+        # The branch fires only for the denom_overage_cents > 0
+        # case (distinguishes it from generic customer-impact).
         assert 'denom_overage_cents > 0' in src
+        # Body wording must mention the FAM match reduction
+        # mechanism.  No longer uses 'Forfeit' in the title.
+        assert 'FAM match reduced by' in src
 
 
 class TestInlineImpactPanelOverageWarning:

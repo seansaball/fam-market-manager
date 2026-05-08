@@ -91,9 +91,24 @@ class PaymentScreen(QWidget):
         self.summary_row.add_card("remaining", "Remaining", highlight=True)
         self.summary_row.add_card("customer_pays", "Customer Pays")
         self.summary_row.add_card("fam_match", "FAM Match", highlight=True)
+        # v2.0.7-final (Option B, schema v36): Customer Forfeit
+        # card.  Always present; shows $0.00 when no Phase B
+        # forfeit and a positive amount when the customer hands a
+        # denomination unit larger than the receipt absorbs (real
+        # token-value loss).  The math identity now reads
+        # cleanly across the row:
+        #   Customer Pays + FAM Match = Allocated = Receipt Total
+        #   Customer's physical handout = Customer Pays + Customer Forfeit
+        # Phase A (FAM match reduction) NEVER lands here; this is
+        # exclusively for Phase B token-value loss per the user's
+        # explicit policy: "we don't care to report the FAM match
+        # forfeit only the true customer forfeit".
+        self.summary_row.add_card("customer_forfeit", "Customer Forfeit")
 
         # Initial color setup
         self.summary_row.update_card_color("fam_match", PRIMARY_GREEN)
+        self.summary_row.update_card_color(
+            "customer_forfeit", MEDIUM_GRAY)
 
         layout.addWidget(self.summary_row)
 
@@ -381,6 +396,21 @@ class PaymentScreen(QWidget):
                         entry['method_amount'],
                         customer_charged=entry.get('customer_charged'),
                         bound_vendor_id=entry.get('bound_vendor_id'),
+                        # v2.0.7 (schema v36): preserve Phase B
+                        # forfeit through draft restore so the
+                        # Customer Forfeit summary card stays in
+                        # parity with the saved DB row.
+                        customer_forfeit_cents=entry.get(
+                            'customer_forfeit_cents', 0) or 0,
+                        # v2.0.7+ (schema v37, audit 2026-05-07):
+                        # restore the user-cap flag so a row the
+                        # volunteer locked before saving the draft
+                        # comes back Locked (gold ⚡), not silently
+                        # reset to Active.  Without this, a tightening
+                        # cap on resume could re-inflate the value
+                        # the volunteer pinned.
+                        user_capped=bool(entry.get(
+                            'user_capped', False)),
                     )
             else:
                 self._add_payment_row()
@@ -435,6 +465,18 @@ class PaymentScreen(QWidget):
                         item['payment_method_id'],
                         item['method_amount'],
                         customer_charged=item.get('customer_charged'),
+                        # v2.0.7 (schema v36): preserve Phase B
+                        # forfeit through transaction load so the
+                        # Customer Forfeit summary card matches
+                        # what's in the DB.
+                        customer_forfeit_cents=item.get(
+                            'customer_forfeit_cents', 0) or 0,
+                        # v2.0.7+ (schema v37, audit 2026-05-07):
+                        # restore user-cap flag so locked rows stay
+                        # locked across transaction load (mirrors
+                        # the draft-restore path above).
+                        user_capped=bool(item.get(
+                            'user_capped', False)),
                     )
             else:
                 self._add_payment_row()
@@ -596,6 +638,14 @@ class PaymentScreen(QWidget):
                     'eligible': permissive or (m['id'] in eligible_ids),
                     'count': 0,
                     'method_amount': 0,
+                    # v2.0.7+ denomination-integrity: per-method sum of
+                    # what the customer literally handed over in this
+                    # payment method (= customer_charged + forfeit for
+                    # denom rows; customer_charged for non-denom).  The
+                    # vendor breakdown row "N × $D = $T" shows T from
+                    # this field so the math is denomination-pure
+                    # (T = N × D, never intermingled with FAM match).
+                    'customer_paid': 0,
                     'is_denom': bool(m.get('denomination')
                                       and m['denomination'] > 0),
                     'denomination': m.get('denomination') or 0,
@@ -632,6 +682,15 @@ class PaymentScreen(QWidget):
                 d['match_amount'] = li.get('match_amount', d.get('match_amount', 0))
                 d['customer_charged'] = li.get(
                     'customer_charged', d.get('customer_charged', 0))
+                # v2.0.7+ denomination-integrity fix: also pull
+                # customer_forfeit_cents from the engine override so the
+                # per-method breakdown can render the customer's actual
+                # token count for under-denomination receipts (e.g. 1 ×
+                # $10 Food RX token paid against a $1.45 receipt → unit
+                # count must be 1, not floor(145/1000) = 0).
+                d['customer_forfeit_cents'] = li.get(
+                    'customer_forfeit_cents',
+                    d.get('customer_forfeit_cents', 0)) or 0
                 li_idx += 1
 
         for d in rows_data:
@@ -648,12 +707,23 @@ class PaymentScreen(QWidget):
             state = vendor_state[bound_vid]
             ma = d['method_amount']
             charge = d.get('customer_charged', 0)
-            unit_count = (charge // denom) if denom > 0 else 0
+            forfeit = d.get('customer_forfeit_cents', 0) or 0
+            # v2.0.7+ denomination-integrity: the customer's actual
+            # token payment is `customer_charged + forfeit` (the
+            # forfeit recovers the over-tender that snap-back removed
+            # from customer_charged).  Use this — NOT raw charge —
+            # for the token count so under-denomination receipts
+            # (e.g. $1.45 receipt with 1 × $10 Food RX token) still
+            # show "1 × $10.00" instead of "0 × $10.00 = blank".
+            effective_payment = charge + forfeit
+            unit_count = (effective_payment // denom) if denom > 0 else 0
+            denom_value = unit_count * denom  # tokens × face value
             state['denom_alloc'] += ma
             pm = state['per_method'].get(d['payment_method_id'])
             if pm is not None:
                 pm['count'] += unit_count
                 pm['method_amount'] += ma
+                pm['customer_paid'] += denom_value
 
         # Phase 2 — non-denominated rows: distribute by per-vendor
         # remaining (after denominated reservation), matching the
@@ -691,6 +761,21 @@ class PaymentScreen(QWidget):
                 pm = state['per_method'].get(d['payment_method_id'])
                 if pm is not None:
                     pm['method_amount'] += share
+                    # v2.0.7+ denomination-integrity: for non-denom
+                    # methods the customer-paid portion is the share
+                    # MINUS the FAM-match contribution.  Since the
+                    # row's match_amount is at the row level (not
+                    # per-vendor share), we proportionally subtract:
+                    #   customer_share = share × (cc / method_amount)
+                    # When the row's method_amount is 0 (defensive)
+                    # we fall back to the full share.
+                    row_ma = d['method_amount']
+                    row_cc = d.get('customer_charged', 0)
+                    if row_ma > 0:
+                        cust_share = round(share * row_cc / row_ma)
+                    else:
+                        cust_share = share
+                    pm['customer_paid'] += cust_share
 
         # Step 4: derive allocated + remaining.
         for s in vendor_state.values():
@@ -715,11 +800,12 @@ class PaymentScreen(QWidget):
             engine_line_items=engine_line_items)
         methods = self._breakdown_methods
 
-        from PySide6.QtCore import Qt
+        # Local-only imports (NOT at module level): QColor, QBrush.
+        # Qt / ACCENT_GREEN / HARVEST_GOLD / ERROR_COLOR / MEDIUM_GRAY
+        # all come from the module-level imports above; re-importing
+        # here would shadow them and risk UnboundLocalError on any
+        # future conditional edit.
         from PySide6.QtGui import QColor, QBrush
-        from fam.ui.styles import (
-            ACCENT_GREEN, HARVEST_GOLD, ERROR_COLOR, MEDIUM_GRAY,
-        )
 
         self.vendor_table.setSortingEnabled(False)
         for i, vendor in enumerate(self._breakdown_vendors):
@@ -758,9 +844,17 @@ class PaymentScreen(QWidget):
                 if pm['is_denom']:
                     if pm['count'] > 0:
                         denom_dollars = pm['denomination'] / 100.0
-                        total_dollars = pm['method_amount'] / 100.0
+                        # v2.0.7+ denomination-integrity: show the
+                        # customer's true denomination payment
+                        # (tokens × face value), NOT method_amount
+                        # (which intermingles FAM match).  The math
+                        # now reads cleanly: 2 × $10.00 = $20.00.
+                        # Pre-fix this read "2 × $10.00 = $25.63"
+                        # for a $25.63 receipt with 100% match —
+                        # confusing because 2 × 10 ≠ 25.63.
+                        denom_total_dollars = pm['customer_paid'] / 100.0
                         text = (f"✓  {pm['count']} × ${denom_dollars:.2f}"
-                                f" = ${total_dollars:.2f}")
+                                f" = ${denom_total_dollars:.2f}")
                     else:
                         text = "✓"
                 else:
@@ -790,7 +884,44 @@ class PaymentScreen(QWidget):
     def _add_payment_row(self):
         row = PaymentRow(market_id=self._market_id)
         row.changed.connect(self._on_row_changed)
+        # v2.0.7 NOTE: an earlier iteration auto-rebalanced non-
+        # denom rows from this signal, but the engine's cap-aware
+        # Path B + forfeit Pass 4 deterministically restores SNAP
+        # to its pre-rebalance value when the cap is bound — the
+        # rebalance was either no-op'd by the engine OR (when we
+        # skipped _update_summary to prevent the override) created
+        # a UI/engine mismatch that Layer 2A then blocked.  The
+        # signal stays declared on PaymentRow for potential future
+        # use; the connection is intentionally absent here.  See
+        # docs/SYSTEM_INVARIANTS.md (Auto-Rebalance discussion).
         row.remove_requested.connect(self._remove_payment_row)
+        # v2.0.7+ user-cap radio-button (user-reported 2026-05-07):
+        # when the volunteer activates one row's ⚡ toggle, lock
+        # all OTHER non-denom rows so there's exactly one
+        # overflow target for Auto-Distribute.
+        row.auto_distribute_activated.connect(
+            self._enforce_single_active_overflow_target)
+        # v2.0.7+ radio enforcement at row-add time (audit
+        # 2026-05-07): if any existing non-denom row is already
+        # Active, the NEW row defaults to Locked.  This is the
+        # volunteer's stated policy ("only one denominated
+        # payment row should be allowed to have the auto distro
+        # active at a time") applied at the moment two-greens
+        # could otherwise appear: when a third non-denom method
+        # is added.  smart_auto_distribute treats user_capped
+        # rows as locked regardless of charge, so a default-
+        # Locked row at $0 stays $0 and the existing Active row
+        # remains the overflow target.
+        # NB: deliberately scoped to add-time only — running a
+        # broader "dedupe on every row.changed" was tried and
+        # caused 1-cent FAM-match drifts in fuzz tests because
+        # it modified user_capped during programmatic state
+        # mutations (draft save+resume cycles).  Add-time check
+        # is the minimum surface needed to fix the reported
+        # two-greens bug without disturbing other flows.
+        if self._has_active_non_denom_row():
+            row._user_capped = True
+            row._refresh_auto_distribute_btn_style()
         self._payment_rows.append(row)
         self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
         # Push the current order's vendor pool so denominated rows can
@@ -800,6 +931,58 @@ class PaymentScreen(QWidget):
         row.set_order_vendors(self._get_order_vendors())
         self._refresh_method_choices()
         return row
+
+    def _has_active_non_denom_row(self) -> bool:
+        """Return True if any current non-denom row has its
+        ⚡ toggle in the Active state (user_capped=False).
+        Used by ``_add_payment_row`` to default new rows to
+        Locked when an overflow target already exists.
+
+        Only counts rows with a REAL method selected (not the
+        placeholder).  A row whose method is None has
+        undetermined intent — we don't know yet if it'll be
+        non-denom, so it can't be the overflow target."""
+        for r in self._payment_rows:
+            method = r.get_selected_method()
+            if method is None:
+                continue  # placeholder method — undetermined
+            is_denom = bool(method.get('denomination')
+                             and method['denomination'] > 0)
+            if (not is_denom
+                    and hasattr(r, 'is_user_capped')
+                    and not r.is_user_capped()):
+                return True
+        return False
+
+    def _enforce_single_active_overflow_target(
+            self, activated_row):
+        """Radio-button enforcement: when one non-denom row's ⚡
+        toggle flips to Active, all OTHER non-denom rows lock.
+
+        Called via the ``auto_distribute_activated`` signal that
+        PaymentRow emits on a Locked → Active toggle click.  The
+        invariant: at most ONE non-denom row is Active (= the
+        overflow target for Auto-Distribute) at any time.
+
+        Denom rows are unaffected — they're always locked by
+        their physical-scrip nature, no toggle visible."""
+        for r in self._payment_rows:
+            if r is activated_row:
+                continue
+            method = r.get_selected_method()
+            is_denom = (method
+                        and method.get('denomination')
+                        and method['denomination'] > 0)
+            if is_denom:
+                continue
+            if (hasattr(r, 'is_user_capped')
+                    and not r.is_user_capped()):
+                # Lock this previously-active row.
+                r._user_capped = True
+                r._refresh_auto_distribute_btn_style()
+        # Refresh the cards/breakdown so the new active state
+        # is reflected immediately.
+        self._update_summary()
 
     def _group_saved_line_items_for_restore(self, _seed_items) -> list:
         """Re-derive logical PaymentRows from the saved line_items
@@ -819,7 +1002,9 @@ class PaymentScreen(QWidget):
         only — kept as a fall-back trigger but no longer the sole
         source.  We always re-read across the full order.
         """
-        from fam.models.transaction import get_payment_line_items
+        # Local-only import: get_payment_method_by_id (not at module
+        # level).  get_payment_line_items is already imported at the
+        # module level — re-importing locally would shadow it.
         from fam.models.payment_method import get_payment_method_by_id
 
         # Accumulator: key → entry dict
@@ -844,6 +1029,7 @@ class PaymentScreen(QWidget):
                         'payment_method_id': pm_id,
                         'method_amount': 0,
                         'customer_charged': 0,
+                        'customer_forfeit_cents': 0,
                         'bound_vendor_id': txn_vendor_id,
                     })
                 else:
@@ -852,10 +1038,17 @@ class PaymentScreen(QWidget):
                         'payment_method_id': pm_id,
                         'method_amount': 0,
                         'customer_charged': 0,
+                        'customer_forfeit_cents': 0,
                         'bound_vendor_id': None,
                     })
                 g['method_amount'] += ma
                 g['customer_charged'] += cc
+                # v2.0.7 (schema v36): aggregate Phase B forfeit
+                # across multi-receipt vendors so the restored
+                # row's Customer Forfeit value sums the saved
+                # forfeits exactly.
+                g['customer_forfeit_cents'] += (
+                    li.get('customer_forfeit_cents', 0) or 0)
 
         # v1.9.10 onsite-finding fix: return DENOMINATED rows first,
         # then non-denominated.  The previous order (non-denom first)
@@ -925,7 +1118,8 @@ class PaymentScreen(QWidget):
         if not self._order_transactions:
             return self._order_total or 0
 
-        from fam.utils.calculations import charge_to_method_amount
+        # ``charge_to_method_amount`` is at module level (line 25);
+        # no local import needed.
 
         # Vendor receipts (collapse multi-receipt-per-vendor sums).
         vendor_receipts: dict[int, int] = {}
@@ -998,13 +1192,178 @@ class PaymentScreen(QWidget):
         if not self._order_total or self._order_total <= 0:
             return
 
-        from fam.utils.calculations import (
-            smart_auto_distribute, charge_to_method_amount,
-        )
+        # v2.0.7+ user-cap (user-reported 2026-05-07, full rebuild):
+        # Per the volunteer's explicit policy, Auto-Distribute SKIPS
+        # rows the user has manually edited (``is_user_capped()``
+        # returns True).  Pre-rebuild, this loop cleared every cap
+        # before redistributing — which meant a volunteer who typed
+        # SNAP $125 (because that's all the customer has on their
+        # EBT card) would see Auto-Distribute wipe and refill it
+        # with whatever the engine wanted.  New behaviour: user-
+        # capped rows are treated like locked denom rows; Auto-
+        # Distribute redistributes only the NON-capped non-denom
+        # rows around them.
+
+        # ``charge_to_method_amount`` is module-level (line 25); only
+        # ``smart_auto_distribute`` is local to this function.
+        from fam.utils.calculations import smart_auto_distribute
+
+        # v2.0.7 fix (user-reported 2026-05-06): if any existing
+        # non-denominated row's payment method isn't accepted by
+        # every vendor that STILL NEEDS non-denom coverage, refuse
+        # to auto-distribute through it — the engine would
+        # otherwise proportionally attribute the ineligible
+        # vendor's residual via that method.
+        #
+        # The eligibility check is **denom-aware**: a vendor whose
+        # receipt is fully covered by denominated rows bound to
+        # them does NOT participate in the non-denom eligibility
+        # intersection, because non-denom money never has to flow
+        # to them.  This is the second-pass refinement after the
+        # initial fix incorrectly blocked Auto-Distribute even
+        # when a SNAP-ineligible vendor was already covered by
+        # Food RX / Food Bucks denom rows.
+        #
+        # Only runs on multi-vendor orders.  Single-vendor orders
+        # inherit the binding from order context.
+        if self._order_transactions:
+            from fam.models.payment_method import (
+                get_vendor_payment_method_ids)
+            from fam.models.vendor import get_vendor_by_id
+
+            # Per-vendor receipt totals (collapse multi-receipt-
+            # per-vendor sums)
+            vendor_receipts: dict[int, int] = {}
+            for t in self._order_transactions:
+                vid = t.get('vendor_id')
+                if vid is None:
+                    continue
+                vendor_receipts[vid] = (
+                    vendor_receipts.get(vid, 0) + t['receipt_total'])
+            distinct_vendor_count = len(vendor_receipts)
+
+            # Per-vendor denom allocation from existing locked
+            # denom rows (matches the resolution used later in
+            # the function for effective_order_total math)
+            denom_alloc_per_vendor: dict[int, int] = {
+                vid: 0 for vid in vendor_receipts}
+            single_vid = (
+                next(iter(vendor_receipts.keys()))
+                if distinct_vendor_count == 1 else None)
+            for row in self._payment_rows:
+                method = row.get_selected_method()
+                if not method:
+                    continue
+                denom = method.get('denomination') or 0
+                if denom <= 0:
+                    continue  # non-denom — doesn't pre-allocate
+                charge = row._get_active_charge()
+                if charge <= 0:
+                    continue
+                bound_vid = row.get_bound_vendor_id()
+                if bound_vid is None and single_vid is not None:
+                    bound_vid = single_vid
+                if bound_vid not in denom_alloc_per_vendor:
+                    continue
+                denom_alloc_per_vendor[bound_vid] += (
+                    charge_to_method_amount(
+                        charge, method['match_percent']))
+
+            # Vendors whose receipts are NOT fully covered by their
+            # bound denom rows — these are the vendors that still
+            # need non-denom money to flow to them.  Eligibility of
+            # each non-denom row's method must hold for ALL of them.
+            vendors_needing_non_denom = {
+                vid for vid, receipt in vendor_receipts.items()
+                if receipt > denom_alloc_per_vendor.get(vid, 0)
+            }
+
+            if (distinct_vendor_count > 1
+                    and len(vendors_needing_non_denom) > 1):
+                # Compute the per-vendor eligibility intersection
+                # ONLY across the vendors that still need non-denom
+                # coverage.  Vendors with no eligibility config
+                # (legacy / un-configured) are treated as permissive
+                # and skipped from the intersection.
+                universal_remaining: set | None = None
+                for vid in vendors_needing_non_denom:
+                    eligible = get_vendor_payment_method_ids(vid)
+                    if not eligible:
+                        continue  # permissive — skip
+                    if universal_remaining is None:
+                        universal_remaining = set(eligible)
+                    else:
+                        universal_remaining &= eligible
+
+                if universal_remaining is not None:
+                    # Find any non-denom row whose method isn't in
+                    # the remaining-vendors intersection.
+                    offending = []
+                    for row in self._payment_rows:
+                        method = row.get_selected_method()
+                        if not method:
+                            continue
+                        if (method.get('denomination')
+                                and method['denomination'] > 0):
+                            continue
+                        if method['id'] not in universal_remaining:
+                            offending.append(method)
+                    if offending:
+                        method_name = offending[0]['name']
+                        method_id = offending[0]['id']
+                        # Name only the vendors STILL NEEDING
+                        # non-denom — so a fully-denom-covered
+                        # SNAP-ineligible vendor (already handled)
+                        # isn't erroneously listed as a problem.
+                        problem_vendor_names = []
+                        for vid in vendors_needing_non_denom:
+                            if method_id not in (
+                                    get_vendor_payment_method_ids(vid)):
+                                v = get_vendor_by_id(vid)
+                                if (v and v['name']
+                                        not in problem_vendor_names):
+                                    problem_vendor_names.append(v['name'])
+                        if problem_vendor_names:
+                            # QMessageBox imported at module level —
+                            # do NOT re-import locally (would shadow
+                            # the module-level name and risk
+                            # UnboundLocalError on any future edit).
+                            vendor_list = ', '.join(problem_vendor_names)
+                            QMessageBox.warning(
+                                self, "Auto-Distribute Blocked",
+                                f"Cannot auto-distribute: "
+                                f"<b>{method_name}</b> is not "
+                                f"accepted by every vendor that "
+                                f"still needs payment coverage."
+                                f"<br><br>"
+                                f"Vendor(s) that don't accept "
+                                f"{method_name}: "
+                                f"<b>{vendor_list}</b>."
+                                f"<br><br>"
+                                f"Either remove the {method_name} "
+                                f"row, or add a denominated row "
+                                f"(Food RX, Food Bucks, etc.) "
+                                f"bound to {vendor_list} that "
+                                f"fully covers their receipt(s) "
+                                f"so {method_name} only has to "
+                                f"flow to the remaining vendors.")
+                            self._update_summary()  # refresh grid
+                            return
 
         # Build row descriptors for the algorithm.
-        # Non-denominated rows are always reset to 0 (absorbers).
-        # Denominated rows with a charge are locked (user's physical count).
+        #
+        # Locking policy:
+        #  * Denominated rows with a charge: ALWAYS locked (user's
+        #    physical token / scrip count is sacred).
+        #  * Non-denom rows the user has manually edited
+        #    (``is_user_capped()``): LOCKED.  v2.0.7+ behaviour
+        #    per user-reported 2026-05-07 — Auto-Distribute treats
+        #    user edits as caps, not suggestions, and redistributes
+        #    only the remaining non-capped non-denom rows around
+        #    them.
+        #  * Non-denom rows that are NOT user-capped: reset to 0
+        #    (absorbers — Auto-Distribute will refill them with
+        #    the remainder).
         row_descriptors = []
         for i, row in enumerate(self._payment_rows):
             method = row.get_selected_method()
@@ -1014,8 +1373,13 @@ class PaymentScreen(QWidget):
                 method.get('denomination') and method['denomination'] > 0
             )
             charge = row._get_active_charge()
-            if not is_denom and charge > 0:
-                # Reset non-denominated row — auto-distribute will refill it
+            is_user_capped = (
+                row.is_user_capped()
+                if hasattr(row, 'is_user_capped') else False)
+            if not is_denom and charge > 0 and not is_user_capped:
+                # Reset only non-user-capped non-denom rows.
+                # Auto-Distribute will refill them with the
+                # remainder after locked rows (denom + user-capped).
                 charge = 0
             row_descriptors.append({
                 'index': i,
@@ -1023,6 +1387,10 @@ class PaymentScreen(QWidget):
                 'denomination': method.get('denomination'),
                 'sort_order': method.get('sort_order', 0),
                 'current_charge': charge,
+                # Flag locked-by-user-edit rows so the
+                # smart_auto_distribute treats them like locked
+                # denom rows (don't redistribute over them).
+                'user_capped': is_user_capped,
             })
 
         if not row_descriptors:
@@ -1119,8 +1487,18 @@ class PaymentScreen(QWidget):
         # When a daily match limit is active, the nominal auto-distribute
         # gives charges based on the full match percentage.  If the total
         # uncapped match exceeds the remaining limit, the customer must
-        # cover the deficit — increase matched rows' charges accordingly.
-        if self._match_limit is not None and assignments:
+        # cover the deficit — increase matched rows' charges accordingly,
+        # falling back to unmatched non-denom auto rows (Cash) if the
+        # matched pool can't absorb the full deficit.
+        #
+        # v2.0.7+ user-cap fix (2026-05-07): the `assignments` guard
+        # was removed because the deficit can come entirely from a
+        # LOCKED user-capped row (e.g. SNAP $125 user-typed) with no
+        # matched auto rows — in that case smart_auto_distribute
+        # returns [] and the deficit needs Pass 2 (unmatched fallback)
+        # to land on Cash.  Without removing the guard, Cash stays
+        # at $0 and Auto-Distribute appears to "do nothing".
+        if self._match_limit is not None:
             # Sum uncapped match from ALL rows — both new assignments AND
             # locked rows (denominated tokens with charge already set).
             # Without locked rows, the deficit calculation underestimates
@@ -1142,7 +1520,10 @@ class PaymentScreen(QWidget):
 
             if total_uncapped_match > self._match_limit:
                 match_deficit = total_uncapped_match - self._match_limit
-                # Distribute deficit across matched (non-denominated) rows
+                # ── Pass 1: distribute deficit across matched
+                # non-denom AUTO rows (they absorb by paying more
+                # customer, less match generated).
+                distributed = 0
                 for a in assignments:
                     desc = row_descriptors[
                         next(j for j, d in enumerate(row_descriptors)
@@ -1162,6 +1543,47 @@ class PaymentScreen(QWidget):
                                 / total_uncapped_match
                             )
                             a['charge'] += share
+                            distributed += share
+                # ── Pass 2 (v2.0.7+ user-cap fix, 2026-05-07): any
+                # remaining deficit goes to UNMATCHED non-denom
+                # auto rows (e.g. Cash).  Without this, when the
+                # only matched row is locked (e.g. user-capped
+                # SNAP) and the auto pool has only unmatched rows
+                # (Cash), the deficit has nowhere to land — Cash
+                # stays at $0 and the volunteer sees Auto-
+                # Distribute "do nothing" even though there's a
+                # clear gap to fill.  Customer paying directly
+                # (Cash) is the natural way to close the gap.
+                #
+                # NB: ``smart_auto_distribute`` only returns rows
+                # with charge > 0, so an empty Cash row may not be
+                # in ``assignments``.  Iterate ``row_descriptors``
+                # to find ALL eligible unmatched non-denom auto
+                # rows (current_charge == 0), and either update
+                # their existing assignment or add a new one.
+                remaining = match_deficit - distributed
+                if remaining > 0:
+                    unmatched_auto_indices = [
+                        d['index'] for d in row_descriptors
+                        if d['current_charge'] == 0
+                        and d['match_pct'] == 0
+                        and not (d.get('denomination')
+                                 and d['denomination'] > 0)
+                    ]
+                    if unmatched_auto_indices:
+                        existing = {a['index']: a for a in assignments}
+                        n = len(unmatched_auto_indices)
+                        per_row = remaining // n
+                        for i, idx in enumerate(unmatched_auto_indices):
+                            # Last row absorbs penny remainder so
+                            # the total exactly matches `remaining`.
+                            amount = (per_row if i < n - 1
+                                       else remaining - per_row * (n - 1))
+                            if idx in existing:
+                                existing[idx]['charge'] += amount
+                            else:
+                                assignments.append(
+                                    {'index': idx, 'charge': amount})
 
         # Apply assignments to payment rows.
         #
@@ -1191,6 +1613,56 @@ class PaymentScreen(QWidget):
 
         self._update_summary()
 
+    def _compute_universally_eligible_method_ids(self) -> set | None:
+        """Return the set of payment_method ids that EVERY vendor on
+        the current order is registered for (intersection across
+        ``vendor_payment_methods`` for all order-vendors).
+
+        Returns ``None`` when no order context is loaded — callers
+        treat this as "no per-vendor constraint available" and
+        skip the filter.
+
+        Vendors with NO ``vendor_payment_methods`` rows at all are
+        treated as **permissive** (accept every method) and are
+        SKIPPED in the intersection — matches the v23→v24 migration's
+        permissive-backfill semantics.  Without this skip, legacy or
+        un-configured vendors would collapse the intersection to
+        empty and the eligibility check would fire on every
+        multi-vendor order.
+
+        Used by ``_add_overflow_row`` to refuse picking a method
+        like SNAP for auto-distribute when the order contains a
+        SNAP-ineligible vendor.  Pre-fix (user-reported 2026-05-06):
+        Auto-Distribute would pick SNAP based on highest match%
+        ignoring per-vendor eligibility, then proportionally
+        attribute the SNAP charge across all vendors — including
+        the ineligible one — silently overriding the per-vendor
+        binding rules introduced in v1.9.9 (schema v24).  The
+        breakdown grid correctly showed the ❌ but the engine
+        wasn't enforcing it.
+        """
+        if not self._order_transactions:
+            return None
+        from fam.models.payment_method import get_vendor_payment_method_ids
+        vendor_ids = {
+            t.get('vendor_id') for t in self._order_transactions
+            if t.get('vendor_id') is not None
+        }
+        if not vendor_ids:
+            return None
+        universal: set | None = None
+        for vid in vendor_ids:
+            eligible = get_vendor_payment_method_ids(vid)
+            if not eligible:
+                # Permissive: vendor has no eligibility config → treat
+                # as accepting everything; skip from the intersection.
+                continue
+            if universal is None:
+                universal = set(eligible)
+            else:
+                universal &= eligible
+        return universal
+
     def _add_overflow_row(self, existing_descriptors):
         """Add a non-denominated overflow row for auto-distribute.
 
@@ -1198,6 +1670,12 @@ class PaymentScreen(QWidget):
           1. SNAP (highest match, most common)
           2. Cash (fallback, 0% match)
           3. Any non-denominated method
+
+        v2.0.7 fix: candidates are pre-filtered to methods that
+        EVERY vendor on the current order is eligible for.  Pre-fix
+        the function picked SNAP whenever the market had it,
+        regardless of per-vendor eligibility — silently attributing
+        SNAP-ineligible vendors' shares via SNAP on the cloud sheet.
 
         Returns the new PaymentRow, or None if no suitable method exists.
         """
@@ -1230,6 +1708,16 @@ class PaymentScreen(QWidget):
             if m['id'] not in used_ids
             and (not m.get('denomination') or m['denomination'] <= 0)
         ]
+
+        # v2.0.7 fix: enforce per-vendor eligibility intersection.
+        # Without this, Auto-Distribute would pick SNAP for any
+        # order at a SNAP-enabled market even when one of the order's
+        # vendors is on the SNAP-ineligible list — the resulting
+        # SNAP row would proportionally attribute that vendor's
+        # share through SNAP on cloud reports.
+        universal = self._compute_universally_eligible_method_ids()
+        if universal is not None:
+            candidates = [m for m in candidates if m['id'] in universal]
 
         if not candidates:
             return None
@@ -1461,18 +1949,59 @@ class PaymentScreen(QWidget):
                     'method_name': data['method_name_snapshot'],
                     'denomination': (method.get('denomination')
                                       if method else None),
+                    # v2.0.7 (schema v36): carry the row's stashed
+                    # Phase B forfeit through to the engine result
+                    # so the Customer Forfeit summary card reflects
+                    # values preserved from a saved DB row, not
+                    # just freshly-computed forfeit from the
+                    # current cycle.  Without this, restoring a
+                    # Phase B transaction shows $0.00 in the card
+                    # (engine recomputes a no-overage state) while
+                    # the DB and Reports correctly show the saved
+                    # $3.48 — a parity violation between surfaces.
+                    'customer_forfeit_cents':
+                        data.get('customer_forfeit_cents', 0) or 0,
+                    # v2.0.7+ user-cap (user-reported 2026-05-07):
+                    # propagate the row's user-cap flag to the
+                    # engine.  Pass 4 cap-aware give-back skips
+                    # user-capped rows so the typed value isn't
+                    # silently inflated to absorb match-cap
+                    # shrinkage.
+                    'user_capped': bool(data.get('user_capped', False)),
                 })
 
         if entries:
             calc_entries = [
                 {'method_amount': e['method_amount'],
                  'match_percent': e['match_percent'],
-                 'denomination': e.get('denomination')}
+                 'denomination': e.get('denomination'),
+                 # v2.0.7+ user-cap: propagate user-cap flag so
+                 # the engine preserves customer_charged for
+                 # rows the volunteer has manually edited.
+                 'user_capped': bool(e.get('user_capped', False))}
                 for e in entries
             ]
             result = calculate_payment_breakdown(
                 receipt_total, calc_entries, match_limit=self._match_limit
             )
+            # v2.0.7 (schema v36): seed result.line_items with
+            # the per-entry stashed customer_forfeit_cents so
+            # Phase B forfeit preserved through draft restore /
+            # transaction load surfaces in the Customer Forfeit
+            # summary card.  The engine's calculate_payment_
+            # breakdown rebuilds line_items from scratch and
+            # doesn't carry forfeit metadata; this seeding fills
+            # it from the row data BEFORE _apply_denomination_
+            # forfeit may add more.  The forfeit fn uses
+            # ``+= cust_red`` semantics so the seeded value
+            # accumulates correctly with any new Phase B
+            # forfeit fired this cycle.
+            for i, li in enumerate(result.get('line_items', [])):
+                if i < len(entries):
+                    seeded = entries[i].get(
+                        'customer_forfeit_cents', 0) or 0
+                    if seeded > 0:
+                        li['customer_forfeit_cents'] = seeded
             # v1.9.10 follow-up (2026-05-01): stash a reference to
             # ``result`` and the entries that produced it so the
             # auditor can verify "screen state is consistent with the
@@ -1524,23 +2053,17 @@ class PaymentScreen(QWidget):
             # Check for denomination overage BEFORE penny normalization so
             # even a $0.01 overage from denominations is properly detected
             # and displayed (adjusted match, warning label, gold color).
-            is_denom_overage = False
-            denom_overage_amt = 0
-            if remaining < 0:
-                # Use the *effective* denomination — the method_amount of
-                # one denomination unit — as the threshold.  A $5 token with
-                # 100% match creates $10 of allocation per unit, so the max
-                # legitimate overshoot is up to $10, not $5.
-                effective_denom_sum = 0
-                for row in self._payment_rows:
-                    method = row.get_selected_method()
-                    if method and method.get('denomination'):
-                        effective_denom_sum += charge_to_method_amount(
-                            method['denomination'], method['match_percent']
-                        )
-                if effective_denom_sum > 0 and abs(remaining) <= effective_denom_sum:
-                    is_denom_overage = True
-                    denom_overage_amt = abs(remaining)
+            #
+            # v2.0.7+ audit (2026-05-07): unified with the confirm-time
+            # check via the shared ``_check_denomination_overage``
+            # helper.  Pre-unification this block duplicated the same
+            # logic — divergence risk if one was patched but not the
+            # other.  Single source of truth.
+            denom_overage_amt = self._check_denomination_overage(
+                {'allocated_total': allocated},
+                self._order_total,
+            )
+            is_denom_overage = denom_overage_amt > 0
 
             # v1.9.10 follow-up (2026-05-01): also detect PER-VENDOR
             # over-allocation even when the order total balances.
@@ -1633,12 +2156,10 @@ class PaymentScreen(QWidget):
             # the breakdown display can never drift from what
             # ``_confirm_payment`` would commit.
             if is_denom_overage and denom_overage_amt > 0:
-                # Build items in the shape ``_apply_denomination_forfeit``
-                # expects (with ``bound_vendor_id``, ``denomination``,
-                # etc).  Match the existing ``result.line_items`` order
-                # by walking PaymentRow.get_data() in the same order
-                # the engine saw them — that's how
-                # ``_collect_line_items`` is built upstream.
+                # Build items in the shape the canonical forfeit
+                # function expects.  Match the engine's row order
+                # by walking PaymentRow.get_data() in the same
+                # order ``_collect_line_items`` did.
                 forfeit_items = []
                 for row in self._payment_rows:
                     d = row.get_data()
@@ -1646,12 +2167,30 @@ class PaymentScreen(QWidget):
                         forfeit_items.append(d)
                 self._apply_denomination_forfeit(
                     result, forfeit_items, denom_overage_amt)
+                # v2.0.7-final (Option B, schema v36): ALWAYS
+                # update ALL summary cards with post-forfeit
+                # values.  No more conditional branching on
+                # pre_forfeit_remaining sign.
+                #
+                # Math identity (always holds post-forfeit):
+                #   allocated_total = receipt_total
+                #   customer_pays + fam_match = allocated
+                #   customer's physical handout
+                #     = customer_pays + customer_forfeit
+                #
+                # Customer Forfeit card surfaces Phase B
+                # explicitly — the user sees ONE clear number for
+                # token-value loss, not a phantom-negative
+                # remaining.
+                allocated = result['allocated_total']
+                remaining = receipt_total - allocated
                 fam_match = result['fam_subsidy_total']
                 self.summary_row.update_card(
+                    "allocated", format_dollars(allocated))
+                self.summary_row.update_card(
+                    "remaining", format_dollars(remaining))
+                self.summary_row.update_card(
                     "fam_match", format_dollars(fam_match))
-                # Forfeit may have given back match capacity to non-denom
-                # rows (Pass 4) when cap was active, reducing customer
-                # charges.  Re-write customer_pays card.
                 self.summary_row.update_card(
                     "customer_pays",
                     format_dollars(result['customer_total_paid']))
@@ -1750,6 +2289,15 @@ class PaymentScreen(QWidget):
                             li.get('customer_forfeit_cents', 0) or 0)
                         true_charge = (
                             li['customer_charged'] + forfeit_cents)
+                        # v2.0.7+ rebuild (user-reported 2026-05-07):
+                        # the engine no longer inflates non-denom
+                        # customer_charged.  For non-denom rows, the
+                        # engine's customer_charged ALWAYS equals the
+                        # row's input — write-back is a no-op for
+                        # them.  For denom rows, the write-back still
+                        # syncs the spinbox to the post-forfeit
+                        # ``customer_charged + forfeit`` (which equals
+                        # the customer's physical scrip face value).
                         if true_charge != row._get_active_charge():
                             # Block the row's `changed` signal so this
                             # write-back doesn't cause a re-entry into
@@ -1781,28 +2329,59 @@ class PaymentScreen(QWidget):
                         else:
                             row._recompute()
 
-            if remaining == 0:
-                self.summary_row.update_card_color("remaining", PRIMARY_GREEN)
-                self.summary_row.update_card_color("allocated", PRIMARY_GREEN)
-                self.denom_overage_warning.setVisible(False)
-            elif remaining < 0 and is_denom_overage:
-                # Denomination overage — warn but don't show as hard error
-                self.summary_row.update_card_color("remaining", HARVEST_GOLD)
-                self.summary_row.update_card_color("allocated", HARVEST_GOLD)
-                self.denom_overage_warning.setText(
-                    f"\u26a0  Denomination overage: {format_dollars(denom_overage_amt)} — "
-                    f"Customer forfeits {format_dollars(denom_overage_amt)} of FAM match because "
-                    f"denominated payment cannot be broken into smaller increments."
-                )
-                self.denom_overage_warning.setVisible(True)
-            elif remaining < 0:
-                self.summary_row.update_card_color("remaining", ERROR_COLOR)
-                self.summary_row.update_card_color("allocated", ERROR_COLOR)
-                self.denom_overage_warning.setVisible(False)
+            # v2.0.7-final (Option B, schema v36):
+            # Customer Forfeit card replaces the old
+            # ``denom_overage_warning`` label.  ALWAYS update the
+            # card from line_items (zero when no forfeit;
+            # positive amount when Phase B fires).  The card is
+            # the single source of truth for customer-side
+            # token-value loss; volunteers no longer need to
+            # cross-reference a separate warning label and
+            # vendor breakdown table.
+            customer_forfeit_total = sum(
+                (li.get('customer_forfeit_cents', 0) or 0)
+                for li in result.get('line_items', [])
+            )
+            self.summary_row.update_card(
+                "customer_forfeit",
+                format_dollars(customer_forfeit_total))
+            if customer_forfeit_total > 0:
+                # Phase B engaged — accent the card so the
+                # volunteer sees the customer is losing token
+                # face value.  Confirm dialog repeats with the
+                # detailed recommendation.
+                self.summary_row.update_card_color(
+                    "customer_forfeit", HARVEST_GOLD)
             else:
-                self.summary_row.update_card_color("remaining", HARVEST_GOLD)
-                self.summary_row.update_card_color("allocated", HARVEST_GOLD)
-                self.denom_overage_warning.setVisible(False)
+                # No customer forfeit — neutral grey.
+                self.summary_row.update_card_color(
+                    "customer_forfeit", MEDIUM_GRAY)
+            # Hide the legacy warning label permanently — its
+            # information is now subsumed by the dedicated card.
+            self.denom_overage_warning.setVisible(False)
+
+            # Allocated/Remaining color coding.  After the
+            # consolidation, allocated/remaining always show
+            # post-forfeit balanced state (= receipt total /
+            # $0.00) when the forfeit pass ran successfully.
+            # The only non-zero remaining cases are: under-
+            # allocation (gold, more to collect) or genuine
+            # non-denom over-allocation (red, hard error).
+            if remaining == 0:
+                self.summary_row.update_card_color(
+                    "remaining", PRIMARY_GREEN)
+                self.summary_row.update_card_color(
+                    "allocated", PRIMARY_GREEN)
+            elif remaining < 0:
+                self.summary_row.update_card_color(
+                    "remaining", ERROR_COLOR)
+                self.summary_row.update_card_color(
+                    "allocated", ERROR_COLOR)
+            else:
+                self.summary_row.update_card_color(
+                    "remaining", HARVEST_GOLD)
+                self.summary_row.update_card_color(
+                    "allocated", HARVEST_GOLD)
 
             # FAM match: green when there's a match, grey when zero
             if fam_match > 0:
@@ -1816,12 +2395,17 @@ class PaymentScreen(QWidget):
             self.summary_row.update_card("remaining", format_dollars(receipt_total))
             self.summary_row.update_card("customer_pays", "$0.00")
             self.summary_row.update_card("fam_match", "$0.00")
+            # v2.0.7-final: Customer Forfeit card always reset to
+            # $0.00 / grey when no payment rows are active.
+            self.summary_row.update_card("customer_forfeit", "$0.00")
 
             # Reset colors to defaults when no entries
             self.summary_row.update_card_color("allocated", MEDIUM_GRAY)
             self.summary_row.update_card_color("remaining", HARVEST_GOLD)
             self.summary_row.update_card_color("customer_pays", PRIMARY_GREEN)
             self.summary_row.update_card_color("fam_match", MEDIUM_GRAY)
+            self.summary_row.update_card_color(
+                "customer_forfeit", MEDIUM_GRAY)
 
             self._clear_collection_list()
             self.match_cap_warning.setVisible(False)
@@ -1887,7 +2471,8 @@ class PaymentScreen(QWidget):
         cap the charge at ``remaining / 2`` even though the customer must pay
         ``remaining - available_match`` when the cap kicks in.
         """
-        from fam.utils.calculations import charge_to_method_amount
+        # ``charge_to_method_amount`` is at module level (line 25);
+        # no local import needed.
 
         # Pre-compute per-vendor receipt totals + the implicit-binding
         # vendor for single-vendor orders (where the vendor combo is
@@ -2295,6 +2880,17 @@ class PaymentScreen(QWidget):
                 # Only cap non-denominated rows — denominated rows need
                 # their overage to flow through so forfeit detection and
                 # _apply_denomination_forfeit() work correctly.
+                #
+                # v2.0.7+ user-cap NOTE: the budget cap below
+                # applies to user-capped rows too.  This prevents
+                # the per-vendor over-allocation invariant breach
+                # caught by the admin fuzzer when a volunteer
+                # types values that together exceed receipt
+                # totals.  The user's typed value remains visible
+                # in the spinbox (preserved by set_max_charge's
+                # defensive floor at the row layer); only the
+                # engine-input method_amount is reduced when it
+                # genuinely exceeds the order's budget.
                 method = row.get_selected_method()
                 is_denom = method and method.get('denomination') and method['denomination'] > 0
                 if not is_denom:
@@ -2412,373 +3008,41 @@ class PaymentScreen(QWidget):
         return overage
 
     def _apply_denomination_forfeit(self, result, items, overage):
-        """Reduce match on denominated line items so vendor total equals receipt.
+        """Apply denomination forfeit to ``result`` and ``items``.
 
-        When a denomination method (e.g. $5 FMNP checks) over-allocates the
-        order, the customer forfeits a portion of FAM match.  This adjusts the
-        breakdown so saved data is correct: customer_charged stays the same,
-        method_amount and match_amount are reduced by the overage.
+        v2.0.7-final consolidation (Option B, schema v36): this
+        method is now a thin wrapper that delegates to the
+        canonical ``fam.utils.calculations.apply_denomination_forfeit``
+        function.  The forfeit math lives in ONE place across the
+        whole codebase; both PaymentScreen and AdjustmentDialog
+        delegate here.  Pre-consolidation, AdjustmentDialog had
+        its OWN inline first-match Phase-A-only loop that diverged
+        from the vendor-aware Phase-A+B implementation here, and
+        the divergence dropped Phase B forfeit data on Adjustment
+        save.  Now both screens share one implementation; the
+        parity test ``test_forfeit_consolidation_parity.py`` pins
+        byte-identical output for every realistic scenario.
 
-        v1.9.9 fix — vendor-aware attribution
-        --------------------------------------
-        The original implementation reduced match on the FIRST line item
-        with positive match, regardless of which vendor was over-allocated.
-        On multi-vendor orders that mis-attributed the forfeit to a vendor
-        with headroom (e.g. Hello Hummus FB went $24 → $22) instead of the
-        actually-over-allocated vendor (e.g. KizzleFoods FB stayed at $12
-        against a $10 receipt).  Downstream the per-vendor SNAP allocation
-        then split incorrectly and left a third vendor under-allocated —
-        the 2026-04 onsite surfaced this as a hung Auto-Distribute.
+        Wrapper responsibility: build ``vendor_receipts`` from
+        ``self._order_transactions`` (the screen-state input the
+        canonical function can't reach) and forward all other
+        args through.  Documentation and rationale for each pass
+        live in the canonical function.
 
-        New algorithm:
-          1. Compute per-vendor allocation by walking the line items'
-             ``bound_vendor_id`` (with single_vendor_id fallback).
-          2. For each over-allocated vendor, reduce the match on the
-             denominated line item bound to THAT vendor by exactly
-             that vendor's overage.
-          3. If any overage remains after the per-vendor pass (rare —
-             would indicate inconsistent state), fall back to the legacy
-             first-with-match algorithm so the totals still reconcile.
-
-        The fix preserves customer_charged exactly (the customer paid in
-        physical instruments — that count never changes); only the FAM
-        match portion is reduced, and only on the line item that
-        actually caused the overage.
+        See the canonical function's docstring for the full
+        algorithm description (v1.9.9 vendor-aware attribution,
+        v1.9.10 two-phase forfeit, v2.0.7 schema v36 persistence).
         """
-        from fam.utils.calculations import charge_to_method_amount
-
-        # Map of vendor_id → receipt total, plus the implicit binding
-        # for single-vendor orders (where bound_vendor_id is None by
-        # design — the AdjustmentDialog single_vendor_mode case).
-        vendor_receipts: dict[int, int] = {}
+        from fam.utils.calculations import apply_denomination_forfeit
+        vendor_receipts: dict = {}
         for t in self._order_transactions:
             vid = t.get('vendor_id')
             if vid is not None:
                 vendor_receipts[vid] = (
                     vendor_receipts.get(vid, 0) + t['receipt_total'])
-        single_vendor_id = (
-            next(iter(vendor_receipts.keys()))
-            if len(vendor_receipts) == 1 else None)
-
-        # Per-vendor allocation from the CURRENT line items, plus a
-        # reverse map (item index → bound vendor) so we can target
-        # forfeit reductions surgically.  Only denominated rows can
-        # carry forfeit; non-denom rows are excluded.
-        vendor_alloc: dict[int, int] = {vid: 0 for vid in vendor_receipts}
-        item_vendor: dict[int, int] = {}
-        for i, li in enumerate(result['line_items']):
-            if li['method_amount'] <= 0:
-                continue
-            # Bounds-check: line_items can be longer than items when a
-            # row was added mid-update (e.g. an empty Cash row
-            # contributes a 0-method line_item but is filtered out of
-            # items via ``method_amount > 0``).
-            if i >= len(items):
-                continue
-            item = items[i]
-            denom = item.get('denomination')
-            if not (denom and denom > 0):
-                continue
-            bound_vid = item.get('bound_vendor_id')
-            if bound_vid is None and single_vendor_id is not None:
-                bound_vid = single_vendor_id
-            if bound_vid in vendor_receipts:
-                vendor_alloc[bound_vid] += li['method_amount']
-                item_vendor[i] = bound_vid
-
-        # Vendors whose denom allocation exceeds their receipt — those
-        # are the ones whose forfeit needs to be applied.
-        over_per_vendor = {
-            vid: vendor_alloc[vid] - vendor_receipts[vid]
-            for vid in vendor_receipts
-            if vendor_alloc[vid] > vendor_receipts[vid]
-        }
-
-        # Track total reduction for the post-pass penny-reconciliation
-        # step (see Pass 3 below).  In v1.9.10 we no longer cap the
-        # per-vendor reduction by ``remaining_overage`` — see the
-        # comment on Pass 1.
-        total_reduction = 0
-        # v1.9.10 follow-up (2026-05-01): track Phase A (match)
-        # and Phase B (customer) reductions SEPARATELY.  The
-        # totals on ``result`` adjust differently: ``method`` is
-        # reduced by both, ``fam_subsidy_total`` only by Phase A,
-        # ``customer_total_paid`` only by Phase B.  Without this
-        # split, ``audit_screen`` flagged E6/E7 mismatches
-        # (fam_subsidy / customer_total drifting from
-        # Σ(match) / Σ(customer) post-forfeit).
-        total_match_reduction = 0
-        total_customer_reduction = 0
-        remaining_overage = overage  # legacy meaning, kept for fallback
-
-        # ── Pass 1: vendor-aware forfeit ─────────────────────────────
-        # For each over-allocated vendor, reduce match on the line
-        # items bound to that vendor by exactly that vendor's
-        # **per-vendor** overage.
-        #
-        # v1.9.10 onsite-finding fix: previously this reduced by
-        # ``min(vendor_overage, remaining_overage)``, capping at the
-        # *order-level* overage.  When a single vendor's per-vendor
-        # overage exceeds the order-level overage (because OTHER
-        # vendors' non-denom rows had headroom that hid part of the
-        # over-allocation), the cap stopped the reduction 1¢ short.
-        # The bound denom row ended 1¢ over its vendor's receipt and
-        # the proportional non-denom split landed the 1¢ shortfall
-        # on a different vendor.  Both transactions ended up off by
-        # ±1¢ — invisible to Layer 2C's ±1¢ tolerance but a real I2
-        # violation in the saved DB rows.
-        #
-        # Now: each over-allocated vendor's bound denom row is
-        # reduced by exactly its vendor_overage so per-vendor
-        # reconciliation is exact.  The order-level total may now
-        # be UNDER receipt by a few cents (because we reduced more
-        # than the order-level overage); Pass 3 absorbs that
-        # residue into a non-denom match line so the order also
-        # reconciles to ±0¢.
-        #
-        # v1.9.10 follow-up (2026-05-01): two-phase reduction.
-        # Phase A reduces ``match_amount`` (the original behaviour —
-        # FAM contributes less and the customer's physical scrip
-        # still covers receipt within match headroom).  Phase B
-        # kicks in when a vendor's overage exceeds the row's match
-        # amount (e.g. customer hands $10 Food RX to a $7.86 receipt
-        # vendor — overage $12.14 vs match $10 → match insufficient).
-        # Phase B reduces ``customer_charged`` AND tags the line
-        # item with ``customer_forfeit_cents`` so callers know how
-        # much of the customer's physical scrip didn't translate to
-        # vendor reimbursement.  Layer 2A reads ``customer_forfeit_cents``
-        # to allow the spinbox-vs-engine mismatch on denom rows
-        # whose customer-side forfeit is fully accounted for.
-        for vid, vendor_overage in over_per_vendor.items():
-            v_remain = vendor_overage
-            if v_remain <= 0:
-                continue
-            for i, li in enumerate(result['line_items']):
-                if v_remain <= 0:
-                    break
-                if item_vendor.get(i) != vid:
-                    continue
-                # Phase A: reduce match
-                if li['match_amount'] > 0:
-                    match_red = min(v_remain, li['match_amount'])
-                    li['match_amount'] -= match_red
-                    li['method_amount'] -= match_red
-                    items[i]['method_amount'] = li['method_amount']
-                    items[i]['match_amount'] = li['match_amount']
-                    v_remain -= match_red
-                    total_reduction += match_red
-                    total_match_reduction += match_red
-                    remaining_overage = max(
-                        0, remaining_overage - match_red)
-                # Phase B: reduce customer_charged when match
-                # exhausted but vendor still over-allocated.
-                # This is "customer-side forfeit" — the customer
-                # handed more denomination than the receipt
-                # required.  customer_charged in the saved row
-                # represents the EFFECTIVE customer contribution
-                # to the order; the gap (``customer_forfeit_cents``)
-                # is recorded for Layer 2A and receipt rendering.
-                if v_remain > 0 and li['customer_charged'] > 0:
-                    cust_red = min(v_remain, li['customer_charged'])
-                    li['customer_charged'] -= cust_red
-                    li['method_amount'] -= cust_red
-                    li['customer_forfeit_cents'] = (
-                        li.get('customer_forfeit_cents', 0)
-                        + cust_red)
-                    items[i]['method_amount'] = li['method_amount']
-                    items[i]['customer_charged'] = (
-                        li['customer_charged'])
-                    items[i]['customer_forfeit_cents'] = (
-                        items[i].get('customer_forfeit_cents', 0)
-                        + cust_red)
-                    v_remain -= cust_red
-                    total_reduction += cust_red
-                    total_customer_reduction += cust_red
-                    remaining_overage = max(
-                        0, remaining_overage - cust_red)
-
-        # ── Pass 2: legacy fall-back ─────────────────────────────────
-        # Any overage left after the vendor-aware pass means the
-        # vendor map didn't cover the full forfeit (rare — could
-        # happen on a single-vendor order where ``vendor_receipts``
-        # is empty because no transactions are loaded yet, or on
-        # numerical drift).  Walk all line items in order and reduce
-        # match wherever it's positive — same algorithm as the
-        # pre-v1.9.9 code so the totals still reconcile cleanly.
-        if remaining_overage > 0:
-            for i, li in enumerate(result['line_items']):
-                if remaining_overage <= 0:
-                    break
-                # Bounds-check (same rationale as Pass 1).
-                if i >= len(items):
-                    continue
-                if li['match_amount'] > 0:
-                    reduction = min(remaining_overage, li['match_amount'])
-                    li['match_amount'] = li['match_amount'] - reduction
-                    li['method_amount'] = li['method_amount'] - reduction
-                    items[i]['method_amount'] = li['method_amount']
-                    items[i]['match_amount'] = li['match_amount']
-                    remaining_overage -= reduction
-                    total_reduction += reduction
-                    total_match_reduction += reduction
-
-        # ── Pass 3: residual penny reconciliation ───────────────────
-        # v1.9.10 onsite-finding fix.  Pass 1 reduces by per-vendor
-        # overage exactly so each over-allocated vendor's bound denom
-        # row matches its receipt.  But ``total_reduction`` may exceed
-        # the order-level ``overage`` when a single vendor's overage
-        # is bigger than the order-level overage (the rest of the
-        # order had non-denom headroom that masked it).  In that
-        # case the order is now UNDER the receipt total; we add the
-        # residue back to the largest non-denom match line so the
-        # order also ties out to ±0¢.
-        residue = total_reduction - overage
-        if residue > 0:
-            best_idx = None
-            best_method = -1
-            for i, li in enumerate(result['line_items']):
-                # Bounds-check: ``result['line_items']`` and ``items``
-                # may have different lengths when a row was added
-                # mid-update_summary (e.g. user clicks "+ Add Payment
-                # Method" → an empty Cash row appears as a 0-method
-                # line_item from the engine while ``items`` was built
-                # by ``_collect_line_items`` filtering on
-                # ``method_amount > 0``).  Accessing ``items[i]``
-                # without the bounds check raised
-                # ``IndexError: list index out of range`` on the
-                # 2026-04-30 onsite.
-                if i >= len(items):
-                    continue
-                item = items[i]
-                denom = item.get('denomination')
-                if denom and denom > 0:
-                    continue  # Skip denom rows (they'd reintroduce overage)
-                pct = item.get('match_percent_snapshot') or item.get('match_percent') or 0
-                if pct <= 0:
-                    continue  # Skip 0%-match rows (no match to grow)
-                if li['method_amount'] > best_method:
-                    best_method = li['method_amount']
-                    best_idx = i
-            if best_idx is not None and best_idx < len(items):
-                target = result['line_items'][best_idx]
-                target['method_amount'] += residue
-                target['match_amount'] += residue
-                items[best_idx]['method_amount'] = target['method_amount']
-                items[best_idx]['match_amount'] = target['match_amount']
-                # The order has reconciled — total_reduction is now
-                # effectively ``overage``.
-                total_reduction -= residue
-                # The residue add-back is a MATCH increase on a
-                # non-denom row, so it cancels match-side
-                # reductions (not customer-side).
-                total_match_reduction -= residue
-            # If no eligible non-denom matched row exists, the
-            # residue stays unabsorbed and the caller's per-txn
-            # guard will surface it.  Real-world this can only
-            # happen on all-denom-or-Cash orders, which are
-            # already pathological.
-
-        # Update result totals.  ``method_amount`` (= allocated)
-        # changes by the full ``total_reduction`` since both
-        # phases reduce method.  ``fam_subsidy_total`` changes by
-        # the Phase A sum; ``customer_total_paid`` changes by the
-        # Phase B sum.  Pre-fix this conflated all three —
-        # ``audit_screen`` flagged the resulting E6/E7 drift on the
-        # 2026-05-01 multi-denom-overage scenario.
-        #
-        # Defensive ``.get(..., 0)``: some legacy test fixtures
-        # construct minimal ``result`` dicts without the totals
-        # keys.  Skip the update for missing keys rather than
-        # crash — production callers always have all three.
-        if 'allocated_total' in result:
-            result['allocated_total'] = (
-                result['allocated_total'] - total_reduction)
-        if 'fam_subsidy_total' in result:
-            result['fam_subsidy_total'] = (
-                result['fam_subsidy_total'] - total_match_reduction)
-        if 'customer_total_paid' in result:
-            result['customer_total_paid'] = (
-                result['customer_total_paid'] - total_customer_reduction)
-
-        # ── Pass 4: cap-aware match give-back ───────────────────────
-        # v1.9.10 onsite-finding fix.  When the daily match cap was
-        # active, the engine had already squeezed non-denom match
-        # below its uncapped value (e.g. SNAP uncapped $122.75 →
-        # capped $66 to fit cap=$100 alongside denom $34).  Pass 1's
-        # denom forfeit just freed some of the cap budget by reducing
-        # denom match (e.g. FB Healthy $14 → $11.30, freeing $2.70).
-        # Without this pass, that freed budget evaporates: FAM Match
-        # drops below the cap (e.g. $100 → $97.30) for no reason
-        # other than the order had a denom overage.
-        #
-        # The user's expectation is "FAM match should show $100
-        # when the cap is met" — so when the cap was active, we
-        # transfer the freed capacity to non-denom rows (raise their
-        # match_amount, drop their customer_charged by the same
-        # amount, method_amount unchanged).  Net result:
-        #   - FAM match stays at the cap
-        #   - Customer pays less by exactly the forfeit amount
-        #   - Per-vendor reconciliation still holds (non-denom rows
-        #     distribute across the same vendors regardless of
-        #     match-vs-customer split internally)
-        #
-        # When the cap was NOT active, no give-back applies —
-        # there's no freed capacity (FAM was paying full uncapped
-        # match, and the forfeit really is a permanent loss to
-        # FAM's match budget for over-handed-over denom).
-        if (result.get('match_was_capped')
-                and total_reduction > 0):
-            # Find non-denom line items that have headroom (uncapped
-            # match > current match).  Headroom = how much more match
-            # this row could absorb.
-            headrooms: list[tuple[int, int]] = []
-            for i, li in enumerate(result['line_items']):
-                if i >= len(items):
-                    continue
-                item = items[i]
-                denom = item.get('denomination')
-                if denom and denom > 0:
-                    continue  # denom rows: customer fixed, skip
-                pct = (item.get('match_percent_snapshot')
-                       or item.get('match_percent') or 0)
-                if pct <= 0:
-                    continue  # 0%-match rows have no match to grow
-                # Uncapped match for this method_amount.
-                uncapped = round(
-                    li['method_amount'] * pct / (100.0 + pct))
-                room = uncapped - li['match_amount']
-                if room > 0:
-                    headrooms.append((i, room))
-
-            if headrooms:
-                room_total = sum(r for _, r in headrooms)
-                give_back_total = min(total_reduction, room_total)
-                # Distribute proportionally to headroom; last row
-                # absorbs the exact remainder so the sum is exact
-                # to the cent.
-                running = 0
-                for k, (idx, room) in enumerate(headrooms):
-                    if k == len(headrooms) - 1:
-                        give = give_back_total - running
-                    else:
-                        give = round(
-                            give_back_total * room / room_total)
-                        running += give
-                    give = min(give, room)
-                    if give <= 0:
-                        continue
-                    target = result['line_items'][idx]
-                    target['match_amount'] += give
-                    target['customer_charged'] -= give
-                    items[idx]['match_amount'] = target['match_amount']
-                    items[idx]['customer_charged'] = (
-                        target['customer_charged'])
-                # Update result totals: match goes back up, customer
-                # goes down by the same amount, method unchanged.
-                result['fam_subsidy_total'] = (
-                    result['fam_subsidy_total'] + give_back_total)
-                result['customer_total_paid'] = (
-                    result['customer_total_paid'] - give_back_total)
+        apply_denomination_forfeit(
+            result, items, overage, vendor_receipts=vendor_receipts)
+        return
 
     def _confirm_payment(self):
         # Prevent double-click from triggering duplicate processing
@@ -2820,7 +3084,13 @@ class PaymentScreen(QWidget):
         entries = [
             {'method_amount': it['method_amount'],
              'match_percent': it['match_percent'],
-             'denomination': it.get('denomination')}
+             'denomination': it.get('denomination'),
+             # v2.0.7+ user-cap (user-reported 2026-05-07):
+             # propagate the row's user-cap flag so the engine
+             # preserves customer_charged for user-typed values.
+             # Without this the engine inflates SNAP $100 → $108
+             # silently, then Layer 2A fires "row mismatch".
+             'user_capped': bool(it.get('user_capped', False))}
             for it in items
         ]
         result = calculate_payment_breakdown(
@@ -2901,19 +3171,84 @@ class PaymentScreen(QWidget):
                         method_name, actual_charge, expected_charge,
                         forfeit_cents,
                     )
-                    self._show_error(
-                        f"Payment row mismatch detected and confirmation "
-                        f"was blocked.\n\n"
-                        f"The {method_name} input shows "
-                        f"{format_dollars(actual_charge)} but the "
-                        f"calculated charge after applying caps and "
-                        f"reconciliation is "
-                        f"{format_dollars(expected_charge)}.\n\n"
-                        f"Click Auto-Distribute or correct the "
-                        f"{method_name} amount, verify the row matches "
-                        f"the Collect-from-Customer panel, then try "
-                        f"Confirm Payment again."
+
+                    # ── Layer 2A.1: cap-bound mismatch enrichment (v2.0.7) ──
+                    # When the daily FAM match cap is binding AND a
+                    # non-denom row's spinbox shows MORE than what the
+                    # engine wants, the volunteer hit the impossible-to-
+                    # balance scenario: the customer's total method
+                    # contributions (denom + non-denom + capped match)
+                    # exceed receipt total, and the cap floor prevents
+                    # the engine from absorbing more match.  No amount
+                    # of UI auto-rebalance can fix this deterministically
+                    # (the engine's Path B + Pass 4 will overwrite any
+                    # non-denom spinbox edit on the next _update_summary
+                    # cycle).  Surface a clear recommendation: reduce the
+                    # non-denom by exactly the gap, OR split the order
+                    # into multiple smaller customer orders so each can
+                    # balance against its own cap allocation.
+                    is_cap_bound = bool(result.get('match_was_capped'))
+                    is_non_denom_row = not (li.get('denomination') or 0)
+                    spinbox_overshoot = actual_charge - expected_charge
+                    has_denom_row = any(
+                        (l.get('denomination') or 0) > 0
+                        for l in result['line_items']
                     )
+                    show_split_recommendation = (
+                        is_cap_bound
+                        and is_non_denom_row
+                        and has_denom_row
+                        and spinbox_overshoot > 0
+                    )
+                    if show_split_recommendation:
+                        gap_str = format_dollars(spinbox_overshoot)
+                        cap_str = format_dollars(self._match_limit or 0)
+                        self._show_error(
+                            f"This payment can't fully reconcile "
+                            f"because the customer's daily FAM "
+                            f"match cap ({cap_str} remaining) is "
+                            f"smaller than the match this combination "
+                            f"would normally generate.<br><br>"
+                            f"The {method_name} input shows "
+                            f"{format_dollars(actual_charge)} but the "
+                            f"engine can only absorb "
+                            f"{format_dollars(expected_charge)} after "
+                            f"applying the cap to the denominated "
+                            f"row(s) — a gap of <b>{gap_str}</b>.<br><br>"
+                            f"<b>Recommended fixes (pick one):</b><br>"
+                            f"&nbsp;&nbsp;1. Reduce the {method_name} "
+                            f"input by exactly {gap_str} and click "
+                            f"Confirm Payment again.<br>"
+                            f"&nbsp;&nbsp;2. <b>Split this customer's "
+                            f"receipts into two separate customer "
+                            f"orders</b> — each gets its own cap "
+                            f"allocation so the math reconciles "
+                            f"cleanly.  Cancel this order, then in "
+                            f"Receipt Intake create two orders for "
+                            f"this customer (e.g. one with the "
+                            f"denominated payments, one with SNAP)."
+                        )
+                        logger.warning(
+                            "Cap-bound impossible-to-balance scenario: "
+                            "method=%s spinbox=%d engine_wants=%d "
+                            "gap=%d cap=%s — recommended split-order",
+                            method_name, actual_charge, expected_charge,
+                            spinbox_overshoot, self._match_limit,
+                        )
+                    else:
+                        self._show_error(
+                            f"Payment row mismatch detected and "
+                            f"confirmation was blocked.\n\n"
+                            f"The {method_name} input shows "
+                            f"{format_dollars(actual_charge)} but the "
+                            f"calculated charge after applying caps and "
+                            f"reconciliation is "
+                            f"{format_dollars(expected_charge)}.\n\n"
+                            f"Click Auto-Distribute or correct the "
+                            f"{method_name} amount, verify the row "
+                            f"matches the Collect-from-Customer panel, "
+                            f"then try Confirm Payment again."
+                        )
                     self.confirm_btn.setEnabled(True)
                     return
 
@@ -3005,6 +3340,153 @@ class PaymentScreen(QWidget):
                     self.confirm_btn.setEnabled(True)
                     return
 
+        # ── Layer 2B: non-denom method capacity check (v2.0.7) ─────
+        # User-reported 2026-05-06: when a non-denom method is
+        # entered with a customer charge that exceeds the sum of
+        # eligible-vendor receipts (minus denom allocations bound
+        # to those eligible vendors), the per-transaction
+        # reconciliation produces confusing contradictory messages:
+        # the breakdown table shows ❌ for ineligible vendors but
+        # the math shows them over-allocated; the error message
+        # points at one specific sub-receipt being under-allocated.
+        # The volunteer can't tell what to fix.
+        #
+        # Pre-empt the confusion: before Layer 2C runs, verify each
+        # non-denom method's customer-charge fits within the
+        # capacity of vendors that actually accept it.  When it
+        # exceeds, fire ONE clear error naming the method and the
+        # exact dollar amount to reduce.
+        from fam.models.payment_method import (
+            get_vendor_payment_method_ids as _get_vpm)
+        _b2_eligibility_cache: dict[int, set] = {}
+        def _b2_eligible(vendor_id, method_id):
+            if vendor_id is None:
+                return True
+            if vendor_id not in _b2_eligibility_cache:
+                _b2_eligibility_cache[vendor_id] = _get_vpm(vendor_id)
+            eligible = _b2_eligibility_cache[vendor_id]
+            if not eligible:
+                return True  # legacy/permissive
+            return method_id in eligible
+
+        # Compute per-vendor denom allocation (bound denom
+        # method_amount per vendor) so we can subtract it from
+        # eligible capacity.
+        denom_alloc_per_vendor: dict[int, int] = {}
+        for t in self._order_transactions:
+            vid = t.get('vendor_id')
+            if vid is not None:
+                denom_alloc_per_vendor[vid] = 0
+        single_order_vendor_id_b2 = (
+            next(iter(denom_alloc_per_vendor.keys()))
+            if len(denom_alloc_per_vendor) == 1 else None)
+        for item in items:
+            denom = item.get('denomination')
+            if not (denom and denom > 0):
+                continue
+            bvid = item.get('bound_vendor_id')
+            if bvid is None and single_order_vendor_id_b2 is not None:
+                bvid = single_order_vendor_id_b2
+            if bvid in denom_alloc_per_vendor:
+                denom_alloc_per_vendor[bvid] += item['method_amount']
+
+        # For each non-denom row, check that its method_amount fits
+        # the eligible-vendor capacity (sum of receipts − denom
+        # allocations on those eligible vendors).
+        for item in items:
+            denom = item.get('denomination')
+            if denom and denom > 0:
+                continue
+            method_id = item.get('payment_method_id')
+            method_name = item.get(
+                'method_name_snapshot', 'this method')
+            ma = item['method_amount']
+            if ma <= 0:
+                continue
+            eligible_capacity = 0
+            ineligible_vendor_names = set()
+            for t in self._order_transactions:
+                vid = t.get('vendor_id')
+                if _b2_eligible(vid, method_id):
+                    capacity = max(
+                        0,
+                        t['receipt_total']
+                        - denom_alloc_per_vendor.get(vid, 0))
+                    eligible_capacity += capacity
+                    # Reset denom_alloc as we count it (so the same
+                    # vendor's multi-receipts don't double-subtract)
+                    denom_alloc_per_vendor[vid] = max(
+                        0,
+                        denom_alloc_per_vendor.get(vid, 0)
+                        - t['receipt_total'])
+                else:
+                    vname = t.get('vendor_name')
+                    if vname:
+                        ineligible_vendor_names.add(vname)
+            # Restore denom_alloc for next iteration
+            denom_alloc_per_vendor = {
+                t.get('vendor_id'): 0
+                for t in self._order_transactions
+                if t.get('vendor_id') is not None}
+            for it2 in items:
+                d2 = it2.get('denomination')
+                if not (d2 and d2 > 0):
+                    continue
+                bv2 = it2.get('bound_vendor_id')
+                if bv2 is None and single_order_vendor_id_b2 is not None:
+                    bv2 = single_order_vendor_id_b2
+                if bv2 in denom_alloc_per_vendor:
+                    denom_alloc_per_vendor[bv2] += it2['method_amount']
+
+            # Allow ±1¢ tolerance for rounding artifacts.
+            #
+            # v2.0.7 follow-up (2026-05-06): only fire the
+            # eligibility-blamed error when there ARE actually
+            # ineligible vendors on the order.  With the universal
+            # SNAP/Cash binding policy, mixed-eligibility scenarios
+            # disappear for those methods — but Layer 2B's capacity
+            # arithmetic still detects "too much non-denom for the
+            # remaining receipt space after denom allocation".  In
+            # that case the issue is **over-allocation, not
+            # eligibility**, and the per-receipt Layer 2C messaging
+            # below describes it more accurately ("Over-allocation
+            # on Vendor X's receipt: $A applied to $B").  Don't
+            # fire a misleading "X cannot accept SNAP" error when
+            # all vendors happily accept SNAP — the real problem
+            # is the volunteer's totals don't add up to receipts.
+            overshoot = ma - eligible_capacity
+            if overshoot > 1 and ineligible_vendor_names:
+                ineligible_str = ', '.join(
+                    sorted(ineligible_vendor_names))
+                self._show_error(
+                    f"{method_name} payment of "
+                    f"{format_dollars(ma)} exceeds the eligible-"
+                    f"vendor capacity of "
+                    f"{format_dollars(eligible_capacity)} by "
+                    f"{format_dollars(overshoot)}.  "
+                    f"<br><br>"
+                    f"{ineligible_str} cannot accept "
+                    f"{method_name}, so {method_name} can only "
+                    f"cover the remaining vendors.  "
+                    f"<br><br>"
+                    f"<b>To fix:</b> reduce the {method_name} "
+                    f"charge by at least "
+                    f"{format_dollars(overshoot)}, then add a "
+                    f"different method (Cash, Food Bucks, Food RX, "
+                    f"etc.) bound to the ineligible vendor for "
+                    f"the residual amount."
+                )
+                logger.warning(
+                    "Non-denom method capacity exceeded "
+                    "(eligibility-bounded): method=%s amount=%d "
+                    "eligible_capacity=%d overshoot=%d "
+                    "ineligible_vendors=%s",
+                    method_name, ma, eligible_capacity, overshoot,
+                    sorted(ineligible_vendor_names),
+                )
+                self.confirm_btn.setEnabled(True)
+                return
+
         # ── Layer 2C: per-transaction reconciliation guard (v1.9.9) ─────
         # Sum of method_amounts that will be saved against each
         # transaction must equal that transaction's receipt_total
@@ -3029,12 +3511,34 @@ class PaymentScreen(QWidget):
         # Mirrors the save-path: single-txn vendors take the whole
         # method_amount; multi-txn vendors split proportionally to
         # per-transaction remaining balance.
+        #
+        # v2.0.7 fix (user-reported 2026-05-06, single-vendor multi-
+        # receipt): single-vendor orders intentionally leave
+        # ``bound_vendor_id`` empty on denom rows because the binding
+        # is implicit in the order context — only the one vendor on
+        # the order can take the payment.  Pre-fix the
+        # ``bound_vid is None`` branch fell back to "first
+        # transaction only" which dumped the entire method_amount
+        # against the first receipt — Layer 2C then flagged it as
+        # over-allocation (e.g. "$52.18 applied to a $1.45 receipt"
+        # on an order with three receipts at the same vendor totaling
+        # $52.18).  Fix: when ``bound_vid`` is None and the order
+        # has exactly one vendor, treat target_ids as ALL of that
+        # vendor's transactions so the proportional distribution
+        # below runs correctly.
+        single_order_vendor_id = (
+            next(iter(vendor_to_txn_ids.keys()))
+            if len(vendor_to_txn_ids) == 1 else None)
         for item in items:
             denom = item.get('denomination')
             if not (denom and denom > 0):
                 continue
             bound_vid = item.get('bound_vendor_id')
-            target_ids = vendor_to_txn_ids.get(bound_vid) if bound_vid is not None else None
+            if bound_vid is None and single_order_vendor_id is not None:
+                bound_vid = single_order_vendor_id
+            target_ids = (
+                vendor_to_txn_ids.get(bound_vid)
+                if bound_vid is not None else None)
             if not target_ids:
                 # Defensive default — eligibility/Layer-2 guards
                 # should have blocked unbound denom on multi-vendor
@@ -3073,23 +3577,47 @@ class PaymentScreen(QWidget):
                     per_txn_alloc[tid] += share
         # Phase 2: distribute non-denom proportionally to remaining,
         # matching the save algorithm's behavior.
+        # v2.0.7 fix: filter target transactions by per-vendor
+        # method eligibility — same change applied to the save
+        # algorithm so simulation and save stay in lock-step.
+        from fam.models.payment_method import (
+            get_vendor_payment_method_ids as _gve_pm_ids)
+        _l2c_eligibility_cache: dict[int, set] = {}
+        def _l2c_eligible(vendor_id, method_id):
+            if vendor_id is None:
+                return True
+            if vendor_id not in _l2c_eligibility_cache:
+                _l2c_eligibility_cache[vendor_id] = (
+                    _gve_pm_ids(vendor_id))
+            eligible = _l2c_eligibility_cache[vendor_id]
+            if not eligible:
+                return True  # legacy/permissive
+            return method_id in eligible
+
         for item in items:
             denom = item.get('denomination')
             if denom and denom > 0:
                 continue
             ma_total = item['method_amount']
+            method_id = item.get('payment_method_id')
             per_txn_remaining = []
             total_remaining = 0
-            for t in self._order_transactions:
+            eligible_idxs = []
+            for t_idx, t in enumerate(self._order_transactions):
+                if not _l2c_eligible(t.get('vendor_id'), method_id):
+                    per_txn_remaining.append(0)
+                    continue
                 left = max(0, t['receipt_total'] - per_txn_alloc[t['id']])
                 per_txn_remaining.append(left)
                 total_remaining += left
-            if total_remaining <= 0:
+                eligible_idxs.append(t_idx)
+            if total_remaining <= 0 or not eligible_idxs:
                 continue
             running = 0
-            last_idx = len(self._order_transactions) - 1
-            for t_idx, t in enumerate(self._order_transactions):
-                if t_idx == last_idx:
+            last_eligible = eligible_idxs[-1]
+            for t_idx in eligible_idxs:
+                t = self._order_transactions[t_idx]
+                if t_idx == last_eligible:
                     share = ma_total - running
                 else:
                     weight = (per_txn_remaining[t_idx] / total_remaining
@@ -3354,6 +3882,24 @@ class PaymentScreen(QWidget):
             vid = t.get('vendor_id')
             if vid is not None:
                 vendor_to_txn_idxs.setdefault(vid, []).append(t_idx)
+        # v2.0.7 fix (user-reported 2026-05-06): single-vendor
+        # orders intentionally leave ``bound_vendor_id`` empty on
+        # denom rows because the binding is implicit (only one
+        # vendor on the order can take the payment).  Pre-fix the
+        # ``bound_vid is None`` branch fell back to ``target_idxs
+        # = [0]`` which dumped the entire method_amount onto the
+        # FIRST transaction.  When the volunteer later voided the
+        # first transaction (or any other but the one holding the
+        # line items), the still-Confirmed transaction had ZERO
+        # payment_line_items — Vendor Reimbursement showed $0 in
+        # every method column even though the customer paid in
+        # full.  Fix: when bound_vid is None and the order has
+        # exactly one vendor, treat the implicit binding as that
+        # vendor's full transaction list so the proportional
+        # split below distributes line items across all receipts.
+        single_order_vendor_id = (
+            next(iter(vendor_to_txn_idxs.keys()))
+            if len(vendor_to_txn_idxs) == 1 else None)
 
         # Track per-transaction allocated method_amount as denominated
         # rows commit so the non-denom phase knows what's already
@@ -3361,7 +3907,8 @@ class PaymentScreen(QWidget):
         txn_method_alloc = [0] * num_txns
 
         def _line_item_for(item: dict, method_amount: int,
-                            match_amount: int) -> dict:
+                            match_amount: int,
+                            customer_forfeit_cents: int = 0) -> dict:
             return {
                 'payment_method_id': item['payment_method_id'],
                 'method_name_snapshot': item['method_name_snapshot'],
@@ -3374,6 +3921,13 @@ class PaymentScreen(QWidget):
                 # (whose customer_charged is fixed by physical units)
                 # from non-denom rows (which absorb cap deficit).
                 'denomination': item.get('denomination'),
+                # v2.0.7 (schema v36): persist Phase B customer-side
+                # forfeit so reports can surface it as a distinct
+                # column.  Default 0 (no forfeit) — applies only to
+                # denom rows that overshot their bound vendor's
+                # remaining receipt capacity beyond what FAM match
+                # could absorb.
+                'customer_forfeit_cents': customer_forfeit_cents,
             }
 
         # ── Phase 1: Denominated rows → bound vendor's transaction(s) ──
@@ -3392,13 +3946,21 @@ class PaymentScreen(QWidget):
             if not is_denom:
                 continue
             bound_vid = item.get('bound_vendor_id')
+            # v2.0.7 fix: implicit single-vendor binding.  See the
+            # ``single_order_vendor_id`` comment above for full
+            # context — pre-fix this dumped everything onto txn 0
+            # for multi-receipt orders, and voiding any other txn
+            # exposed the misallocation as $0 method-column values
+            # in Vendor Reimbursement.
+            if bound_vid is None and single_order_vendor_id is not None:
+                bound_vid = single_order_vendor_id
             target_idxs = vendor_to_txn_idxs.get(bound_vid) if bound_vid is not None else None
             if not target_idxs:
-                # Single-transaction order, single_vendor_mode dialog,
-                # or unbound row in a multi-vendor order.  In the first
-                # two cases the binding is implicit on the only txn.
-                # In the third, eligibility/Layer-2 guards should have
-                # blocked confirmation; default to txn 0 defensively.
+                # Single-transaction order or unbound row in a multi-
+                # vendor order.  In the former case the binding is
+                # implicit on the only txn.  In the latter,
+                # eligibility / Layer-2 guards should have blocked
+                # confirmation; default to txn 0 defensively.
                 target_idxs = [0]
             mat_pct = item['match_percent_snapshot']
             ma = item['method_amount']
@@ -3414,13 +3976,17 @@ class PaymentScreen(QWidget):
             if total_match is None or total_match < 0:
                 total_match = round(ma * (mat_pct / (100.0 + mat_pct)))
 
+            # v2.0.7 (schema v36): forfeit follows the same proportional
+            # split as method+match across multi-txn vendors, since the
+            # forfeit accounting is a per-token-row attribute.
+            total_forfeit = int(item.get('customer_forfeit_cents') or 0)
             if len(target_idxs) == 1:
                 # Single-transaction vendor — fast path, identical to
                 # the legacy behaviour.  Avoids any rounding drift
                 # the multi-txn split could introduce.
                 idx = target_idxs[0]
                 all_txn_items[idx].append(
-                    _line_item_for(item, ma, total_match))
+                    _line_item_for(item, ma, total_match, total_forfeit))
                 txn_method_alloc[idx] += ma
             else:
                 # Multi-receipt vendor: split ma + match across the
@@ -3443,27 +4009,32 @@ class PaymentScreen(QWidget):
                 if total_remaining <= 0:
                     idx = target_idxs[-1]
                     all_txn_items[idx].append(
-                        _line_item_for(item, ma, total_match))
+                        _line_item_for(item, ma, total_match, total_forfeit))
                     txn_method_alloc[idx] += ma
                     continue
 
                 running_method = 0
                 running_match = 0
+                running_forfeit = 0
                 last_pos = len(target_idxs) - 1
                 for k, ti in enumerate(target_idxs):
                     if k == last_pos:
                         share_method = ma - running_method
                         share_match = total_match - running_match
+                        share_forfeit = total_forfeit - running_forfeit
                     else:
                         weight = per_txn_remaining[k] / total_remaining
                         share_method = round(ma * weight)
                         share_match = round(total_match * weight)
+                        share_forfeit = round(total_forfeit * weight)
                         running_method += share_method
                         running_match += share_match
+                        running_forfeit += share_forfeit
                     if share_method == 0:
                         continue
                     all_txn_items[ti].append(
-                        _line_item_for(item, share_method, share_match))
+                        _line_item_for(item, share_method, share_match,
+                                        share_forfeit))
                     txn_method_alloc[ti] += share_method
 
         # ── Phase 2: Non-denominated rows → proportional split by
@@ -3475,34 +4046,73 @@ class PaymentScreen(QWidget):
 
         # For each non-denom row, distribute its method_amount across
         # the transactions weighted by what's left to allocate on each.
+        # v2.0.7 fix (user-reported 2026-05-06): only distribute to
+        # transactions whose vendor accepts this method.  Pre-fix the
+        # algorithm proportionally split SNAP across ALL order
+        # transactions, even those whose vendor was SNAP-ineligible
+        # (the breakdown grid correctly showed ❌ but the engine
+        # ignored it).  Result: a SNAP overshoot of $14.41 against
+        # SNAP-eligible-vendor receipts of $286.60 silently leaked
+        # ~$11 onto a Jill's-gourmet-dips receipt that doesn't accept
+        # SNAP, producing the "Over-allocation on Jill's receipt"
+        # error AND letting the misallocation through on draft-resume
+        # confirm where the per-receipt sum still passed Layer 2C
+        # despite the eligibility violation.
+        from fam.models.payment_method import get_vendor_payment_method_ids
+
+        # Cache per-vendor eligibility lookups across this loop
+        eligibility_cache: dict[int, set] = {}
+        def _eligible_for(vendor_id: int, method_id: int) -> bool:
+            """True if vendor accepts method, OR vendor has no
+            ``vendor_payment_methods`` config (legacy/permissive)."""
+            if vendor_id is None:
+                return True
+            if vendor_id not in eligibility_cache:
+                eligibility_cache[vendor_id] = (
+                    get_vendor_payment_method_ids(vendor_id))
+            eligible = eligibility_cache[vendor_id]
+            # Empty set = legacy / unconfigured → permissive
+            if not eligible:
+                return True
+            return method_id in eligible
+
         for _row_idx, item in non_denom_items:
             ma_total = item['method_amount']
             mat_pct = item['match_percent_snapshot']
+            method_id = item['payment_method_id']
 
             # Per-txn remaining = receipt_total − already-claimed.
+            # Eligibility filter: skip transactions whose vendor
+            # doesn't accept this method.
             per_txn_remaining = []
             total_remaining = 0
+            eligible_idxs = []
             for t_idx, t in enumerate(self._order_transactions):
+                if not _eligible_for(t.get('vendor_id'), method_id):
+                    per_txn_remaining.append(0)
+                    continue
                 left = max(0, t['receipt_total'] - txn_method_alloc[t_idx])
                 per_txn_remaining.append(left)
                 total_remaining += left
+                eligible_idxs.append(t_idx)
 
-            if total_remaining <= 0:
-                # Every transaction already fully claimed by denominated
-                # rows — nothing to distribute.  Per-vendor reconciliation
-                # guard (Layer 3 in _confirm_payment) catches the
-                # over-allocation case and surfaces an error before save.
-                # For now: drop this row's allocation entirely.
+            if total_remaining <= 0 or not eligible_idxs:
+                # No eligible transactions or all already filled.
+                # Drop this row's allocation; the upstream pre-confirm
+                # validation surfaces this as a clear error to the
+                # volunteer ("SNAP exceeds SNAP-eligible coverage").
                 continue
 
-            # Remainder-based distribution — last txn gets the exact
-            # leftover so SUM(method_amount) == ma_total to the cent.
+            # Remainder-based distribution across ELIGIBLE-only
+            # transactions.  Last eligible txn gets the exact
+            # leftover so SUM(method_amount on eligible txns) ==
+            # ma_total to the cent.
             running_method = 0
             running_match = 0
             total_match = round(ma_total * (mat_pct / (100.0 + mat_pct)))
-            last_idx = num_txns - 1
-            for t_idx in range(num_txns):
-                if t_idx == last_idx:
+            last_eligible = eligible_idxs[-1]
+            for t_idx in eligible_idxs:
+                if t_idx == last_eligible:
                     share_method = ma_total - running_method
                     share_match = total_match - running_match
                 else:

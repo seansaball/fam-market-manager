@@ -95,12 +95,46 @@ def _walk_fam_modules():
 
 
 class TestNoUnboundLocalShadows:
-    """Forbid the exact bug class: a function-local import whose
-    name is ALSO bound at module level AND is referenced earlier in
-    the function body.  That combination is a guaranteed
-    UnboundLocalError when the function runs."""
+    """Forbid the bug class: a function-local import whose name is
+    ALSO bound at module level.  Python's scoping rule promotes any
+    name bound anywhere in a function body (including via local
+    import) to a function-local for the WHOLE body, shadowing the
+    module-level binding.  That combination is at minimum dead code
+    (the module-level import already provides the name) and at worst
+    a guaranteed ``UnboundLocalError`` when ANY code path references
+    the name without first executing the local import.
+
+    History — three near-misses in three releases:
+
+      * **v2.0.1**  ``_adjust_transaction`` added
+        ``from fam.models.transaction import get_transaction_by_id``
+        BELOW the function's first reference to that name.  The
+        first-reference check below caught this fix-forward.
+
+      * **v2.0.7-intermediate**  ``_adjust_transaction`` added
+        ``from fam.models.audit import log_action`` INSIDE a
+        conditional branch (denom-method safety gate).  The first
+        reference was the call right after the import (also inside
+        the conditional, so first_ref > import_line and the v2.0.1
+        check passed).  When the gate didn't fire (Cash-only
+        adjustment), Python still treated ``log_action`` as a local
+        because of the conditional binding, so later references at
+        the save path raised ``UnboundLocalError: cannot access
+        local variable 'log_action'`` and the user saw "Adjustment
+        failed: ..." with no audit trail of what they tried to do.
+
+      * **Generalized rule** (this test):  forbid the import
+        outright.  The module-level binding is always sufficient;
+        function-local re-imports of the same name buy nothing and
+        risk this exact scoping footgun via any future conditional
+        edit.
+    """
 
     def test_no_function_local_imports_shadow_earlier_references(self):
+        """v2.0.1 historical pin: caught when the local import was
+        BELOW the first reference.  Kept for clarity — the broader
+        check below subsumes it but the message here is more
+        targeted for the specific 'first_ref < import_line' shape."""
         bugs = []
         for path, tree in _walk_fam_modules():
             module_names = _collect_module_level_names(tree)
@@ -128,6 +162,66 @@ class TestNoUnboundLocalShadows:
             "UnboundLocalError when the function runs.  Either remove "
             "the local import (the module-level one already provides "
             "the name) or move it above every reference.\n\n"
+            + "\n\n".join(bugs)
+        )
+
+    def test_no_function_local_imports_shadow_module_level_at_all(self):
+        """v2.0.7 generalized pin: forbid ANY function-local import
+        whose name is also bound at module level — regardless of
+        whether the local import is above or below the first
+        reference, regardless of whether it's in a conditional
+        branch.
+
+        Why this is the right rule:
+
+          * If the module-level import provides the name, the local
+            import is dead code at best.
+          * If the local import is in a conditional branch, the name
+            is function-local for the WHOLE body but bound only when
+            that branch executes.  Any reference outside the branch
+            UnboundLocalErrors when the branch is skipped.  The
+            v2.0.7 ``log_action`` regression hit exactly this — the
+            denom-method gate's import inside ``if denom_methods:``
+            shadowed the module-level ``log_action`` for every
+            non-denom adjustment.
+          * If the local import is unconditional, it's still dead
+            code shadowing the module-level binding — wasted work
+            and a future conditional edit re-arms the bug.
+
+        The fix is always the same: delete the local import.  If a
+        contributor genuinely needs a circular-import-avoidance
+        local import, the cleanest path is to import under a
+        DIFFERENT name (``from x import y as _y_local``) so the
+        rule below ignores it because ``_y_local`` isn't bound at
+        module scope.
+        """
+        bugs = []
+        for path, tree in _walk_fam_modules():
+            module_names = _collect_module_level_names(tree)
+            for node in ast.walk(tree):
+                if not isinstance(
+                        node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                local_imps = _collect_function_local_imports(node)
+                for name, import_line in local_imps.items():
+                    if name not in module_names:
+                        continue
+                    first_ref = _first_reference_lineno(node, name)
+                    bugs.append(
+                        f"  {path}\n"
+                        f"    fn '{node.name}' (def L{node.lineno})\n"
+                        f"    L{import_line}: function-local import of "
+                        f"'{name}' shadows module-level binding "
+                        f"(first reference: "
+                        f"{'L' + str(first_ref) if first_ref else 'none'})"
+                    )
+        assert not bugs, (
+            "Function-local imports of names that are ALSO bound at "
+            "module level are forbidden — see this test's docstring "
+            "for the rationale and the fix.  In short: delete the "
+            "local import (the module-level one already provides the "
+            "name), or import under a different alias if you genuinely "
+            "need a function-scoped binding.\n\n"
             + "\n\n".join(bugs)
         )
 

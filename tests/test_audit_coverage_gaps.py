@@ -237,8 +237,17 @@ class TestSettingsCRUDAreLogged:
             assign_payment_method_to_vendor,
             unassign_payment_method_from_vendor,
         )
-        assign_payment_method_to_vendor(1, 1, changed_by='Tester')
-        unassign_payment_method_from_vendor(1, 1, changed_by='Tester')
+        # v2.0.7: SNAP and Cash are universal — refuse to unassign,
+        # so the existing assert-UNASSIGN-logged check needs a
+        # non-universal method.  Add Food Bucks (id=2, denom $2)
+        # which is configurable per-vendor.
+        fresh_db.execute(
+            "INSERT INTO payment_methods (id, name, match_percent, "
+            " sort_order, is_active, denomination) VALUES "
+            "(2, 'JH Food Bucks', 100.0, 2, 1, 200)")
+        fresh_db.commit()
+        assign_payment_method_to_vendor(1, 2, changed_by='Tester')
+        unassign_payment_method_from_vendor(1, 2, changed_by='Tester')
         actions = {r['action'] for r in fresh_db.execute(
             "SELECT action FROM audit_log "
             " WHERE table_name='vendor_payment_methods'").fetchall()}

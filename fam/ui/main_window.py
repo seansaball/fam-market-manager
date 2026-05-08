@@ -400,6 +400,34 @@ class MainWindow(QMainWindow):
         self._sync_deferred.setInterval(60_000)  # fire when cooldown would expire
         self._sync_deferred.timeout.connect(self._trigger_sync)
 
+        # v2.0.7: Sync-watchdog timer.  When a sync is triggered we
+        # set the button to "Syncing..." (disabled) and start the
+        # background QThread/SyncWorker.  In the happy path the
+        # worker emits ``finished`` or ``error`` and the slot
+        # restores the button.  But there are real failure modes
+        # where neither signal fires:
+        #
+        #   * an exception between the button update and
+        #     ``thread.start()`` (UnboundLocalError, ImportError, etc.)
+        #     leaves the button "Syncing..." with no worker running;
+        #   * a Qt cross-thread signal-delivery hiccup or a worker
+        #     run() that exits via a code path we didn't anticipate;
+        #   * the user-reported v2.0.7 incident — sync indicator says
+        #     "Last sync OK" with a stale timestamp while the button
+        #     is still pinned in the disabled "Syncing..." state with
+        #     no actual sync running, and no way for the volunteer
+        #     to recover (the disabled button is unclickable).
+        #
+        # The watchdog fires 5 minutes after _trigger_sync starts.
+        # On fire it force-resets the button + indicator + nulls the
+        # thread refs so the user can re-click Sync to Cloud.  The
+        # happy path stops the watchdog in the finished/error
+        # handlers, so it only ever fires on stuck states.
+        self._sync_watchdog = QTimer(self)
+        self._sync_watchdog.setSingleShot(True)
+        self._sync_watchdog.setInterval(5 * 60 * 1000)  # 5 minutes
+        self._sync_watchdog.timeout.connect(self._on_sync_watchdog_fired)
+
         # Auto-update check thread tracking
         self._update_check_thread = None
         self._update_check_worker = None
@@ -800,12 +828,30 @@ class MainWindow(QMainWindow):
             self._sync_btn.setEnabled(False)
             self._sync_btn.setText("Syncing...")
             self._set_sync_indicator("syncing")
+            # v2.0.7: arm the watchdog BEFORE thread.start() so that
+            # any exception in start() still lands in the except
+            # handler below where we'll cancel the watchdog and
+            # restore the button (the button-was-set-but-worker-
+            # never-ran failure mode).
+            self._sync_watchdog.start()
             self._sync_thread.start()
 
         except ImportError:
             pass  # gspread not installed
         except Exception:
             logger.exception("Failed to trigger sync")
+            # v2.0.7: if we already flipped the button to "Syncing..."
+            # before the exception, restore it here — otherwise the
+            # button stays disabled forever with no sync running.
+            # Idempotent: setting the button to its already-current
+            # text/enabled is a no-op.
+            self._sync_watchdog.stop()
+            self._sync_btn.setEnabled(True)
+            self._sync_btn.setText("☁️  Sync to Cloud")
+            # Don't change the indicator — leave it on whatever the
+            # last successful sync set it to.  We only know that
+            # THIS attempt didn't run, not that the previous sync
+            # state is invalid.
 
     def _on_sync_progress(self, message):
         """Show sync progress in the status indicator."""
@@ -814,6 +860,8 @@ class MainWindow(QMainWindow):
 
     def _on_sync_finished(self, results):
         """Handle sync completion."""
+        # v2.0.7: cancel the watchdog — sync completed normally.
+        self._sync_watchdog.stop()
         self._sync_btn.setEnabled(True)
         self._sync_btn.setText("☁️  Sync to Cloud")
         failed = [name for name, r in results.items() if not r.success]
@@ -861,6 +909,9 @@ class MainWindow(QMainWindow):
 
     def _on_sync_error(self, error_msg):
         """Handle sync failure."""
+        # v2.0.7: cancel the watchdog — sync ended (with an error,
+        # but it ENDED).  The error path also restores the button.
+        self._sync_watchdog.stop()
         self._sync_btn.setEnabled(True)
         self._sync_btn.setText("☁️  Sync to Cloud")
         self._set_sync_indicator("error", "Sync failed")
@@ -881,6 +932,69 @@ class MainWindow(QMainWindow):
         if self._sync_thread:
             self._sync_thread.deleteLater()
             self._sync_thread = None
+
+    def _on_sync_watchdog_fired(self):
+        """v2.0.7: force-recover from a stuck "Syncing..." button.
+
+        Triggered 5 minutes after ``_trigger_sync`` started a sync
+        IF neither ``_on_sync_finished`` nor ``_on_sync_error``
+        cancelled the watchdog by then.  In normal operation a sync
+        completes in seconds (single market day) to a couple of
+        minutes (full sweep on a long-offline laptop with many
+        photo uploads), so 5 min is a safe upper bound that rarely
+        false-fires.
+
+        The user-reported v2.0.7 incident: the indicator showed
+        "Last sync OK" with a stale timestamp (10:35) but the
+        button was pinned in disabled "Syncing..." state with no
+        actual sync in flight, and there was no recovery path for
+        the volunteer (the disabled button can't be clicked).  The
+        watchdog ensures the button always returns to a clickable
+        state within 5 minutes regardless of which corner case the
+        sync state machine got stuck in.
+        """
+        # If the thread genuinely is still running, don't kill it —
+        # extend the watchdog one more round and let it finish.
+        # This protects against false fires on a legitimately slow
+        # sync (large historical photo upload, slow Sheets API
+        # response).  Only force-reset when the thread is gone OR
+        # not running.
+        thread_alive = (
+            self._sync_thread is not None
+            and self._sync_thread.isRunning()
+        )
+        if thread_alive:
+            logger.warning(
+                "Sync watchdog: thread still running after 5 min — "
+                "extending watchdog one more cycle")
+            self._sync_watchdog.start()  # restart for another 5 min
+            return
+
+        logger.warning(
+            "Sync watchdog: 'Syncing...' button stuck with no live "
+            "thread — force-resetting UI to recoverable state")
+        self._sync_btn.setEnabled(True)
+        self._sync_btn.setText("☁️  Sync to Cloud")
+        # Indicator: warn rather than error.  We don't know whether
+        # the sync actually wrote anything to Sheets/Drive before
+        # going silent — calling it "Sync failed" would be a
+        # presumption.  "Sync stuck — recovered" is the honest
+        # description and prompts the volunteer to click again.
+        self._set_sync_indicator(
+            "warning", "Sync recovered — please retry")
+        self._sync_indicator.setToolTip(
+            "The previous sync attempt did not return a "
+            "completion signal within 5 minutes.  Click Sync to "
+            "Cloud to retry.  (See Help → System Status → Copy "
+            "Diagnostic Info if this keeps happening.)")
+        # Defensive cleanup: if a zombie thread reference is still
+        # set, null it so the next click can proceed past the
+        # "isRunning" check.  Don't deleteLater() — the thread
+        # might still be running underneath, in which case the
+        # main window's closeEvent waits for it (v2.0.3 fix).
+        if self._sync_thread and not self._sync_thread.isRunning():
+            self._sync_thread = None
+            self._sync_worker = None
 
     # ------------------------------------------------------------------
     # Auto-update check on launch
@@ -965,7 +1079,6 @@ class MainWindow(QMainWindow):
                     self._update_check_thread.isRunning()):
                 return
 
-            from fam import __version__
             from fam.update.worker import UpdateCheckWorker
 
             self._update_check_thread = QThread()
@@ -1007,7 +1120,6 @@ class MainWindow(QMainWindow):
         try:
             from fam.utils.app_settings import get_setting
             from fam.update.checker import compare_versions
-            from fam import __version__
 
             cached_ver = get_setting('update_last_version')
             if not cached_ver:
@@ -1083,7 +1195,6 @@ class MainWindow(QMainWindow):
         whether the check was fresh or cached.
         """
         from fam.utils.app_settings import set_setting
-        from fam import __version__
         from PySide6.QtWidgets import QMessageBox
 
         reply = QMessageBox.information(
@@ -1150,9 +1261,14 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         """Show the About dialog."""
+        # Local import covers names NOT already at module level
+        # (ACCENT_GREEN, HARVEST_GOLD, TEXT_COLOR, BACKGROUND).
+        # PRIMARY_GREEN, WHITE, LIGHT_GRAY come from the module-level
+        # import (line 18) — re-importing them locally would shadow
+        # those module-level bindings and risk UnboundLocalError on
+        # any future conditional edit.
         from fam.ui.styles import (
-            PRIMARY_GREEN, ACCENT_GREEN, HARVEST_GOLD,
-            WHITE, TEXT_COLOR, BACKGROUND, LIGHT_GRAY
+            ACCENT_GREEN, HARVEST_GOLD, TEXT_COLOR, BACKGROUND,
         )
 
         dlg = QDialog(self)

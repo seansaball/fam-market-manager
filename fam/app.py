@@ -252,7 +252,6 @@ def run():
         # are left alone — only ALL-empty markets are treated as
         # legacy-uninitialised.
         try:
-            from fam.database.connection import get_connection
             _conn = get_connection()
             _empty_vendor_markets = _conn.execute(
                 "SELECT m.id FROM markets m "

@@ -5,7 +5,7 @@
 > needs to understand, maintain, or extend the project **without** access to
 > previous conversation history. Keep this file up to date with every commit.
 >
-> **Last updated:** 2026-05-06 — v2.0.6
+> **Last updated:** 2026-05-07 — v2.0.8 release in flight (first v2.x release reaching the field; consolidates v2.0.0 / v2.0.1 / v2.0.6 / v2.0.7 / v2.0.8 development cycles since v1.9.8/v1.9.9)
 
 ---
 
@@ -13,17 +13,74 @@
 
 If you are a fresh AI session opening this repo, read this first:
 
-- `fam/__init__.py` reports `__version__ = "2.0.6"` — production season
-  release tagged and published 2026-05-06 (commit `4050f51`,
+- `fam/__init__.py` reports `__version__ = "2.0.8"`.  v2.0.8
+  is the first v2.x release reaching the field — no public
+  download has happened on any v2.0.x version yet.  It rolls
+  up the v2.0.0 / v2.0.1 / v2.0.6 / v2.0.7 / v2.0.8
+  development cycles since v1.9.8 / v1.9.9 into a single
+  shipping version.  `RELEASE_NOTES_v2.0.8.md` and
+  `FAM_Manager_v2.0.8_Release_Notes.html` are the sole
+  release-notes-of-record and cover everything since v1.9.9
+  framed as one consolidated release.  The intermediate
+  v2.0.6 / v2.0.7 release-note files have been removed from
+  the repo to avoid drift and confusion — v2.0.8 is the
+  comprehensive log.
+- Schema bumped v34 → **v37** through three forward migrations:
+  - v34 → v35: `_migrate_v34_to_v35` backfills universal SNAP/Cash
+    `vendor_payment_methods` rows for every vendor.
+  - v35 → v36: `_migrate_v35_to_v36` adds
+    `customer_forfeit_cents INTEGER NOT NULL DEFAULT 0` to
+    `payment_line_items` (Phase B token-value forfeit).
+  - v36 → v37: `_migrate_v36_to_v37` adds
+    `user_capped INTEGER NOT NULL DEFAULT 0` to
+    `payment_line_items` (per-row Auto-Distribute toggle persistence).
+- Headline policy changes (v2.0.7 hotfix): **SNAP and Cash are
+  universally bound to every vendor and cannot be unassigned**;
+  denomination preservation through adjustments (engine snap-back
+  + save-layer guard); Adjustment safety-gate for denominated
+  transactions; single-vendor multi-receipt allocation; vendor
+  reimbursement after voids; photo dedup cache cleanup on void /
+  FMNP delete / FMNP edit; cap-bound impossible-to-balance
+  recommendation (Layer 2A.1 enriches the mismatch dialog).
+- Headline policy changes (v2.0.8 follow-ups): **Customer Forfeit
+  (Phase B)** is a first-class concept &mdash; surfaced as a
+  summary card on Payment Screen + dedicated column in reports;
+  **denomination-integrity in reports** &mdash; per-method columns
+  show `customer_charged + customer_forfeit_cents` (denomination-
+  true), reconciliation `Σ(method-cols) + FAM Match - Customer
+  Forfeit + FMNP_External = Total Due`; **per-row ⚡ Auto-Distribute
+  toggle** with green/grey states + radio invariant (only one
+  Active overflow target at a time); `user_capped` flag persisted
+  to DB so Locked rows survive draft save/restore + adjustment
+  round-trips; **FMNP "All Market Days" filter** with inline hint
+  on the disabled Save button; Auto-Distribute cap-deficit Pass 2
+  fallback to unmatched non-denom auto rows; AdjustmentDialog
+  parity (`user_capped` propagated to the impact preview engine
+  call); status-filter centralization
+  (`fam.models.transaction.active_tx_status_clause()`); spinbox
+  empty-string crash fix; sync watchdog.
+
+  An earlier v2.0.7 attempt added a `_auto_rebalance_non_denom`
+  method that fought the engine's deterministic cap-aware Path B +
+  Pass 4 — it was REVERTED.  See the source pin in
+  `tests/test_cap_bound_split_recommendation.py::TestRevertedAutoRebalance`
+  for the why; do NOT re-introduce it.  The split-orders
+  recommendation (surfaced in the enriched Layer 2A dialog and a
+  new `ts-payment-screen-hard-block` troubleshooting flow) is the
+  durable user-facing resolution for the cap-bound case.
+
+- The v2.0.6 production season release was tagged and published
+  2026-05-06 (commit `4050f51`,
   https://github.com/seansaball/fam-market-manager/releases/tag/v2.0.6).
   Auto-update path verified end-to-end on a real v1.9.8 device.
-  Schema v34 (unchanged from v2.0.1).  Headline additions: per-vendor
-  payment-method eligibility, configurable rewards engine, redesigned
-  Payment Confirmation Dialog, multi-workstation cloud-sync invariant
+  Headline additions in v2.0.6: per-vendor payment-method
+  eligibility, configurable rewards engine, redesigned Payment
+  Confirmation Dialog, multi-workstation cloud-sync invariant
   systematically guarded, market-rename code-shift protection, photo
   dedup cache cleaned on void/delete/replace.  See
   `RELEASE_NOTES_v2.0.6.md` for the full release log.
-- Schema is at **v34**.  Migration chain since the last release:
+- Schema is at **v35** (after the v2.0.7 hotfix migration runs).
+  Migration chain since the last release:
   - v23 → v24: `vendor_payment_methods` junction (per-vendor eligibility)
   - v24 → v25: `payment_methods.is_system` column + Unallocated Funds seed
   - v25 → v27: defensive cleanup of abandoned v26 (no v26 migration)
@@ -40,6 +97,13 @@ If you are a fresh AI session opening this repo, read this first:
   - v33 → v34: dedupe pre-existing `schema_version` rows + add
     `CREATE UNIQUE INDEX idx_schema_version_unique ON schema_version
     (version)` so future Reset cycles can't accumulate duplicate rows
+  - v34 → v35 (v2.0.7): `_migrate_v34_to_v35` backfills SNAP and
+    Cash `vendor_payment_methods` rows for every vendor on first
+    launch.  Idempotent.  Pairs with the new
+    `is_universal_vendor_method(name)` helper in
+    `fam/models/payment_method.py` and a defensive guard in
+    `unassign_payment_method_from_vendor` that refuses to remove
+    the universal bindings (silent return + WARN log).
 - **Phase 6 engine consolidation (v1.9.10):** the canonical
   `fam.utils.calculations.resolve_payment_state(...)` is now the
   single source of truth for cap-aware + denomination-forfeit +
@@ -576,6 +640,7 @@ Legacy data (v1.5.1 and earlier) auto-migrated from exe directory on first launc
 
 | Version | Date       | Summary |
 |---------|------------|---------|
+| v2.0.7  | 2026-05-07 (in flight) | **Hotfix release covering post-v2.0.6 onsite findings.**  Schema v34 → **v35** (`_migrate_v34_to_v35` backfills universal SNAP/Cash bindings; idempotent).  **Headline policy: SNAP and Cash are now universally accepted at every vendor.**  `is_universal_vendor_method(name)` helper, `unassign_payment_method_from_vendor` refuses for SNAP/Cash with a WARN log, `VendorEligiblePaymentMethodsDialog` checkboxes for those two methods are checked + disabled + tooltipped.  Eliminates the silent-SNAP-onto-ineligible-vendor reproducer class.  **Critical fixes:** (1) **Denomination preservation through adjustments** — engine snap-back at the end of `resolve_payment_state` rounds denom rows' `customer_charged` to denomination multiples; save-layer guard in `save_payment_line_items` re-validates and snaps before write; closes the `$0.47 Food Bucks` regression class.  (2) **Adjustment safety gate for denominated transactions** — `AdminScreen._adjust_transaction` now opens a Void-Instead/Adjust-Anyway/Cancel dialog when the txn contains denom methods; `ADJUST_OVERRIDE` audit log entry records the override path; sibling-transaction warning when applicable.  (3) **Single-vendor multi-receipt allocation fix** — Layer 2C and `_distribute_and_save_payments` Phase 1 now treat single-vendor orders with multiple receipts as a unit (proportional distribution to per-receipt remaining capacity); honors the implicit binding when `bound_vendor_id` is None on a single-vendor order.  (4) **Vendor Reimbursement after voids** — aggregation correctly excludes voided lines so the surviving receipts on a partially-voided multi-receipt order roll up correctly.  (5) **Photo dedup cache invalidation** — `void_transaction` calls `cleanup_orphaned_hashes_for_transaction`; `delete_fmnp_entry` calls `cleanup_orphaned_hashes_for_fmnp`; `update_fmnp_entry` clears `photo_drive_url` when `photo_path` changes so re-uploads pick up a fresh Drive URL.  **Defensive hardening:** (a) **Cap-bound impossible-to-balance recommendation** — Layer 2A's "Payment row mismatch" guard now detects the cap-bound + denom + non-denom-overshoot pattern (`match_was_capped=True` + spinbox > engine `customer_charged` + `denomination > 0` row exists) and surfaces an enriched dialog naming the cap as the root cause, stating the exact gap to reduce, and **recommending splitting the customer's receipts into separate orders one method at a time** (the user's preferred resolution after an attempted `_auto_rebalance_non_denom` was reverted because it fought the engine's deterministic Path B + Pass 4).  Logged as "Cap-bound impossible-to-balance scenario".  Generic Layer 2A message preserved for non-cap-bound mismatches.  (b) **Layer 2B eligibility-blamed gate** — `overshoot > 1 AND ineligible_vendor_names` required before firing the "X cannot accept SNAP" message; with universal SNAP/Cash binding the over-allocation case falls through to Layer 2C's accurate per-receipt message.  (c) **Save-path per-vendor method eligibility filter** — Phase 2 of `_distribute_and_save_payments` now filters non-denom target transactions by `get_vendor_payment_method_ids(vendor_id)` before splitting customer charge; matches Layer 2C's simulation so save and validation stay in lock-step.  (d) **Denomination-aware Auto-Distribute** — seed-row pass respects per-vendor method eligibility for denominated methods at the moment it picks the bound vendor.  **In-app help additions:** new article `split-orders-when-stuck` and troubleshooting flow `ts-payment-screen-hard-block` document the split-into-separate-orders workaround as the durable resolution for cap-bound scenarios; existing `ts-cap-warning-wrong` and `ts-adjustment-blocked-by-mismatch` flows updated to cross-reference.  **Reverted (do NOT re-introduce):** `PaymentScreen._auto_rebalance_non_denom` — fought the engine deterministically; pinned absent in `tests/test_cap_bound_split_recommendation.py::TestRevertedAutoRebalance`.  Same revert removed the `denom_quantity_changed` Signal and the dedicated stepper hookup on `PaymentRow` (no consumer).  **3,504 tests passing** across 65+ files (was 3,387 in v2.0.6); 39 skipped, 1 xfailed.  New test files: `test_universal_vendor_method_bindings.py`, `test_adjustment_denom_safety_gate.py`, `test_save_layer_denom_guard.py`, `test_denom_preservation_in_adjustments.py`, `test_single_vendor_multi_receipt_layer2c.py`, `test_save_path_single_vendor_multi_receipt.py`, `test_non_denom_per_vendor_eligibility.py`, `test_non_denom_capacity_check.py`, `test_layer_2b_gate_no_ineligible.py`, `test_auto_distribute_per_vendor_eligibility.py`, `test_seed_default_food_rx_and_rewards.py`, `test_cap_bound_split_recommendation.py`.  Updated `tests/test_audit_coverage_gaps.py::test_vendor_method_eligibility_logged` to use Food Bucks (id=2) instead of SNAP since SNAP is now universal and unassign is refused.  See `RELEASE_NOTES_v2.0.7.md`. |
 | v2.0.5  | 2026-05-05 | **User-reported fix: Error Log Sheets traceback.**  In the synced Google Sheet, CRITICAL entries showed only the first line (`Unhandled exception:`) — the multi-line traceback was either in a separate `Traceback` column the coordinator didn't notice or missing entirely.  Local Reports → Error Log detail panel had always shown the full content (Time / Level / Area / Module / Message / Traceback) by stitching `e['message']` + `e['traceback']` together; the cloud Sheet didn't.  Fix: `_collect_error_log` (`fam/sync/data_collector.py:820-870`) now embeds `f"{first_line}\n\nTraceback:\n{tb}"` into the `Message` column when a traceback is present, so the Sheet matches the local detail-panel format.  The separate `Traceback` column is preserved for backward compatibility with existing dashboards / filters.  `SyncManager.SHEET_KEYS['Error Log']` changed from `[market_code, device_id, Timestamp, Module, Message]` to `[market_code, device_id, Timestamp, Module, Level]` — Message is now multi-KB so including it in the composite key was wasteful and brittle against newline normalisation.  Two errors landing in the same second from the same module at the same level are the same event by every operational definition; using Timestamp+Module+Level is sufficient dedup.  Existing Sheets with the old key get their rows refreshed on the next sync via the `WHOLE_DATASET_TABS` `delete_stale=True` semantics.  4 new regression tests in `test_error_log_full_traceback_in_message.py`: CRITICAL with traceback embeds full content, WARNING without traceback unchanged, end-to-end Sheets cell value contains all required fragments, composite key uses Level not Message.  Updated `test_sync.py::test_error_log_key_columns` to match the new key.  3,273 tests passing.  **Note on the user-reported UnboundLocalError**: the v2.0.1 fix in `_adjust_transaction` is still in place (regression test `test_adjust_transaction_no_local_shadow.py` passes).  Users hitting this error are running a build that pre-dates v2.0.1 — rebuild the .exe from current source to resolve. |
 | v2.0.4  | 2026-05-05 | **Ship-and-forget release.**  Bundles v2.0.3 security fixes plus year-2 / multi-market scale hardening.  This is the last planned release; remaining items are documented as known limitations rather than fixed.  **HIGH-1 gsheets payload chunking** — `update_cells` and `append_rows` now chunk to 5000 cells / 1000 rows per API call.  Pre-fix, after a long offline period at year-2 scale (50K+ dirty cells across the transactions tab is realistic), a manual full sync would exceed the Sheets ~10K-cell-per-call limit and the (correctly) refusing 4xx-no-retry logic would leave "Sync failed" with no path forward.  **HIGH-2 per-market backup retention** — replaces global "newest 20 wins" with `BACKUP_RETENTION_COUNT_PER_MARKET=20` bucketed by market_code.  Multi-market deployments running Market A weekly + Market B monthly no longer evict Market B's backups within ~10 weeks.  Buckets sort by the embedded timestamp segment via a regex matcher (`_BACKUP_FILENAME_RE`) that handles both legacy second-resolution and new microsecond filenames.  **HIGH-5 microsecond backup timestamps** — `eastern_now().strftime("%Y%m%d_%H%M%S") + "_{microsecond:06d}"`.  Two backups landing in the same wall-clock second no longer silently overwrite each other.  **HIGH-6 SQLite PRAGMAs** — added `PRAGMA synchronous=NORMAL` (the standard WAL-mode recommendation; durable across crash, ~4× faster on Windows than FULL) and `PRAGMA wal_autocheckpoint=500` (cap the WAL at ~2MB so restart recovery is fast and `Connection.backup` snapshots a small WAL tail).  **HIGH-SEC-2 mask Sheet/Drive IDs in diagnostic** — pre-fix the Copy Diagnostic Info clipboard exposed full `sync_spreadsheet_id` and `drive_folder_id` verbatim; pasted into a chat run by an attacker, those enabled targeted social-engineering.  Now masked via `_mask_id` (4-char prefix + suffix, ellipsis middle).  **MED-SEC-1 explicit https:// requirement** — `_is_allowed_repo_url` now rejects `http://` URLs even when owner/repo would parse to the allow-listed pair.  Defense-in-depth against any future code path reusing the saved URL for a fetch.  **MED-SEC-2 / MED-SEC-5 html.escape diagnostic** — `help_screen._refresh_status` switched from `.replace('<','&lt;').replace('>','&gt;')` (only `<>`) to `html.escape(text, quote=True)` (escapes `& < > " '`).  Defense against vendor-name-with-HTML-payload landing in the diagnostic clipboard and re-rendering in a downstream chat client.  **MED-SEC-3 startup temp-dir cleanup** — `fam/app.py:run` now `shutil.rmtree`s `_update_temp/` and `_update_download/` from `data_dir` on startup.  Pre-fix, an interrupted update left these dirs around indefinitely as wasted disk and (combined with the v2.0.3 backup hash-pin defense) a reduced-but-nonzero attacker prep window.  **TEST coverage** — new IDN/homoglyph (Cyrillic 'е' in `seansaball`), path-traversal-in-URL, userinfo-in-URL, and explicit `http://` rejection tests in `test_update_repo_allowlist.py`.  Updated `test_market_code.py::test_retention_per_market_does_not_starve` to verify the new per-market semantics (high-volume market trims to 20, low-volume market keeps all 3).  3,269 tests passing across 41 test files.  **Known limitations explicitly NOT fixed:** HIGH-3 (customer_label same-device race — would require schema-version bump or retry-on-IntegrityError logic, both with regression risk), HIGH-4 (export filter inconsistency between ledger backup / sync / FMNP-context — changing user-visible numbers at release-time would break coordinator mental models), HIGH-7 (zero a11y annotations — huge surface area for regression), MED-SEC-4 (sub-frame TOCTOU between C5 re-check and Popen — would require DB-level mutex), F-H2 Pass-4 give-back (deferred since v2.0.1, customer-side Phase B forfeit over-credit). |
 | v2.0.3  | 2026-05-05 | **Second-pass security + scale hotfix.**  Found by a four-agent post-v2.0.2 review.  Two CRITICAL security findings: **CRIT-SEC-1** the v2.0.2 ``_update_backup`` auto-rollback (B-H5) introduced a regression — an attacker with FS write to ``%APPDATA%`` could plant a malicious ``FAM Manager.exe`` in ``_update_backup\`` and wait for any update failure to trigger silent restore into the install dir (data-dir-write → install-dir-RCE).  Defense: SHA-256 manifest written to ``app_dir\_update_manifest.sha256`` at backup time (install-dir trust boundary, not attacker-writable in threat model).  Rollback now PowerShell-verifies the backup's ``FAM Manager.exe`` hash against the trusted manifest BEFORE copying.  Mismatch ⇒ refuse rollback, emit "SECURITY WARNING: Backup hash MISMATCH" with manual-recovery instructions. Refactored install-block goto-rollback flow to use ``:ROLLBACK_AND_EXIT`` label instead of inline rollback inside parenthesised ``if (...)`` blocks (batch syntax forbids ``goto`` labels inside ``(...)``).  **CRIT-SEC-2** photo path traversal: ``get_photo_full_path`` did ``os.path.join(data_dir, relative_path)`` which returns the absolute path verbatim when ``relative_path`` is absolute.  An attacker writing ``photo_path='C:\\Users\\X\\.aws\\credentials'`` to a ``payment_line_items`` or ``fmnp_entries`` row caused the next Drive sync to upload that file to the volunteer's Drive — arbitrary-file exfiltration.  Defense: new ``_validate_relative_photo_path`` rejects absolute paths, drive letters, ``..`` escapes, and any normalised path that lands outside ``data_dir``.  ``photo_exists`` returns False rather than raising.  ``get_photo_full_path`` raises ``UnsafePhotoPathError``.  Drive uploader explicitly logs and skips unsafe paths.  Two NEW-CRIT scale/lifecycle issues: **NEW-CRIT-1** ``MainWindow.closeEvent`` did not wait for ``settings_screen._update_dl_thread`` — closing mid-download left an orphan QThread that fired ``_on_download_finished`` against a destroyed parent (uncaught C++ exception / zombie process).  Now closeEvent waits up to 10s with terminate fallback.  **NEW-CRIT-2** ``ReportsScreen._load_activity_log`` was unbounded — at year 2-3 scale (500K+ ``audit_log`` rows) opening Reports → Activity Log froze the UI thread for 30-60s while ``fetchall`` materialised every row.  Now uses ``LIMIT 1000`` plus ``ORDER BY changed_at DESC, id DESC``.  Plus 23 new regression tests in ``tests/test_v2_0_3_regression_coverage.py`` covering the seven TEST-CRIT gaps the v2.0.2 audit identified: F-H1 dict-level penny-rec consistency, UF-H6 audit no-double-emit, UF-H10 rewards rollback, DB-H2 RuntimeError propagation, UI-H8 cap re-check, UF-H1/H2 void rollback, B-H8 hostname fallback, plus seven CRIT-SEC-2 path-traversal cases and a NEW-CRIT-2 source-pin.  3,264 tests passing across 40+ test files (no regressions). |

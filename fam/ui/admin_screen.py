@@ -435,9 +435,30 @@ class AdjustmentDialog(QDialog):
                 # Pass customer_charged so cap-inflated values from
                 # the saved transaction are preserved across reload —
                 # mirrors the Payment-screen draft-restore fix.
+                # v2.0.7 (schema v36): also pass customer_forfeit_cents
+                # so a Phase B forfeit on the saved row survives the
+                # Adjustment round-trip.  Pre-fix this was silently
+                # dropped — re-saving from Adjustment would lose the
+                # forfeit data entirely (the Reports → Customer
+                # Forfeit column would zero out for any txn the
+                # manager touched).
                 row.set_data(item['payment_method_id'],
                              item['method_amount'],
-                             customer_charged=item.get('customer_charged'))
+                             customer_charged=item.get('customer_charged'),
+                             customer_forfeit_cents=item.get(
+                                 'customer_forfeit_cents', 0) or 0,
+                             # v2.0.7+ (schema v37, audit
+                             # 2026-05-07): restore user-cap flag
+                             # so an AdjustmentDialog re-open of
+                             # a transaction with a previously-
+                             # locked row comes back Locked
+                             # (gold ⚡).  Without this, the
+                             # manager would see Active and a
+                             # new Auto-Distribute click could
+                             # silently re-distribute the locked
+                             # value.
+                             user_capped=bool(item.get(
+                                 'user_capped', False)))
         else:
             self._add_payment_row()
 
@@ -877,6 +898,19 @@ class AdjustmentDialog(QDialog):
                     'method_amount': ma,
                     'match_percent': data['match_percent'],
                     'denomination': data.get('denomination'),
+                    # v2.0.7+ user-cap (audit 2026-05-07):
+                    # propagate the row's user-cap flag to the
+                    # engine's customer-impact preview.  Without
+                    # this, the impact panel shows engine-inflated
+                    # customer_charged even though the volunteer
+                    # locked the row, causing a "row mismatch"
+                    # surprise at confirm time when the actual
+                    # save respects user_capped.  This mirrors
+                    # the propagation in get_new_line_items
+                    # (via resolve_payment_state) so the preview
+                    # and the save use identical engine input.
+                    'user_capped': bool(
+                        data.get('user_capped', False)),
                 })
                 active_rows.append(row)
 
@@ -929,13 +963,20 @@ class AdjustmentDialog(QDialog):
             overage = -gap_cents
             if (effective_denom_sum > 0
                     and overage <= effective_denom_sum):
-                # Soft warning — yellow, "forfeit" wording.
-                # Save is allowed (denom forfeit is legitimate).
+                # Soft warning — yellow.  Save is allowed (the
+                # math just gets balanced via match reduction).
+                #
+                # v2.0.7 (user-reported 2026-05-07): do NOT call
+                # this a "customer forfeit" — Phase A reduction
+                # is FAM contributing less, not a customer-side
+                # loss.  Reserve "Customer Forfeit" terminology
+                # for Phase B (token-value loss).
                 self.payment_error_label.setText(
                     f"⚠  Denomination overage: "
-                    f"{format_dollars(overage)} — customer "
-                    f"forfeits this much FAM match.  Save will "
-                    f"reduce match to absorb the overage."
+                    f"{format_dollars(overage)} — FAM match will "
+                    f"be reduced to keep the vendor "
+                    f"reimbursement exact.  Vendor still "
+                    f"receives the full receipt amount."
                 )
                 self.payment_error_label.setStyleSheet(f"""
                     font-size: 13px; font-weight: bold;
@@ -995,6 +1036,44 @@ class AdjustmentDialog(QDialog):
         result = calculate_payment_breakdown(
             new_total_cents, calc_entries, match_limit=self._match_limit
         )
+        # v2.0.7-final consolidation (Option B, schema v36): apply
+        # denomination forfeit BEFORE displaying impact totals so
+        # the manager sees what will actually be saved.  Pre-fix,
+        # the impact panel showed pre-forfeit FAM match (e.g. "$10
+        # match") while the save flow applied Phase A reduction
+        # to bring it down (e.g. to "$6.52 match") — manager
+        # confusion bug.  Now the panel shows the correct post-
+        # forfeit values.
+        allocated_pre_forfeit = result.get('allocated_total', 0)
+        if allocated_pre_forfeit > new_total_cents:
+            overage_for_panel = (
+                allocated_pre_forfeit - new_total_cents)
+            # Compute effective denom sum to verify the overage is
+            # denom-caused (mirrors _check_denomination_overage
+            # logic).  Skip forfeit if non-denom over-allocation.
+            from fam.utils.calculations import (
+                charge_to_method_amount, apply_denomination_forfeit,
+            )
+            effective_denom_sum = 0
+            for r in self._payment_rows:
+                m = r.get_selected_method()
+                if m and m.get('denomination'):
+                    effective_denom_sum += charge_to_method_amount(
+                        m['denomination'], m['match_percent'])
+            if (effective_denom_sum > 0
+                    and overage_for_panel <= effective_denom_sum):
+                # Build a vendor_receipts map from the txn under
+                # edit (single-vendor scope for AdjustmentDialog).
+                vendor_receipts: dict = {}
+                if (self.txn
+                        and self.txn.get('vendor_id') is not None):
+                    vendor_receipts[
+                        self.txn['vendor_id']] = new_total_cents
+                # Pass calc_entries through so the canonical fn
+                # can update them in lock-step.
+                apply_denomination_forfeit(
+                    result, calc_entries, overage_for_panel,
+                    vendor_receipts=vendor_receipts)
         new_customer_paid = result['customer_total_paid']  # cents
         new_fam_match = result['fam_subsidy_total']  # cents
 
@@ -1435,6 +1514,108 @@ class AdminScreen(QWidget):
                                 "Voided transactions cannot be adjusted.")
             return
 
+        # v2.0.7: financial-integrity safety gate.  Adjusting a
+        # transaction whose payments include denominated methods
+        # (Food RX, JH Food Bucks, FMNP) has repeatedly surfaced
+        # data-integrity edge cases — denomination snap drift,
+        # cross-receipt allocation mismatches in multi-receipt
+        # single-vendor orders, customer-side forfeit producing
+        # non-aligned customer_charged.
+        #
+        # Rather than chase every edge case, gate the entry point.
+        # Volunteers get a clear warning and a recommended path
+        # (Void → recreate) but can still override if they
+        # understand the risk.  The override is logged so a
+        # subsequent reconciliation issue can be traced to a
+        # deliberate adjust-anyway decision.
+        denom_methods, sibling_count = (
+            self._detect_adjustment_risk(txn))
+        if denom_methods:
+            method_list = ', '.join(sorted(denom_methods))
+            multi_receipt_note = ''
+            if sibling_count > 1:
+                multi_receipt_note = (
+                    f"<p><b>Additional risk:</b> this customer's "
+                    f"order has <b>{sibling_count}</b> receipts at "
+                    f"the same vendor.  Adjusting one of them can "
+                    f"misallocate payment breakdowns across the "
+                    f"siblings.</p>")
+            warn = QMessageBox(self)
+            warn.setIcon(QMessageBox.Warning)
+            warn.setWindowTitle("Adjustment Risk — Denominated Payments")
+            warn.setText(
+                f"This transaction was paid with denominated "
+                f"methods: <b>{method_list}</b>."
+            )
+            warn.setInformativeText(
+                f"<p>Adjusting transactions with denominated payments "
+                f"can cause financial-integrity issues — the "
+                f"customer's physical token count can't always be "
+                f"preserved through receipt-total changes, and the "
+                f"resulting reports can show fractional values that "
+                f"don't match what the customer actually handed "
+                f"over.</p>"
+                f"{multi_receipt_note}"
+                f"<p><b>Recommended:</b> click <b>Void Instead</b>, "
+                f"then re-enter the transaction with the corrected "
+                f"receipt total in Receipt Intake.  The volunteer "
+                f"keeps the same physical denomination handout.</p>"
+                f"<p>If you understand the risk and need to proceed "
+                f"anyway, click <b>Adjust Anyway</b>.</p>"
+            )
+            void_btn = warn.addButton(
+                "Void Instead", QMessageBox.AcceptRole)
+            adjust_btn = warn.addButton(
+                "Adjust Anyway", QMessageBox.DestructiveRole)
+            cancel_btn = warn.addButton(QMessageBox.Cancel)
+            warn.setDefaultButton(void_btn)
+            warn.exec()
+            clicked = warn.clickedButton()
+            if clicked is void_btn:
+                # Audit-log the choice so the decision is traceable
+                # alongside the subsequent VOID action.
+                logger.info(
+                    "Adjustment-risk gate: user chose Void Instead "
+                    "for txn=%s (denom methods: %s, siblings=%d)",
+                    txn_id, method_list, sibling_count)
+                self._void_transaction(txn_id)
+                return
+            if clicked is not adjust_btn:
+                # Cancel or close — abort entirely
+                return
+            # User chose Adjust Anyway — log the override before
+            # opening the dialog so the audit trail captures the
+            # informed decision.
+            #
+            # IMPORTANT: do NOT add ``from fam.models.audit import
+            # log_action`` here.  ``log_action`` is already imported
+            # at module level (line 21).  A function-local import
+            # would promote ``log_action`` to a function-local for
+            # the entire body, shadowing the module-level binding,
+            # and any reference outside this branch (e.g. the save
+            # path's ``log_action(...)`` calls below) would raise
+            # ``UnboundLocalError`` on Cash-only / SNAP-only / any
+            # non-denom adjustment that bypasses this gate.  This
+            # was the v2.0.7 user-reported "Adjustment failed:
+            # cannot access local variable 'log_action'" crash.
+            # The same scoping footgun bit v2.0.1 with
+            # ``get_transaction_by_id`` — see
+            # ``tests/test_adjust_transaction_no_local_shadow.py``
+            # and ``tests/test_codebase_hygiene.py::TestNoUnbound\
+            # LocalShadows`` for the static + runtime pins.
+            logger.warning(
+                "Adjustment-risk gate: user chose Adjust Anyway "
+                "for txn=%s despite denom-method warning (methods: "
+                "%s, siblings=%d)",
+                txn_id, method_list, sibling_count)
+            log_action(
+                'transactions', txn_id, 'ADJUST_OVERRIDE',
+                'System',
+                notes=(f"Volunteer overrode denom-payment "
+                       f"adjustment warning; methods={method_list}; "
+                       f"siblings_at_vendor={sibling_count}"),
+            )
+
         dialog = AdjustmentDialog(txn, self)
 
         # Pre-fill "Adjusted By" with the open market day's volunteer
@@ -1754,6 +1935,14 @@ class AdminScreen(QWidget):
                         # "you also need to collect $X more" gap the
                         # 2026-04 onsite found in the original
                         # popup wording).
+                        # v2.0.7 (user-reported 2026-05-07): the
+                        # adjust-screen forfeit pass is Phase A only
+                        # (reduces match to balance the receipt).
+                        # That's NOT a customer forfeit per the
+                        # final policy — the customer never had the
+                        # FAM match money to lose.  Phrase the
+                        # popup as a math-balancing notification,
+                        # not a customer-loss alert.
                         msg_lines = [
                             f"This adjustment over-allocates the "
                             f"receipt by {format_dollars(overage)} "
@@ -1761,10 +1950,11 @@ class AdminScreen(QWidget):
                             f"cannot be broken into smaller "
                             f"increments.",
                             "",
-                            f"The customer forfeits "
-                            f"{format_dollars(overage)} of FAM match "
-                            f"(vendor still receives the full "
-                            f"receipt amount).",
+                            f"FAM match will be reduced by "
+                            f"{format_dollars(overage)} to keep the "
+                            f"vendor reimbursement exact.  Vendor "
+                            f"still receives the full receipt "
+                            f"amount.",
                         ]
                         if customer_pay_delta > 1:
                             msg_lines += [
@@ -1813,24 +2003,61 @@ class AdminScreen(QWidget):
 
                         # Apply forfeit FIRST (always required for
                         # denom overage so the line items reconcile
-                        # to receipt total).  Reduce match_amount +
-                        # method_amount on the denominated line
-                        # items by the overage.  customer_charged
-                        # stays unchanged at this step — they paid
-                        # in real, indivisible instruments.
+                        # to receipt total).
+                        #
+                        # v2.0.7-final consolidation (Option B,
+                        # schema v36): delegate to the canonical
+                        # ``apply_denomination_forfeit`` function
+                        # in ``fam.utils.calculations`` so the
+                        # vendor-aware Phase A + Phase B logic is
+                        # identical to PaymentScreen's.  Pre-
+                        # consolidation this branch ran a
+                        # first-with-match Phase-A-only inline
+                        # loop that diverged from PaymentScreen
+                        # (no vendor binding, no Phase B
+                        # token-value forfeit, no
+                        # ``customer_forfeit_cents`` tags).  That
+                        # divergence dropped Phase B forfeit data
+                        # whenever a manager re-saved an
+                        # adjustment.  Now both screens share one
+                        # implementation and the parity test
+                        # ``test_forfeit_consolidation_parity.py``
+                        # pins byte-identical output across every
+                        # realistic scenario.
                         denom_overage_cents = overage
-                        remaining_overage = overage
-                        for it in new_items:
-                            if remaining_overage <= 0:
-                                break
-                            if it.get('match_amount', 0) > 0:
-                                reduction = min(
-                                    remaining_overage,
-                                    it['match_amount'],
-                                )
-                                it['match_amount'] -= reduction
-                                it['method_amount'] -= reduction
-                                remaining_overage -= reduction
+                        # Build a minimal result dict shape the
+                        # canonical fn expects.  Adjustment edits
+                        # operate on a single transaction, so
+                        # vendor_receipts has one entry: the
+                        # transaction's vendor → receipt total.
+                        forfeit_result = {
+                            'line_items': new_items,
+                            'allocated_total': sum(
+                                int(it.get('method_amount', 0))
+                                for it in new_items),
+                            'fam_subsidy_total': sum(
+                                int(it.get('match_amount', 0))
+                                for it in new_items),
+                            'customer_total_paid': sum(
+                                int(it.get('customer_charged', 0))
+                                for it in new_items),
+                            'match_was_capped': bool(
+                                dialog._match_limit is not None
+                                and (sum(
+                                    int(it.get('match_amount', 0))
+                                    for it in new_items)
+                                  >= dialog._match_limit)),
+                        }
+                        vendor_receipts: dict = {}
+                        if current and current.get('vendor_id') is not None:
+                            vendor_receipts[
+                                current['vendor_id']] = new_total_cents
+                        from fam.utils.calculations import (
+                            apply_denomination_forfeit,
+                        )
+                        apply_denomination_forfeit(
+                            forfeit_result, new_items, overage,
+                            vendor_receipts=vendor_receipts)
 
                         # Then, if the manager said the customer is
                         # gone (No path), absorb the customer-pay
@@ -2102,7 +2329,34 @@ class AdminScreen(QWidget):
             except Exception as e:
                 conn.rollback()
                 logger.exception("Failed to adjust transaction %s", txn_id)
-                QMessageBox.critical(self, "Error", f"Adjustment failed: {e}")
+                # v2.0.7: include the log path in the error dialog
+                # so the volunteer / coordinator can find the full
+                # traceback without having to figure out whether
+                # they're on the .exe (which writes to %APPDATA%
+                # \FAM Market Manager\fam_manager.log) or running
+                # from source (which writes to <project root>\
+                # fam_manager.log).  The user-reported v2.0.7
+                # UnboundLocalError incident WAS logged correctly,
+                # but the user looked at the .exe path while
+                # actually running from source — so they saw "no
+                # error in the logs" when in fact the error was
+                # one directory away.  Surfacing the path inline
+                # closes that diagnostic gap.
+                try:
+                    from fam.utils.logging_config import get_log_path
+                    log_path_str = get_log_path() or '(unknown)'
+                except Exception:
+                    log_path_str = '(unknown)'
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Adjustment failed: {e}\n\n"
+                    f"Full traceback was written to:\n"
+                    f"{log_path_str}\n\n"
+                    f"You can also view it in Reports → Error Log "
+                    f"or copy a diagnostic from Help → System "
+                    f"Status → Copy Diagnostic Info.",
+                )
                 return
 
             write_ledger_backup()
@@ -2153,18 +2407,25 @@ class AdminScreen(QWidget):
                 elif denom_overage_cents > 0:
                     # Customer paid in physical denominated
                     # instruments that overshot the receipt.  The
-                    # forfeit was already explained + accepted in
-                    # the pre-save QMessageBox; this is just a
+                    # math-balance was already explained + accepted
+                    # in the pre-save QMessageBox; this is just a
                     # post-save confirmation so the manager knows
                     # the adjustment landed with the reduced match.
+                    #
+                    # v2.0.7 (user-reported 2026-05-07): dialog
+                    # title and wording avoid "Forfeit" terminology
+                    # — Phase A FAM-match reduction is not a
+                    # customer-side loss.  "Customer Forfeit" is
+                    # reserved for Phase B token-value loss.
                     QMessageBox.information(
-                        self, "Denomination Forfeit Saved",
+                        self, "Adjustment Saved",
                         f"Adjustment saved.\n\n"
                         f"FAM match reduced by "
                         f"{format_dollars(denom_overage_cents)} to "
-                        f"absorb the denomination overage.  Customer "
-                        f"paid {format_dollars(new_customer)} in "
-                        f"physical instruments; FAM contributes "
+                        f"keep the vendor reimbursement exact.  "
+                        f"Customer paid "
+                        f"{format_dollars(new_customer)} in physical "
+                        f"instruments; FAM contributes "
                         f"{format_dollars(new_total_cents - new_customer)} "
                         f"to bring the vendor's reimbursement to "
                         f"the receipt total of "
@@ -2190,6 +2451,65 @@ class AdminScreen(QWidget):
                     QMessageBox.information(
                         self, "Customer Impact", impact_msg
                     )
+
+    def _detect_adjustment_risk(self, txn) -> tuple[set, int]:
+        """Inspect a transaction for denom-payment adjustment risk.
+
+        Returns ``(denom_method_names, sibling_count)``:
+          * ``denom_method_names`` is the set of distinct
+            denominated payment-method names attached to this
+            transaction's payment_line_items.  Empty set means
+            no denom payments — adjusting is safe.
+          * ``sibling_count`` is the total number of transactions
+            in this customer's order that share the same vendor
+            (including the transaction being adjusted).  When > 1
+            the multi-receipt single-vendor shape applies and
+            adjustments are higher-risk.
+
+        Returns (set(), 0) when txn lacks the metadata to evaluate.
+        """
+        conn = get_connection()
+        denom_methods: set[str] = set()
+        try:
+            rows = conn.execute(
+                "SELECT pli.method_name_snapshot, pm.denomination "
+                "FROM payment_line_items pli "
+                "LEFT JOIN payment_methods pm "
+                "  ON pm.id = pli.payment_method_id "
+                "WHERE pli.transaction_id = ?",
+                (txn['id'],),
+            ).fetchall()
+            for r in rows:
+                denom = r['denomination']
+                if denom and denom > 0:
+                    denom_methods.add(r['method_name_snapshot'])
+        except Exception:
+            logger.exception(
+                "Adjustment-risk detection failed reading PLI for "
+                "txn=%s; defaulting to no denom risk", txn.get('id'))
+            return set(), 0
+
+        # Sibling count at same vendor in same customer order
+        sibling_count = 0
+        order_id = txn.get('customer_order_id')
+        vendor_id = txn.get('vendor_id')
+        if order_id is not None and vendor_id is not None:
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM transactions "
+                    "WHERE customer_order_id = ? "
+                    "  AND vendor_id = ? "
+                    "  AND status IN ('Confirmed', 'Adjusted')",
+                    (order_id, vendor_id),
+                ).fetchone()
+                if row:
+                    sibling_count = row['n']
+            except Exception:
+                logger.exception(
+                    "Adjustment-risk sibling-count query failed "
+                    "for txn=%s", txn.get('id'))
+
+        return denom_methods, sibling_count
 
     def _void_transaction(self, txn_id):
         txn = get_transaction_by_id(txn_id)

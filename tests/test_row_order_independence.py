@@ -187,17 +187,28 @@ class TestRowOrderIndependence:
             f"  SNAP-first: {cards_a}\n"
             f"  FB-first:   {cards_b}")
 
-        # And the values themselves must be the post-fix values
-        # (not the pre-fix bad state of $224.80 / $124.80).
-        assert cards_a['allocated'] == "$212.80", (
-            f"Allocated must equal effective_order_total ($12 FB "
-            f"+ $200.80 non-denom-needed = $212.80), got "
-            f"{cards_a['allocated']}.  If $224.80, the cap was "
-            f"computed without the denom contribution — see the "
-            f"_update_summary cap order fix.")
+        # v2.0.7 final policy (user-reported 2026-05-07): the
+        # ``allocated`` and ``remaining`` cards now show the
+        # POST-FORFEIT balanced state, not the pre-forfeit
+        # phantom-negative.  Pre-fix this test pinned the
+        # exact bad UX the user complained about: "we shouldn't
+        # see the order total go negative due to forfeited FAM
+        # match funds that never applied in the first place."
+        # Post-fix: order-level over-allocation gets balanced
+        # away; remaining shows $0 not -$0.89.
+        assert cards_a['allocated'] == "$211.91", (
+            f"Allocated must equal post-forfeit balanced total "
+            f"($211.91 = receipt total), NOT pre-forfeit phantom "
+            f"$212.80.  Got: {cards_a['allocated']}")
         assert cards_a['customer_pays'] == "$111.91"
         assert cards_a['fam_match'] == "$100.00"
-        assert cards_a['remaining'] == "$-0.89"
+        # Remaining must NOT be negative — the user's specific
+        # complaint about phantom forfeit-not-yet-applied funds.
+        assert cards_a['remaining'] == "$0.00", (
+            f"Remaining must be $0 (post-forfeit balanced).  "
+            f"Pre-fix this showed $-0.89 from phantom FAM match "
+            f"that was about to be reduced.  Got: "
+            f"{cards_a['remaining']}")
 
     def test_no_per_vendor_negatives_in_snap_first_order(
             self, qtbot, five_vendor_db):

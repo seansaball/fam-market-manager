@@ -401,14 +401,18 @@ spreads it across your selected payment methods automatically.
 1. **Denominated rows with a charge stay locked.**  If the customer
    handed you three $5 FMNP checks, the FMNP row keeps its $15 charge
    — the algorithm respects physical-check counts.
-2. **Non-denominated rows are reset to zero**, then filled as
-   "absorbers."  Cash, SNAP, and other non-denominated methods get the
-   remainder of the receipt total spread across them.
-3. **The match percentage is honored**: SNAP at 100% match means the
+2. **Non-denominated rows that are NOT user-locked are reset to zero**,
+   then filled as "absorbers."  Cash, SNAP, and other non-denominated
+   methods that have their per-row ⚡ icon GREEN (Active) get the
+   remainder of the receipt total.
+3. **User-locked rows (grey ⚡) are skipped.**  Auto-Distribute respects
+   any value the volunteer has explicitly typed or pinned via the
+   ⚡ toggle.  See `auto-distribute-toggle` for full details.
+4. **The match percentage is honored**: SNAP at 100% match means the
    customer pays half and the FAM match covers the other half.
-4. **The match cap is honored** if active.  If the customer would
-   exceed their daily $100 cap, charges are increased so the customer
-   covers the deficit.
+5. **The match cap is honored** if active.  If the customer would
+   exceed their daily $100 cap, charges on Active rows are increased
+   so the customer covers the deficit.
 
 ## When you'd use it
 
@@ -424,7 +428,127 @@ spreads it across your selected payment methods automatically.
 - Single-method receipts where you'd rather type the number directly
 """,
         keywords=('auto-distribute', 'auto distribute', 'redistribute', 'split', 'allocate'),
-        related_articles=('split-payment', 'match-cap', 'penny-reconciliation'),
+        related_articles=('split-payment', 'match-cap', 'penny-reconciliation', 'auto-distribute-toggle'),
+        screen='payment',
+    ),
+
+    Article(
+        id='auto-distribute-toggle',
+        category_id='during-market',
+        title='The per-row ⚡ toggle (Active vs Locked)',
+        body="""\
+Each non-denominated payment row (SNAP, Cash, etc.) has a small
+**⚡ icon** next to the amount field.  It controls whether that row
+participates in **Auto-Distribute**.
+
+## Two states
+
+- **Green ⚡ (Active)** — Auto-Distribute will fill or refill this
+  row.  The row is the "overflow target" that absorbs the receipt
+  remainder when you click Auto-Distribute.
+- **Grey ⚡ (Locked)** — Auto-Distribute will skip this row.  The
+  volunteer's typed value stays exactly as entered, even when the
+  daily FAM match cap kicks in.
+
+## How rows transition
+
+- **Typing into the amount field auto-locks the row.**  As soon as
+  you type a value (e.g. "$125"), the icon flips to grey.  This is
+  the default "I know exactly how much SNAP the customer has" case.
+- **Adding a row when one is already Active defaults the new row to
+  Locked.**  Only one non-denom row at a time can be the overflow
+  target — if you add a third method, it comes in Locked at $0 and
+  you can either type a value or click ⚡ to activate it.
+- **Click a grey ⚡** to activate the row.  The previously-Active
+  row automatically locks, so there's still exactly one overflow
+  target.
+- **Click a green ⚡** to lock the current value (pin it where it is).
+
+## When to use each state
+
+- **Customer has a fixed amount on one method, rest in cash**: type
+  SNAP $125 (auto-locks), let the green ⚡ Cash row absorb the rest
+  via Auto-Distribute.
+- **Volunteer wants to manually balance everything**: lock all rows
+  by typing values; the engine respects every typed amount.
+- **Customer wants to maximize FAM match without specifying amounts**:
+  leave one row green (Active) and click Auto-Distribute — the engine
+  fills the green row with whatever absorbs the receipt.
+
+## Why this exists
+
+Pre-v2.0.7, Auto-Distribute would silently inflate any row's value
+if the daily match cap shrank the FAM contribution.  The volunteer
+would type "$125 SNAP" (because that's all the customer has on their
+EBT card), click Auto-Distribute, and see SNAP magically become
+"$138.09" — confusing and unfixable without deleting the row.  The
+⚡ toggle makes intent explicit and gives volunteers a clear way to
+say "this value is final."
+
+## Auto-Distribute appears to do nothing
+
+Check the ⚡ icon on every non-denom row.  If they're all grey
+(Locked), there's no Active overflow target for Auto-Distribute to
+fill.  Click one row's grey ⚡ to release it, then click
+Auto-Distribute again.
+""",
+        keywords=('toggle', 'lock', 'unlock', 'overflow', 'active', 'locked', 'green', 'grey', 'gray', 'lightning', 'icon', 'pin'),
+        related_articles=('auto-distribute-button', 'split-payment', 'match-cap'),
+        screen='payment',
+    ),
+
+    Article(
+        id='customer-forfeit',
+        category_id='during-market',
+        title='Customer Forfeit (token-value over-tender)',
+        body="""\
+The **Customer Forfeit** summary card and report column track money
+the customer over-tendered when handing a denominated payment unit
+(Food RX, Food Bucks, FMNP) for a receipt smaller than the unit's
+face value.
+
+## Example
+
+Customer hands a $10 Food RX token to a vendor with a $1.45
+receipt.  The full $10 leaves the customer's pocket, but only
+$1.45 reaches the vendor.  The remaining $8.55 is the
+**customer forfeit** — over-tender that didn't apply.
+
+The Payment Screen shows:
+
+| Card | Value |
+|---|---|
+| Receipt Total | $1.45 |
+| Customer Pays | $10.00 |
+| FAM Match | $0.00 |
+| **Customer Forfeit** | **$8.55** |
+
+## Why we track it
+
+- Reports show the customer's **physical handout** in the Food RX
+  column ($10), not the post-forfeit amount ($1.45).  Volunteers
+  can reconcile the report against what actually came out of the
+  customer's pocket.
+- The vendor still gets exactly the receipt total ($1.45) — Phase
+  B forfeit doesn't shift money to the vendor.
+- The audit trail records the unaccounted $8.55 so a future
+  reviewer can see "the customer over-tendered, not a bug."
+
+## When forfeit fires
+
+- **Phase A (silent)**: FAM match contribution is reduced first to
+  absorb the gap.  No forfeit recorded.
+- **Phase B (visible)**: if Phase A can't cover the full overage
+  (e.g. there's no match available because the cap is already at
+  $0), the customer-side `customer_charged` is reduced AND the
+  forfeit amount is recorded.
+
+In normal use the Customer Forfeit card shows $0.00.  It only
+goes non-zero when a denominated unit's face value exceeded what
+the receipt and the FAM match could absorb.
+""",
+        keywords=('forfeit', 'token', 'over-tender', 'overage', 'denomination', 'phase b', 'unaccounted'),
+        related_articles=('match-cap', 'auto-distribute-toggle'),
         screen='payment',
     ),
 
@@ -993,7 +1117,82 @@ If the cap math seems wrong:
    label, fix it via Adjustments
 """,
         keywords=('cap', 'exceeded', 'warning', 'over', 'limit'),
-        related_articles=('match-cap', 'returning-customer', 'adjust-transaction'),
+        related_articles=('match-cap', 'returning-customer', 'adjust-transaction',
+                          'split-orders-when-stuck'),
+        screen='payment',
+    ),
+
+    Article(
+        id='split-orders-when-stuck',
+        category_id='corrections',
+        title='When the Payment screen blocks you — split into separate orders',
+        body="""\
+If you hit a hard block on the Payment screen — a "Payment row mismatch"
+warning, a per-vendor over-allocation error, or any other dialog that
+refuses to let you confirm — and Auto-Distribute does not fix it after
+one or two clicks, **the simplest, safest resolution is to break the
+customer's receipts out into separate orders, one payment method per
+order.**
+
+This is always the right answer when the math doesn't reconcile and
+nothing in the troubleshooting flows fits.  It is also the recommended
+resolution when the dialog explicitly suggests splitting (the daily
+FAM match cap is binding and no single combination will balance —
+each smaller order gets its own clean cap allocation).
+
+## The split-order workflow
+
+1. **Cancel** out of the Payment screen (do not Confirm).
+2. If you started from a Pending Order, return to **Receipt Intake**
+   and **Discard** the in-progress order.  The receipts you typed are
+   reusable in Step 3.
+3. In **Receipt Intake**, create a new customer order for the
+   **same customer label** (returning-customer dropdown, or type the
+   label).
+4. Add only the receipts that one payment method will cover (e.g.
+   the Food RX portion).
+5. Go to **Payment**, enter only that one method, Confirm.
+6. Repeat from Step 3 for the next payment method (e.g. SNAP for
+   the rest of the receipts).
+
+Because the customer label is the same, the cap accounting carries
+through automatically — the second order sees the first order's match
+already used.  Reports group by customer label, so the customer's day
+still rolls up to one row per category.  Nothing is lost.
+
+## Why this works
+
+The payment engine is designed so each order independently reconciles
+its receipts against its payments and its share of the daily cap.
+When a single order tries to cram an awkward combination of methods
+under a tight cap, the engine can produce a state where there is no
+clean balance — denominated tokens have fixed face values, the cap
+limits how much FAM can absorb, and the receipt total is what it is.
+Two simpler orders sidestep the awkward intersection entirely.
+
+## When NOT to split
+
+If Auto-Distribute fixes the dialog on the first click, you do not
+need to split.  Just Confirm and continue.
+
+If the block is something other than a math mismatch — a missing
+photo, an ineligible-vendor warning, an "Already running" dialog —
+splitting will not help.  See the matching troubleshooting flow under
+**Help → Troubleshooting** instead.
+
+## See also
+
+- **Help → Troubleshooting → "Hard block on the Payment screen"** for
+  a step-by-step decision flow.
+- **`returning-customer`** article for how the same-label trick keeps
+  cap accounting clean across multiple orders.
+""",
+        keywords=('split', 'stuck', 'blocked', 'mismatch', 'cap',
+                  'cannot confirm', 'separate orders', 'workaround',
+                  'breakup', 'multiple orders'),
+        related_articles=('match-cap', 'cap-warning', 'returning-customer',
+                          'split-payment', 'auto-distribute-button',
+                          'adjust-transaction'),
         screen='payment',
     ),
 
@@ -1047,7 +1246,60 @@ because the vendor matched at the booth).
 """,
         keywords=('fmnp', 'overview', 'two paths', 'difference'),
         related_articles=('fmnp-via-payment', 'fmnp-via-tracking',
-                          'fmnp-activate-payment'),
+                          'fmnp-activate-payment',
+                          'fmnp-all-market-days'),
+    ),
+
+    Article(
+        id='fmnp-all-market-days',
+        category_id='fmnp',
+        title='FMNP "All Market Days" filter — and why Save is greyed out',
+        body="""\
+The FMNP Check Tracking page's market-day dropdown defaults to
+**"All Market Days"**, which is a **browse-only filter** for
+searching the full FMNP entry history.
+
+## What it shows
+
+When "All Market Days" is selected:
+
+- The entries table shows FMNP entries from **every market day**,
+  not just one.  Combined with the date-range filter on the same
+  screen, you can search for "all FMNP entries between June 1 and
+  June 15" or "all entries for vendor X across the season."
+- The **Market Day** column in the table identifies which date
+  each entry came from.
+- The **"Add FMNP Entry"** button greys out and an inline hint
+  appears next to it: *"← Pick a specific market day above to add
+  a new entry."*
+
+## Why Save greys out
+
+You can't attribute a new FMNP entry to "all markets" — every
+entry needs a single concrete market day so the date links to a
+real Open or Closed market_day record.  Selecting "All Market
+Days" puts the form in **browse mode** — you can search and edit
+existing entries, but adding a new one requires picking a
+specific date first.
+
+## To add a new entry
+
+1. Pick a specific market day from the dropdown (the entries
+   table will filter to just that day)
+2. The Save button enables and the inline hint disappears
+3. Fill in the vendor, dollar amount, and other fields
+4. Click **Add FMNP Entry**
+
+## To search the full history
+
+1. Leave "All Market Days" selected
+2. Use the **date range** filter to narrow by date span
+3. Use **Edit** / **Delete** buttons in the table to modify
+   existing entries
+""",
+        keywords=('fmnp', 'all market days', 'browse', 'filter',
+                  'save', 'greyed out', 'disabled', 'date range'),
+        related_articles=('fmnp-overview', 'fmnp-via-tracking'),
     ),
 
     Article(
@@ -3957,9 +4209,11 @@ TROUBLESHOOTING_FLOWS: tuple[TroubleshootingFlow, ...] = (
             "5. Check the customer's prior transactions — Reports → Detailed Ledger, filter by customer label",
             "6. If a previous transaction has the wrong customer label, fix it via Adjustments — change the customer order linkage",
             "7. The 1-cent overshoot ($100.01 instead of $100) on cap is acceptable — that's the penny reconciliation rounding behavior",
+            "8. If the cap math is correct but the customer still wants to spend more in mixed payment methods (denominated tokens + SNAP) and the screen is hard-blocking the confirm — split the receipts into separate customer orders, one payment method per order.  See 'Hard block on the Payment screen — math doesn't reconcile' for the step-by-step.",
         ),
         keywords=('cap', 'limit', 'wrong', 'exceeded', 'warning'),
-        related_articles=('match-cap', 'returning-customer', 'penny-reconciliation'),
+        related_articles=('match-cap', 'returning-customer', 'penny-reconciliation',
+                          'split-orders-when-stuck'),
     ),
 
     TroubleshootingFlow(
@@ -4087,10 +4341,40 @@ TROUBLESHOOTING_FLOWS: tuple[TroubleshootingFlow, ...] = (
             "3. Alternatively, manually adjust the row to match the engine's expected charge (the value shown in the customer-impact panel below the rows).",
             "4. Save again — the guard should now pass.",
             "5. This guard exists to prevent silent under-charging.  It mirrors the same protection on the Payment screen and is intentional: if the typed value disagrees with the engine, the saved record would be wrong.",
+            "6. If Auto-Distribute does not fix it after a click or two — the dialog explicitly mentions the daily cap, or the gap won't go away — the cleanest resolution is to **Cancel** the Adjustment, **Void** the original transaction (Adjustments → Void), and re-enter the customer's purchases as **separate orders one method at a time** from Receipt Intake.  See the troubleshooting flow 'Hard block on the Payment screen — math doesn't reconcile' for the step-by-step.",
         ),
         keywords=('payment row mismatch', 'adjustment', 'cap', 'auto-distribute',
                   'charge integrity', 'guard'),
-        related_articles=('adjust-transaction', 'penny-reconciliation'),
+        related_articles=('adjust-transaction', 'penny-reconciliation',
+                          'split-orders-when-stuck'),
+    ),
+
+    # v2.0.7: hard-block on Payment screen → split-into-separate-orders
+    TroubleshootingFlow(
+        id='ts-payment-screen-hard-block',
+        title='Hard block on the Payment screen — math doesn\'t reconcile',
+        symptom='Payment screen refuses to confirm: "Payment row mismatch", per-vendor over- or under-allocation, "non-denom method exceeds capacity", or the engine just won\'t balance no matter what you change',
+        steps=(
+            "1. Read the dialog carefully.  If it explicitly recommends 'splitting the customer's receipts into two separate customer orders', go straight to step 5.  That message is fired by the cap-bound detector and the recommendation is the supported resolution.",
+            "2. Click ⚡ Auto-Distribute once and try Confirm again.  If that clears the dialog, you're done.",
+            "3. If Auto-Distribute didn't fix it: read the row values vs. the Collect-from-Customer panel (below the rows) — they should match exactly.  If a row shows a different number than the panel, type the panel's number into the row and Confirm again.",
+            "4. If the dialog mentions an ineligible vendor by name, see the troubleshooting flow 'Per-vendor eligibility error on Payment'.  Splitting will not help with that case — the issue is which vendor accepts which method.",
+            "5. **Best resolution when the math just won't reconcile:** break the receipts into separate customer orders, one payment method per order.  This is the cleanest, safest path and works for every cap-bound, denomination-aware, multi-method scenario.  Sequence:",
+            "   a. Click **Cancel** on the Payment dialog.  Do NOT click Confirm.",
+            "   b. Go back to **Receipt Intake** and click **Discard** on the in-progress order (or **Pending Orders → Discard** if you saved it as a draft).  Your typed receipts are not lost — you'll re-add them in step c using the same numbers.",
+            "   c. Create a new order for the **same customer label** (use the returning-customer dropdown or type the label) and add ONLY the receipts that one payment method will cover (e.g. just the Food RX portion).",
+            "   d. Go to **Payment**, enter only that one method, ⚡ Auto-Distribute if needed, Confirm.",
+            "   e. Repeat from c with the remaining receipts and the next payment method (e.g. SNAP for the rest).",
+            "6. Because the customer label is the same on every order, the daily match cap accounting carries through automatically — the second order sees the first's match already used and adjusts.  Reports still group by customer label, so the customer's day rolls up to one summary row per category.  Nothing is lost.",
+            "7. If even split orders don't reconcile (very rare): Help → System Status → Copy Diagnostic Info, then send to your coordinator with a screenshot of the dialog.  In the meantime, write the customer's purchases on paper and confirm what you can; the coordinator can reconcile the rest later via Adjustments.",
+        ),
+        keywords=('hard block', 'mismatch', 'cannot confirm', 'cap-bound',
+                  'split', 'separate orders', 'won\'t balance',
+                  'over-allocation', 'under-allocation', 'stuck',
+                  'reconcile', 'workaround', 'multiple orders'),
+        related_articles=('split-orders-when-stuck', 'match-cap',
+                          'cap-warning', 'returning-customer',
+                          'auto-distribute-button', 'split-payment'),
     ),
 
     TroubleshootingFlow(

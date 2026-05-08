@@ -20,10 +20,11 @@ from fam.models.fmnp import (
 )
 from fam.utils.export import write_ledger_backup
 from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
-from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG, SUBTITLE_GRAY, ACCENT_GREEN
+from fam.ui.styles import WHITE, LIGHT_GRAY, ERROR_COLOR, PRIMARY_GREEN, ERROR_BG, SUBTITLE_GRAY, ACCENT_GREEN, HARVEST_GOLD, WARNING_BG
 from fam.ui.helpers import (
     make_field_label, make_item, make_section_label, make_action_btn,
-    configure_table, NoScrollDoubleSpinBox, NoScrollSpinBox, NoScrollComboBox
+    configure_table, NoScrollDoubleSpinBox, NoScrollSpinBox, NoScrollComboBox,
+    DateRangeWidget,
 )
 
 logger = logging.getLogger('fam.ui.fmnp_screen')
@@ -202,20 +203,68 @@ class FMNPScreen(QWidget):
         self.cancel_edit_btn.setVisible(False)
         btn_row.addWidget(self.cancel_edit_btn)
 
+        # v2.0.7+ (user-reported 2026-05-07): visible hint when
+        # the Save button is disabled because "All Market Days"
+        # is selected.  Tooltips alone aren't discoverable —
+        # volunteers might not realise they need to pick a
+        # specific market day before adding a new entry.  The
+        # hint sits inline next to the disabled button so it's
+        # impossible to miss.
+        self.pick_md_hint_label = QLabel(
+            "← Pick a specific market day above to add a new entry")
+        self.pick_md_hint_label.setStyleSheet(f"""
+            color: {HARVEST_GOLD};
+            background-color: {WARNING_BG};
+            border: 1px solid {HARVEST_GOLD};
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-weight: bold;
+            font-size: 12px;
+        """)
+        self.pick_md_hint_label.setVisible(False)
+        btn_row.addWidget(self.pick_md_hint_label)
+
         btn_row.addStretch()
         form_layout.addLayout(btn_row)
 
         layout.addWidget(form_frame)
 
-        # Entries table
-        layout.addWidget(make_section_label("FMNP Entries for Selected Market"))
-        self.table = QTableWidget()
-        self.table.setColumnCount(9)
-        self.table.setHorizontalHeaderLabels(
-            ["ID", "Vendor", "Amount", "Checks", "Entered By", "Notes",
-             "Photo", "Status", "Actions"]
+        # ── Filter row above the entries table (v2.0.7+) ─────────
+        # Date range filter mirrors the Reports / Adjustments
+        # screens so volunteers searching for a historical FMNP
+        # entry by date span have a consistent UX.  The market
+        # filter is the existing dropdown above (re-purposed —
+        # see ``_load_market_days`` for the "All Market Days"
+        # sentinel).
+        layout.addWidget(make_section_label(
+            "FMNP Entries (filter below)"))
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(make_field_label("Date range"))
+        self.date_range = DateRangeWidget()
+        self.date_range.setMinimumWidth(200)
+        self.date_range.setToolTip(
+            "Filter entries by the market day's calendar date.  "
+            "Leave as 'All Dates' to show every entry in the "
+            "selected market (or every entry across all markets "
+            "when 'All Market Days' is selected above)."
         )
-        configure_table(self.table, actions_col=8, actions_width=160)
+        self.date_range.range_changed.connect(self._load_entries)
+        filter_row.addWidget(self.date_range)
+        filter_row.addStretch()
+        layout.addLayout(filter_row)
+
+        # Entries table
+        # v2.0.7+: added "Market Day" column so volunteers can
+        # identify which market each entry belongs to when the
+        # "All Market Days" filter is active and the table mixes
+        # entries from multiple market days.
+        self.table = QTableWidget()
+        self.table.setColumnCount(10)
+        self.table.setHorizontalHeaderLabels(
+            ["ID", "Market Day", "Vendor", "Amount", "Checks",
+             "Entered By", "Notes", "Photo", "Status", "Actions"]
+        )
+        configure_table(self.table, actions_col=9, actions_width=160)
         layout.addWidget(self.table)
 
     def refresh(self):
@@ -261,21 +310,29 @@ class FMNPScreen(QWidget):
         # value, rebuild, then restore the index if the same
         # market day still exists.
         #
-        # v2.0.6: when there's NO previous selection (first load
-        # after launch, or after a Reset / fresh install) default
-        # to the currently-OPEN market day if any exists, otherwise
-        # the most recent market day by date.  Pre-fix the dropdown
-        # silently selected the FIRST item (oldest market day in
-        # the list), which made coordinators scroll past dozens of
-        # historical entries to find today's market.
-        previous_data = (
-            self.md_combo.currentData()
-            if self.md_combo.count() > 0 else None
-        )
+        # v2.0.7+ (user-reported 2026-05-07): "All Market Days" is
+        # now the first option (sentinel ``None``) and the default
+        # on first load.  Volunteers landing on the FMNP Check
+        # Tracking page see EVERY entry across the season at a
+        # glance instead of having to scroll past historical
+        # market days to find what they're looking for.  When
+        # "All Market Days" is selected, the Save button is
+        # disabled (tooltip explains why) — entering a NEW FMNP
+        # entry still requires picking a specific market day so
+        # the entry is correctly attributed.
+        #
+        # The legacy "default to the currently-open / most-recent
+        # market day" behaviour is retained as the
+        # ``_pick_default_market_day_id`` helper but no longer
+        # auto-fires; users who want that view click the dropdown
+        # and pick a specific day.
+        previous_data = self._current_md_combo_data()
         self._market_days_data = get_all_market_days()
         self.md_combo.blockSignals(True)
         try:
             self.md_combo.clear()
+            # Sentinel: userData=None means "All Market Days".
+            self.md_combo.addItem("All Market Days", userData=None)
             for d in self._market_days_data:
                 status = "[OPEN]" if d['status'] == 'Open' else "[Closed]"
                 self.md_combo.addItem(
@@ -286,16 +343,40 @@ class FMNPScreen(QWidget):
                 idx = self.md_combo.findData(previous_data)
                 if idx >= 0:
                     self.md_combo.setCurrentIndex(idx)
+                # else: previous market day was deleted; fall back
+                # to "All Market Days" (idx 0, already current).
+            elif self._previous_was_explicit_all:
+                # Volunteer was on "All Market Days" before the
+                # refresh; preserve that.
+                self.md_combo.setCurrentIndex(0)
             else:
-                # First load: pick the open market day if any,
-                # otherwise the most recent one by date.
-                default_id = self._pick_default_market_day_id()
-                if default_id is not None:
-                    idx = self.md_combo.findData(default_id)
-                    if idx >= 0:
-                        self.md_combo.setCurrentIndex(idx)
+                # First load: default to "All Market Days" (idx 0).
+                # The user can pick a specific day to enter new
+                # FMNP checks against.
+                self.md_combo.setCurrentIndex(0)
         finally:
             self.md_combo.blockSignals(False)
+        # Sync save-button enabled state with the new selection.
+        self._refresh_save_button_state()
+
+    def _current_md_combo_data(self):
+        """Return the currently-selected market_day_id, or
+        ``None`` for either no-selection or the "All Market Days"
+        sentinel.  Helper to disambiguate "no current selection"
+        from "All Market Days selected" — both surface as ``None``
+        from ``currentData()`` but only the latter is a deliberate
+        user choice we should preserve across refresh."""
+        if self.md_combo.count() == 0:
+            return None
+        return self.md_combo.currentData()
+
+    @property
+    def _previous_was_explicit_all(self) -> bool:
+        """True when the dropdown was previously showing the
+        'All Market Days' sentinel.  Stored as an attribute so
+        we can preserve that selection across ``_load_market_days``
+        rebuilds (which clear the combo)."""
+        return getattr(self, '_md_was_all', False)
 
     def _pick_default_market_day_id(self) -> int | None:
         """Return the market_day_id to default-select on first load.
@@ -378,21 +459,62 @@ class FMNPScreen(QWidget):
             self.vendor_combo.addItem(v['name'], userData=v['id'])
 
     def _on_market_day_changed(self):
-        """When market day changes, reload vendors filtered by that market."""
+        """When market day changes, reload vendors filtered by that market.
+
+        v2.0.7+: also tracks whether the volunteer is in
+        "All Market Days" browse mode and refreshes the Save
+        button enable/disable accordingly."""
+        self._md_was_all = self.md_combo.currentData() is None
+        self._refresh_save_button_state()
         self._load_vendors()
         self._load_entries()
+
+    def _refresh_save_button_state(self):
+        """Enable/disable the Save button based on whether a
+        specific market day is selected.
+
+        v2.0.7+: when "All Market Days" is selected the form
+        is in browse mode and Save is disabled (you can't
+        attribute an FMNP entry to "all markets").  Tooltip
+        explains the constraint, and a visible hint label sits
+        inline next to the button so volunteers don't need to
+        hover to discover why it's greyed out."""
+        if not hasattr(self, 'save_btn'):
+            return  # called during _build_ui before save_btn exists
+        md_selected = self.md_combo.currentData() is not None
+        self.save_btn.setEnabled(md_selected)
+        if md_selected:
+            self.save_btn.setToolTip("")
+        else:
+            self.save_btn.setToolTip(
+                "Pick a specific market day above before adding "
+                "an FMNP entry.  'All Market Days' is a browse-"
+                "only filter for searching existing entries.")
+        # Show the inline hint label only when the button is
+        # disabled.  The tooltip stays as a fallback for
+        # accessibility tools / hover discovery.
+        if hasattr(self, 'pick_md_hint_label'):
+            self.pick_md_hint_label.setVisible(not md_selected)
 
     def _load_entries(self):
         # Refresh FMNP settings (denomination + photo requirement) in case
         # they were changed in Settings since the screen was created.
         self._configure_fmnp_denomination()
 
+        # v2.0.7+: when md_id is None the "All Market Days"
+        # sentinel is selected; pass through to the model layer
+        # which now supports cross-market-day queries.  The
+        # date_range filter further narrows the result by the
+        # market day's calendar date (mirrors the Reports +
+        # Adjustments date-range UX).
         md_id = self.md_combo.currentData()
-        if not md_id:
-            self.table.setRowCount(0)
-            return
+        date_from, date_to = (
+            self.date_range.get_date_range()
+            if hasattr(self, 'date_range') else (None, None))
 
-        entries = get_fmnp_entries(md_id, active_only=False)
+        entries = get_fmnp_entries(
+            market_day_id=md_id, active_only=False,
+            date_from=date_from, date_to=date_to)
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(entries))
 
@@ -407,28 +529,41 @@ class FMNPScreen(QWidget):
             has_photo = photo_count > 0
 
             self.table.setItem(i, 0, make_item(str(e['id']), e['id']))
-            self.table.setItem(i, 1, make_item(e['vendor_name']))
+            # v2.0.7+: Market Day column at index 1.  Critical
+            # for "All Market Days" mode where rows from
+            # multiple markets share the table — without this
+            # column the volunteer can't tell which market each
+            # entry belongs to.  Sort key uses the raw ISO date
+            # so column-sort is chronological.
+            md_label_parts = [
+                e.get('market_day_date', ''),
+                f"({e.get('market_name', '')})"
+                if e.get('market_name') else '']
+            md_label = ' '.join(p for p in md_label_parts if p)
+            self.table.setItem(
+                i, 1, make_item(md_label, e.get('market_day_date', '')))
+            self.table.setItem(i, 2, make_item(e['vendor_name']))
             amount_dollars = cents_to_dollars(e['amount'])
-            self.table.setItem(i, 2, make_item(f"${amount_dollars:.2f}", amount_dollars))
-            self.table.setItem(i, 3, make_item(str(e.get('check_count') or ''),
+            self.table.setItem(i, 3, make_item(f"${amount_dollars:.2f}", amount_dollars))
+            self.table.setItem(i, 4, make_item(str(e.get('check_count') or ''),
                                                 e.get('check_count') or 0))
-            self.table.setItem(i, 4, make_item(e['entered_by']))
-            self.table.setItem(i, 5, make_item(e.get('notes') or ''))
+            self.table.setItem(i, 5, make_item(e['entered_by']))
+            self.table.setItem(i, 6, make_item(e.get('notes') or ''))
 
             # Photo indicator column — show count when multiple
             if photo_count > 1:
-                photo_text = f"\U0001f4f7 {photo_count}"
+                photo_text = f"📷 {photo_count}"
             elif photo_count == 1:
-                photo_text = "\U0001f4f7"
+                photo_text = "📷"
             else:
-                photo_text = "\u2014"
-            self.table.setItem(i, 6, make_item(photo_text))
+                photo_text = "—"
+            self.table.setItem(i, 7, make_item(photo_text))
 
-            self.table.setItem(i, 7, make_item(e.get('status', 'Active')))
+            self.table.setItem(i, 8, make_item(e.get('status', 'Active')))
 
             # Grey out all cells for deleted entries
             if is_deleted:
-                for col in range(8):
+                for col in range(9):
                     item = self.table.item(i, col)
                     if item:
                         item.setForeground(grey)
@@ -455,7 +590,7 @@ class FMNPScreen(QWidget):
                 del_btn.clicked.connect(lambda checked, eid=entry_id: self._delete_entry(eid))
                 action_layout.addWidget(del_btn)
 
-            self.table.setCellWidget(i, 8, action_widget)
+            self.table.setCellWidget(i, 9, action_widget)
             self.table.setRowHeight(i, 42)
 
         self.table.setSortingEnabled(True)
@@ -735,7 +870,18 @@ class FMNPScreen(QWidget):
         notes = self.notes_input.text().strip() or None
 
         if not md_id:
-            self._show_error("Please select a market day.")
+            # v2.0.7+: ``md_id is None`` now also means the
+            # "All Market Days" sentinel is selected.  Save is
+            # already disabled in that state (see
+            # ``_refresh_save_button_state``); this is a defensive
+            # second line of defense in case the button is
+            # programmatically clicked.
+            self._show_error(
+                "Please pick a specific market day above before "
+                "adding an FMNP entry.  'All Market Days' is a "
+                "browse-only filter for searching existing "
+                "entries — you can't attribute a new entry to "
+                "all markets.")
             return
         if not vendor_id:
             self._show_error("Please select a vendor.")

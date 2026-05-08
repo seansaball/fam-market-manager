@@ -21,32 +21,53 @@ _UNSET = object()
 _AUDITED_FIELDS = ('amount', 'vendor_id', 'check_count', 'notes', 'photo_path')
 
 
-def get_fmnp_entries(market_day_id=None, active_only=True):
+def get_fmnp_entries(market_day_id=None, active_only=True,
+                     date_from=None, date_to=None):
+    """Fetch FMNP entries with optional filters.
+
+    Args:
+        market_day_id: when set, restrict to that single market day.
+            When None, return entries from ALL market days (the
+            "All Market Days" filter mode added in v2.0.7+).
+        active_only: when True (default), excludes Deleted entries.
+        date_from: ISO ``yyyy-MM-dd`` lower bound on the market day's
+            date.  Inclusive.  ``None`` means no lower bound.
+        date_to: ISO ``yyyy-MM-dd`` upper bound on the market day's
+            date.  Inclusive.  ``None`` means no upper bound.
+
+    The date filter targets ``market_days.date`` (the calendar date of
+    the market the entry was assigned to), NOT ``fmnp_entries.created_at``
+    (the data-entry timestamp).  This matches the user's mental model
+    when searching "FMNP checks from market days in May" — they're
+    asking about the market dates, not when a coordinator typed them in.
+    """
     conn = get_connection()
-    status_filter = "AND f.status = 'Active'" if active_only else ""
+    where_parts = []
+    params: list = []
     if market_day_id:
-        rows = conn.execute(f"""
-            SELECT f.*, v.name as vendor_name, md.date as market_day_date,
-                   m.name as market_name
-            FROM fmnp_entries f
-            JOIN vendors v ON f.vendor_id = v.id
-            JOIN market_days md ON f.market_day_id = md.id
-            JOIN markets m ON md.market_id = m.id
-            WHERE f.market_day_id=? {status_filter}
-            ORDER BY f.created_at DESC
-        """, (market_day_id,)).fetchall()
-    else:
-        where = "WHERE f.status = 'Active'" if active_only else ""
-        rows = conn.execute(f"""
-            SELECT f.*, v.name as vendor_name, md.date as market_day_date,
-                   m.name as market_name
-            FROM fmnp_entries f
-            JOIN vendors v ON f.vendor_id = v.id
-            JOIN market_days md ON f.market_day_id = md.id
-            JOIN markets m ON md.market_id = m.id
-            {where}
-            ORDER BY f.created_at DESC
-        """).fetchall()
+        where_parts.append("f.market_day_id = ?")
+        params.append(market_day_id)
+    if active_only:
+        where_parts.append("f.status = 'Active'")
+    if date_from:
+        where_parts.append("md.date >= ?")
+        params.append(date_from)
+    if date_to:
+        where_parts.append("md.date <= ?")
+        params.append(date_to)
+    where_clause = (
+        "WHERE " + " AND ".join(where_parts)
+        if where_parts else "")
+    rows = conn.execute(f"""
+        SELECT f.*, v.name as vendor_name, md.date as market_day_date,
+               m.name as market_name
+        FROM fmnp_entries f
+        JOIN vendors v ON f.vendor_id = v.id
+        JOIN market_days md ON f.market_day_id = md.id
+        JOIN markets m ON md.market_id = m.id
+        {where_clause}
+        ORDER BY md.date DESC, f.created_at DESC
+    """, params).fetchall()
     return [dict(r) for r in rows]
 
 

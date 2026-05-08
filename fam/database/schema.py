@@ -12,7 +12,7 @@ from .connection import get_connection, get_db_path
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 34
+CURRENT_SCHEMA_VERSION = 37
 
 # v2.0.1: number of versioned pre-migration .bak files to retain
 # alongside the rolling runtime backups in ``backups/``.
@@ -166,6 +166,30 @@ CREATE TABLE IF NOT EXISTS payment_line_items (
     method_amount INTEGER NOT NULL,
     match_amount INTEGER NOT NULL,
     customer_charged INTEGER NOT NULL,
+    -- v2.0.7 (schema v36): customer-side denomination forfeit
+    -- (Phase B).  Set ONLY when a denominated unit's face value
+    -- exceeded the receipt's remaining capacity AND FAM match
+    -- couldn't fully absorb the gap.  ``customer_charged +
+    -- customer_forfeit_cents == unit_count × denomination`` —
+    -- i.e. the customer's physical handout is recoverable.
+    -- Always 0 for non-denom rows and for normal denom rows
+    -- where Phase A (FAM match reduction) covered the full
+    -- overage.  See FINANCIAL_FORMULA.md §3b.1 for the policy.
+    customer_forfeit_cents INTEGER NOT NULL DEFAULT 0,
+    -- v2.0.7+ (schema v37, audit 2026-05-07): user-cap flag.
+    -- TRUE when the volunteer explicitly typed this row's
+    -- charge value (or toggled the ⚡ icon to Locked).  The
+    -- engine's cap-aware paths preserve customer_charged for
+    -- user-capped rows; Auto-Distribute skips them.
+    -- Persisting this flag means a Locked row survives draft
+    -- save/restore and adjustment round-trips — without it,
+    -- the volunteer's intent silently resets to "auto-fillable"
+    -- on every reload, and a tightening cap could re-inflate
+    -- a value the volunteer had pinned.
+    -- Always 0 for denom rows (they have their own implicit
+    -- lock via physical scrip) and for legacy pre-v37 rows
+    -- (the migration backfills 0 for everyone).
+    user_capped INTEGER NOT NULL DEFAULT 0,
     photo_path TEXT DEFAULT NULL,
     photo_drive_url TEXT DEFAULT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -1602,6 +1626,199 @@ def _migrate_v33_to_v34(conn):
         "Migration v33->v34 complete: schema_version deduplicated and unique-indexed")
 
 
+def _migrate_v34_to_v35(conn):
+    """Backfill SNAP and Cash bindings on every vendor.
+
+    v2.0.7 policy change: SNAP and Cash are universally accepted
+    at every vendor.  The Settings → Vendors → Eligible Payment
+    Methods dialog locks their checkboxes, and the model layer
+    refuses to unassign them.  This migration ensures the binding
+    is present regardless of how the DB got to v34 — coordinator
+    manually unassigning, .fam import dropping rows, legacy data
+    drift, etc.
+
+    Mechanism: ``INSERT OR IGNORE`` for every (vendor, method)
+    pair where the method's name is in the universal set
+    (``UNIVERSAL_VENDOR_METHOD_NAMES``).  Idempotent — safe to
+    re-run.
+
+    The user-reported scenario this addresses (2026-05-06): a
+    customer ordering across vendors with at least one SNAP-
+    ineligible vendor caused mixed-eligibility distribution
+    issues (SNAP overflow onto ineligible vendors, contradictory
+    per-vendor reconciliation messages).  By making SNAP and Cash
+    universal at the data model, the entire mixed-eligibility
+    problem class for these methods disappears.  The v2.0.7
+    eligibility-aware engine code remains in place as a safety
+    net for future methods that DO have real-world eligibility
+    constraints (produce-only Food Bucks, etc.).
+    """
+    # The universal method set is hardcoded by name to mirror how
+    # FMNP, Unallocated Funds, and other system-aware references
+    # work throughout the codebase.  Coordinators are explicitly
+    # warned not to rename SNAP or Cash.
+    universal_names = ('SNAP', 'Cash')
+    placeholders = ','.join('?' * len(universal_names))
+    universal_method_ids = [
+        r[0] for r in conn.execute(
+            f"SELECT id FROM payment_methods WHERE name IN ({placeholders})",
+            universal_names,
+        ).fetchall()
+    ]
+    if not universal_method_ids:
+        logger.info(
+            "Migration v34->v35: no SNAP/Cash methods found "
+            "(unusual fresh-install state); skipping universal "
+            "binding backfill")
+        conn.commit()
+        return
+
+    vendor_ids = [r[0] for r in conn.execute(
+        "SELECT id FROM vendors").fetchall()]
+
+    inserted = 0
+    for vid in vendor_ids:
+        for pmid in universal_method_ids:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO vendor_payment_methods "
+                "(vendor_id, payment_method_id) VALUES (?, ?)",
+                (vid, pmid),
+            )
+            inserted += cur.rowcount or 0
+    conn.commit()
+    logger.info(
+        "Migration v34->v35 complete: %d universal vendor-method "
+        "bindings inserted (SNAP, Cash) across %d vendor(s)",
+        inserted, len(vendor_ids))
+
+
+def _migrate_v35_to_v36(conn):
+    """Add ``customer_forfeit_cents`` column to ``payment_line_items``.
+
+    v2.0.7 follow-up (user-reported 2026-05-07): when a customer
+    hands a denominated payment unit (e.g. $10 Food RX token) for
+    a receipt smaller than the unit's face value (e.g. $6.52),
+    Phase B of the engine's forfeit pass reduces ``customer_charged``
+    to the receipt-coverage portion ($6.52) AND tags the row with
+    ``customer_forfeit_cents`` to record the unaccounted token-value
+    portion ($3.48).
+
+    Pre-v36 the column did not exist on the table — Phase B's
+    forfeit metadata was computed in-memory by the engine but
+    never persisted.  Reports could not show the forfeit, and
+    Layer 2A's spinbox-vs-engine guard couldn't read the value
+    back from the DB on AdjustmentDialog re-open (so the saved
+    sub-denomination ``customer_charged`` looked like drift to the
+    snap-back loop, which over-corrected in earlier iterations).
+
+    Migration: ``ALTER TABLE ... ADD COLUMN`` with ``NOT NULL
+    DEFAULT 0`` so all pre-existing rows (which conceptually had
+    no Phase B forfeit) get a 0 value backfilled automatically.
+    Idempotent via the ``IF NOT EXISTS`` table-check pattern that
+    SQLite's ``ALTER TABLE`` doesn't natively support — we walk
+    pragma_table_info to detect the column first.
+
+    The vendor reimbursement contract is unchanged: ``Total Due
+    to Vendor`` still equals ``SUM(t.receipt_total)``.  The new
+    column lets reports surface customer forfeit as a separate
+    column WITHOUT shifting any vendor's reimbursement check
+    amount (which would confuse end-of-month reconciliation).
+    """
+    # Defensive: skip when ``payment_line_items`` doesn't exist.
+    # The full chain of migrations runs in order during upgrade,
+    # but tests / fresh-install replays may invoke this migration
+    # against a partially-built schema.  The CREATE TABLE in this
+    # module's top-level DDL already declares the column for fresh
+    # installs, so this migration only needs to handle existing
+    # tables that lack it.
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='payment_line_items'"
+    ).fetchone()
+    if not table_exists:
+        logger.info(
+            "Migration v35->v36: payment_line_items table not "
+            "present yet; skipping (fresh install path will create "
+            "the column via CREATE TABLE)")
+        conn.commit()
+        return
+
+    # Detect the column.  ``ALTER TABLE ... ADD COLUMN IF NOT
+    # EXISTS`` is not supported on every SQLite version we ship,
+    # so we check the schema explicitly.
+    cols = {row[1] for row in conn.execute(
+        "PRAGMA table_info(payment_line_items)").fetchall()}
+    if 'customer_forfeit_cents' in cols:
+        logger.info(
+            "Migration v35->v36: customer_forfeit_cents column "
+            "already present; skipping (idempotent re-run)")
+        conn.commit()
+        return
+    conn.execute(
+        "ALTER TABLE payment_line_items "
+        "ADD COLUMN customer_forfeit_cents INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+    logger.info(
+        "Migration v35->v36 complete: customer_forfeit_cents "
+        "column added to payment_line_items (default 0 for all "
+        "pre-existing rows)")
+
+
+def _migrate_v36_to_v37(conn):
+    """Add ``user_capped`` column to ``payment_line_items``.
+
+    v2.0.7+ audit (2026-05-07): the user-cap flag (set when a
+    volunteer manually types a charge or clicks the ⚡ toggle)
+    was previously a runtime-only attribute on ``PaymentRow``
+    (``_user_capped``) — never persisted to the DB.  Save+reload
+    silently dropped the volunteer's intent: a row pinned at $50
+    came back as "auto-fillable", and the next Auto-Distribute
+    or cap-aware engine pass could re-inflate the value, undoing
+    the lock without warning.
+
+    Persisting the flag makes user-cap a first-class concept
+    that survives draft save/restore and adjustment round-trips.
+    Combined with the engine's existing user_capped propagation
+    (calculations.py cap paths + Pass 4) and the row-layer
+    defensive floor in ``set_max_charge``, the volunteer's
+    typed value is now end-to-end durable.
+
+    Migration: ``ALTER TABLE ADD COLUMN`` with ``NOT NULL
+    DEFAULT 0``.  All pre-existing rows backfill to 0 (= not
+    user-capped) — an accurate default because the flag did not
+    exist as a concept before this version, so no row could
+    have been intentionally locked.  Idempotent re-run check
+    via ``pragma_table_info``.
+    """
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='payment_line_items'"
+    ).fetchone()
+    if not table_exists:
+        logger.info(
+            "Migration v36->v37: payment_line_items table not "
+            "present yet; skipping (fresh install path will create "
+            "the column via CREATE TABLE)")
+        conn.commit()
+        return
+    cols = {row[1] for row in conn.execute(
+        "PRAGMA table_info(payment_line_items)").fetchall()}
+    if 'user_capped' in cols:
+        logger.info(
+            "Migration v36->v37: user_capped column already "
+            "present; skipping (idempotent re-run)")
+        conn.commit()
+        return
+    conn.execute(
+        "ALTER TABLE payment_line_items "
+        "ADD COLUMN user_capped INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+    logger.info(
+        "Migration v36->v37 complete: user_capped column added "
+        "to payment_line_items (default 0 for all pre-existing "
+        "rows)")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -1664,6 +1881,16 @@ def initialize_database():
         # Reset cycles will be constraint-protected from
         # producing duplicate version rows.
         _migrate_v33_to_v34(conn)
+        # v34→v35 SNAP/Cash universal vendor binding.  No-op on a
+        # truly fresh install (no vendors yet), but runs after
+        # ``seed_sample_data`` for the Load-Defaults flow.
+        _migrate_v34_to_v35(conn)
+        # v35→v36 customer_forfeit_cents column.  No-op on fresh
+        # install because the column is in the CREATE TABLE
+        # definition above; idempotent re-runs are safe.
+        _migrate_v35_to_v36(conn)
+        # v36→v37 user_capped column.  Same idempotency rationale.
+        _migrate_v36_to_v37(conn)
         # ``INSERT OR IGNORE`` is now constraint-protected by the
         # UNIQUE INDEX created above.  On a true fresh install the
         # table is empty so the insert always succeeds; on a
@@ -1853,6 +2080,18 @@ def initialize_database():
     if current_version < 34:
         _migrate_v33_to_v34(conn)
         current_version = 34
+
+    if current_version < 35:
+        _migrate_v34_to_v35(conn)
+        current_version = 35
+
+    if current_version < 36:
+        _migrate_v35_to_v36(conn)
+        current_version = 36
+
+    if current_version < 37:
+        _migrate_v36_to_v37(conn)
+        current_version = 37
 
     # Record the final version (avoid duplicate if already at this version).
     # As of v34 there is a UNIQUE INDEX on schema_version.version, so this

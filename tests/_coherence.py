@@ -119,10 +119,17 @@ def _recompute_engine_state(screen):
     items_copy = [dict(it) for it in items]
     if not items_copy:
         return items_copy, None
+    # v2.0.7+ user-cap (audit 2026-05-07): include user_capped
+    # flag so the coherence audit's engine call matches the
+    # production engine call (PaymentScreen._confirm_payment +
+    # _update_summary_impl).  Without this, user-capped rows
+    # would inflate in the audit's engine pass but not the
+    # production pass — V3/U6 invariants would false-fail.
     entries = [
         {'method_amount': it['method_amount'],
          'match_percent': it['match_percent'],
-         'denomination': it.get('denomination')}
+         'denomination': it.get('denomination'),
+         'user_capped': bool(it.get('user_capped', False))}
         for it in items_copy
     ]
     result = calculate_payment_breakdown(
@@ -509,11 +516,17 @@ def _check_engine_ui(items, result, screen, report,
         # (charge × pct).  V5 (U2) already enforces the per-row
         # math so we don't need to duplicate here.
 
-    # U5, U6, U7 — summary cards
+    # U5, U6, U7, U13 — summary cards
     cards = screen.summary_row.cards
     fam_card = _parse_dollar_label(cards['fam_match'].value_label.text())
     customer_card = _parse_dollar_label(
         cards['customer_pays'].value_label.text())
+    allocated_card = _parse_dollar_label(
+        cards['allocated'].value_label.text())
+    forfeit_card = (
+        _parse_dollar_label(
+            cards['customer_forfeit'].value_label.text())
+        if 'customer_forfeit' in cards else None)
     if fam_card is not None and fam_card != result['fam_subsidy_total']:
         report.add(
             'U5', "fam_match card != result.fam_subsidy_total",
@@ -527,6 +540,37 @@ def _check_engine_ui(items, result, screen, report,
             'U6', "customer_pays card != result.customer_total_paid",
             expected=result['customer_total_paid'],
             actual=customer_card)
+    # U7 (v2.0.7-final, Option B): allocated card ALWAYS shows
+    # post-forfeit ``result.allocated_total``.  Penny-rec
+    # exception: when the engine's allocated_total is within 1¢
+    # of receipt total AND not over, the screen normalizes the
+    # card to receipt — mirror that here.
+    if allocated_card is not None and not cap_active:
+        expected_alloc = result['allocated_total']
+        eng_remaining = screen._order_total - expected_alloc
+        if (abs(eng_remaining) <= 1
+                and expected_alloc <= screen._order_total):
+            expected_alloc = screen._order_total
+        if (allocated_card != expected_alloc
+                and not allow_under_allocation):
+            report.add(
+                'U7',
+                "allocated card != result.allocated_total "
+                "(post-forfeit; v2.0.7-final unconditional)",
+                expected=expected_alloc, actual=allocated_card)
+    # U13 (v2.0.7-final, schema v36): Customer Forfeit card
+    # ALWAYS visible; equals Σ_li customer_forfeit_cents.
+    # Phase A is NEVER counted here — only Phase B
+    # token-value loss.
+    if forfeit_card is not None:
+        expected_forfeit = sum(
+            (li.get('customer_forfeit_cents', 0) or 0)
+            for li in result.get('line_items', []))
+        if forfeit_card != expected_forfeit:
+            report.add(
+                'U13',
+                "customer_forfeit card != Σ customer_forfeit_cents",
+                expected=expected_forfeit, actual=forfeit_card)
 
 
 # ──────────────────────────────────────────────────────────────────

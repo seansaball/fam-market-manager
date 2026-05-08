@@ -222,8 +222,11 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
     physical-instrument counts with FAM contribution and made the
     report ambiguous when forfeit/cap reduced match.
     """
+    from fam.models.transaction import active_tx_status_clause
     placeholders = ','.join('?' for _ in md_ids)
-    where = f"WHERE t.market_day_id IN ({placeholders}) AND t.status IN ('Confirmed', 'Adjusted')"
+    where = (
+        f"WHERE t.market_day_id IN ({placeholders}) "
+        f"AND {active_tx_status_clause('t')}")
     params = list(md_ids)
 
     # Check if v19 vendor columns exist (handles un-migrated databases)
@@ -262,7 +265,8 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
                pl.method_name_snapshot AS method,
                COALESCE(SUM(pl.customer_charged), 0) AS customer_total,
                COALESCE(SUM(pl.match_amount), 0) AS match_total,
-               COALESCE(SUM(pl.method_amount), 0) AS method_total
+               COALESCE(SUM(pl.method_amount), 0) AS method_total,
+               COALESCE(SUM(pl.customer_forfeit_cents), 0) AS forfeit_total
         FROM payment_line_items pl
         JOIN transactions t ON pl.transaction_id = t.id
         JOIN vendors v ON t.vendor_id = v.id
@@ -297,15 +301,44 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
     all_methods = sorted({r['method'] for r in method_rows})
     method_cents_by_vendor: dict[tuple, dict[str, int]] = {}
     fam_match_by_vendor: dict[tuple, int] = {}
+    # v2.0.7 (schema v36): per-vendor sum of Phase B customer-side
+    # forfeit.  Surfaced as a "Customer Forfeit" column so the
+    # row identity reads cleanly across:
+    #   Σ(method-cols) + FAM Match + FMNP (External) = Total Due to Vendor
+    #   Σ(method-cols) + Customer Forfeit            = Customer's physical handout
+    # The vendor still gets exactly Total Due to Vendor (= receipt
+    # total).  The forfeit is the unaccounted portion of customer-
+    # paid denomination that didn't reach the vendor (e.g. customer
+    # hands $10 Food RX to a $6.52 receipt → vendor reimbursed
+    # $6.52, $3.48 forfeited).  Phase A (FAM match reduction) is
+    # NOT counted here — those are unused FAM funds, not customer-
+    # side losses.
+    customer_forfeit_by_vendor: dict[tuple, int] = {}
     for r in method_rows:
         key = (r['market_name'], r['vendor'])
         if r['method'] == UNALLOCATED_FUNDS_NAME:
             value = r['method_total']
         else:
-            value = r['customer_total']
+            # v2.0.7+ denomination-integrity: per-method column
+            # shows the customer's actual physical denomination
+            # payment (= customer_charged + forfeit).  For
+            # denominated methods this preserves the token face
+            # value (e.g. $10 for 1 × $10 Food RX → $1.45 receipt
+            # shows Food RX = $10, NOT $1.45).  For non-denom
+            # methods forfeit is always 0, so this equals
+            # customer_charged exactly (no behavior change).
+            # The Customer Forfeit column then subtracts the
+            # over-tender so the reconciliation reads:
+            #   Σ(method-cols) + FAM Match - Customer Forfeit
+            #     = Total Due to Vendor
+            value = (r['customer_total']
+                     + (r['forfeit_total'] or 0))
         method_cents_by_vendor.setdefault(key, {})[r['method']] = value
         fam_match_by_vendor[key] = (
             fam_match_by_vendor.get(key, 0) + r['match_total'])
+        customer_forfeit_by_vendor[key] = (
+            customer_forfeit_by_vendor.get(key, 0)
+            + (r['forfeit_total'] or 0))
 
     # Internal "row in cents" representation; converted to dollars
     # at the end (see _emit_row_in_dollars below).
@@ -322,6 +355,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
             'Date(s)': r['transaction_dates'] or '',
             '_total_due_cents': r['gross_sales'],
             '_fam_match_cents': fam_match_by_vendor.get(key, 0),
+            '_customer_forfeit_cents': customer_forfeit_by_vendor.get(key, 0),
             '_fmnp_external_cents': 0,
             '_method_cents': dict(method_cents_by_vendor.get(key, {})),
             'Check Payable To': r['check_payable_to'],
@@ -367,6 +401,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
                 'Date(s)': r['fmnp_dates'] or '',
                 '_total_due_cents': r['fmnp_total'],
                 '_fam_match_cents': 0,
+                '_customer_forfeit_cents': 0,
                 '_fmnp_external_cents': r['fmnp_total'],
                 '_method_cents': {},
                 'Check Payable To': r['check_payable_to'],
@@ -390,6 +425,16 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         for m in all_methods:
             out_row[m] = cents_to_dollars(rc['_method_cents'].get(m, 0))
         out_row['FMNP (External)'] = cents_to_dollars(rc['_fmnp_external_cents'])
+        # v2.0.7: Customer Forfeit appears AFTER the per-method
+        # columns and FMNP (External) so the row reads naturally
+        # as (vendor reimbursement breakdown) → (customer-side
+        # forfeit) → (admin metadata).  The math identity:
+        #   Σ(method-cols) + FAM Match + FMNP (External)
+        #     = Total Due to Vendor (vendor cashes this)
+        #   Σ(method-cols) + Customer Forfeit
+        #     = customer's physical handout (denominated face values)
+        out_row['Customer Forfeit'] = cents_to_dollars(
+            rc.get('_customer_forfeit_cents', 0))
         out_row['Check Payable To'] = rc['Check Payable To']
         out_row['Address'] = rc['Address']
         output.append(out_row)
@@ -403,13 +448,14 @@ def _collect_fam_match(conn, md_id: int) -> list[dict]:
     ).fetchone()
     md_date = md_row['date'] if md_row else ''
 
-    rows = conn.execute("""
+    from fam.models.transaction import active_tx_status_clause
+    rows = conn.execute(f"""
         SELECT pl.method_name_snapshot AS method,
                SUM(pl.method_amount) AS total_allocated,
                SUM(pl.match_amount) AS total_fam_match
         FROM payment_line_items pl
         JOIN transactions t ON pl.transaction_id = t.id
-        WHERE t.market_day_id = ? AND t.status IN ('Confirmed', 'Adjusted')
+        WHERE t.market_day_id = ? AND {active_tx_status_clause('t')}
         GROUP BY pl.method_name_snapshot
         ORDER BY pl.method_name_snapshot
     """, [md_id]).fetchall()
@@ -455,15 +501,47 @@ def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
     """Detailed Ledger — mirrors reports_screen.py L660-743."""
     from fam.utils.photo_paths import parse_photo_paths
 
-    rows = conn.execute("""
+    # v2.0.7+ denomination-integrity:
+    #   * customer_paid = customer_charged + forfeit (what the
+    #     customer literally handed over, denomination-true).
+    #   * Payment Methods column shows the same value broken down
+    #     per method — NOT method_amount, which intermingles FAM
+    #     match (e.g. 2 × $10 Food RX + $5.63 match would show
+    #     "Food RX: $25.63", obscuring the true $20 token value).
+    # The Customer Forfeit column subtracts the over-tender so:
+    #   Customer Paid + FAM Match - Customer Forfeit = Receipt Total
+    #
+    # EXCEPTION — Unallocated Funds (schema v25+, system-managed):
+    # this method records the FAM-absorbed gap from a customer-gone
+    # adjustment.  customer_charged is intentionally 0 (the customer
+    # didn't hand it over — FAM absorbed it), but the vendor IS
+    # still owed that amount.  Without the CASE carve-out below the
+    # Payment Methods column would render "Unallocated Funds: $0.00"
+    # for every adjusted transaction, hiding the absorbed loss
+    # (user-reported 2026-05-07).  Vendor Reimbursement already had
+    # the same carve-out at the per-method aggregation; this mirrors
+    # it in the per-row GROUP_CONCAT.
+    from fam.models.payment_method import UNALLOCATED_FUNDS_NAME
+    rows = conn.execute(f"""
         SELECT t.id AS txn_id, t.fam_transaction_id, v.name AS vendor,
                t.receipt_total, t.status, t.created_at,
                COALESCE(co.customer_label, '') AS customer_id,
                COALESCE(co.zip_code, '') AS zip_code,
-               COALESCE(SUM(pl.customer_charged), 0) AS customer_paid,
+               COALESCE(SUM(pl.customer_charged
+                            + pl.customer_forfeit_cents), 0)
+                   AS customer_paid,
                COALESCE(SUM(pl.match_amount), 0) AS fam_match,
+               COALESCE(SUM(pl.customer_forfeit_cents), 0) AS customer_forfeit,
                GROUP_CONCAT(pl.method_name_snapshot || ': $' ||
-                   PRINTF('%.2f', pl.method_amount / 100.0), ', ') AS methods
+                   PRINTF('%.2f',
+                          CASE WHEN pl.method_name_snapshot
+                                    = '{UNALLOCATED_FUNDS_NAME}'
+                               THEN pl.method_amount / 100.0
+                               ELSE (pl.customer_charged
+                                     + pl.customer_forfeit_cents)
+                                    / 100.0
+                          END),
+                   ', ') AS methods
         FROM transactions t
         JOIN vendors v ON t.vendor_id = v.id
         LEFT JOIN customer_orders co ON t.customer_order_id = co.id
@@ -509,6 +587,14 @@ def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
             'Receipt Total': cents_to_dollars(r['receipt_total']),
             'Customer Paid': cents_to_dollars(r['customer_paid']),
             'FAM Match': cents_to_dollars(r['fam_match']),
+            # v2.0.7 (schema v36): per-transaction customer-side
+            # denomination forfeit.  Non-zero ONLY when the customer
+            # handed a denomination unit larger than the receipt
+            # remaining (e.g. $10 Food RX → $6.52 receipt = $3.48
+            # forfeit).  Lets coordinators reconcile the customer's
+            # physical handouts (denomination face values) against
+            # what reached the vendor.
+            'Customer Forfeit': cents_to_dollars(r['customer_forfeit']),
             'Status': r['status'],
             'Payment Methods': r['methods'] or '',
         }
@@ -541,6 +627,10 @@ def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
             'Receipt Total': cents_to_dollars(r['amount']),
             'Customer Paid': 0,
             'FAM Match': cents_to_dollars(r['amount']),
+            # External FMNP entries never have customer-side forfeit
+            # (the vendor matched the check directly at the booth;
+            # FAM reimburses face value).
+            'Customer Forfeit': 0,
             'Status': 'FMNP Entry',
             'Payment Methods': check_info,
         })

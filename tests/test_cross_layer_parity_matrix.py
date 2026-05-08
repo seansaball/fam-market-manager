@@ -637,6 +637,45 @@ def _engine_result(screen):
 # Layer 1 — UI-visible field assertions
 # ════════════════════════════════════════════════════════════════════
 
+def _per_vendor_overage_total(screen, capped_alloc: int) -> int:
+    """Return the SUM of per-vendor over-allocations on denom
+    rows when order-level is balanced (multi-vendor F1 shape).
+    Used by the parity matrix to predict the post-forfeit
+    allocated_total: ``capped_alloc - per_vendor_overage_total``.
+    Returns 0 when order-level is unbalanced (caller handles
+    that case separately) or when no per-vendor overage exists."""
+    if capped_alloc != screen._order_total:
+        return 0
+    vendor_receipts: dict = {}
+    for t in screen._order_transactions:
+        vid = t.get('vendor_id')
+        if vid is not None:
+            vendor_receipts[vid] = (
+                vendor_receipts.get(vid, 0) + t['receipt_total'])
+    vendor_alloc: dict = {}
+    for r in screen._payment_rows:
+        d = r.get_data()
+        if not d or d['method_amount'] <= 0:
+            continue
+        denom = d.get('denomination') or 0
+        if denom <= 0:
+            continue
+        bvid = d.get('bound_vendor_id')
+        if bvid is None and len(vendor_receipts) == 1:
+            bvid = next(iter(vendor_receipts))
+        if bvid in vendor_receipts:
+            vendor_alloc[bvid] = (
+                vendor_alloc.get(bvid, 0) + d['method_amount'])
+    return sum(
+        max(0, vendor_alloc.get(vid, 0) - vendor_receipts[vid])
+        for vid in vendor_receipts)
+
+
+def _has_per_vendor_overage(screen, capped_alloc: int) -> bool:
+    """Boolean version of ``_per_vendor_overage_total``."""
+    return _per_vendor_overage_total(screen, capped_alloc) > 0
+
+
 def _parse_dollars(text: str) -> int:
     """Parse a $X.XX (possibly $-X.XX) into integer cents."""
     s = text.strip().lstrip('$').replace(',', '')
@@ -749,18 +788,31 @@ def _assert_layer1_payment_screen(screen, items, result, scenario):
             ma = min(ma, max_ma)
             non_denom_running += ma
         capped_alloc += ma
-    # When |allocation_remaining| ≤ 1 and not denom-overage,
-    # _update_summary normalizes the card to receipt_total.
-    eng_remaining_pre = screen._order_total - capped_alloc
-    if abs(eng_remaining_pre) <= 1 and capped_alloc <= screen._order_total:
+    # v2.0.7-final (Option B, schema v36): the allocated card
+    # ALWAYS shows the post-forfeit value (=
+    # ``result['allocated_total']`` AFTER
+    # ``_apply_denomination_forfeit`` ran).  The Customer
+    # Forfeit card surfaces any Phase B token-value loss
+    # explicitly, so the volunteer never sees phantom-negative
+    # remaining and the card math always balances cleanly.
+    # ``result`` is built by ``_engine_result`` which already
+    # applies forfeit when overage > 0; we trust its
+    # ``allocated_total`` directly.
+    expected_card = result['allocated_total']
+    # Penny-rec exception: when the engine landed at receipt ± 1¢
+    # via ``allocation_remaining`` absorption, the screen
+    # normalizes the displayed card to receipt total.  Mirror
+    # that here.
+    eng_remaining = screen._order_total - expected_card
+    if (abs(eng_remaining) <= 1
+            and expected_card <= screen._order_total):
         expected_card = screen._order_total
-    else:
-        expected_card = capped_alloc
     assert shown_alloc == expected_card, (
         f"[{scenario.name}] allocated card {shown_alloc}c != "
-        f"expected pre-forfeit capped allocation {expected_card}c "
+        f"expected card value {expected_card}c "
         f"(receipt={screen._order_total}c, "
-        f"effective={effective_total}c, capped_alloc={capped_alloc}c)")
+        f"effective={effective_total}c, capped_alloc={capped_alloc}c, "
+        f"engine_post_forfeit={result['allocated_total']}c)")
 
     # Row labels — every row's match label and total label must
     # match engine output.

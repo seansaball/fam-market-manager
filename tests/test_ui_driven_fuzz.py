@@ -203,10 +203,15 @@ def _check_invariants(screen, log, action_label):
         from fam.utils.calculations import calculate_payment_breakdown
         items = screen._collect_line_items()
         if items:
+            # v2.0.7+ user-cap (audit 2026-05-07): include
+            # user_capped flag so the audit engine call matches
+            # what the production engine call uses (see
+            # PaymentScreen._confirm_payment).
             entries = [
                 {'method_amount': it['method_amount'],
                  'match_percent': it['match_percent'],
-                 'denomination': it.get('denomination')}
+                 'denomination': it.get('denomination'),
+                 'user_capped': bool(it.get('user_capped', False))}
                 for it in items
             ]
             result = calculate_payment_breakdown(

@@ -275,13 +275,27 @@ class TestUI_V1_RemainingZeroForFullyAllocatedVendor:
 # ════════════════════════════════════════════════════════════════════
 
 class TestUI_V2_RowSumEqualsReceiptMinusRemaining:
-    """Every cell visible in a vendor's row must add up to what's
-    been allocated to that vendor.  If the per-method cells say
-    SNAP $X + Cash $Y but Remaining shows $Z, then X + Y must
-    equal receipt - Z."""
+    """v2.0.7+ denomination-integrity: per-method cells now display
+    the customer's denomination-true payment (tokens × face value
+    for denom methods, vendor-share method_amount for non-denom).
+    The pre-v2.0.7 invariant ``cells_sum == receipt - remaining``
+    no longer holds because denom cells intentionally exclude the
+    FAM-match contribution to make the breakdown denomination-pure
+    (e.g. "2 × $10.00 = $20.00" instead of "2 × $10.00 = $25.63"
+    where $5.63 was hidden FAM match).
 
-    def test_per_vendor_row_sum_matches_remaining(
+    The new invariant pins:
+
+      1. Every denom cell's "N × $D = $T" text is internally
+         consistent (T == N × D, no FAM-match intermingling).
+      2. cells_sum ≤ allocated (denom cells exclude match, so the
+         total cell sum is at most the allocated amount).
+      3. cells_sum > 0 whenever allocated > 0 (a vendor with
+         non-zero allocation MUST show non-zero cells)."""
+
+    def test_per_vendor_row_sum_matches_denomination_true_payment(
             self, qtbot, screenshot_db):
+        import re
         from fam.ui.payment_screen import PaymentScreen
         conn, order_id = screenshot_db
         screen = PaymentScreen()
@@ -310,19 +324,46 @@ class TestUI_V2_RowSumEqualsReceiptMinusRemaining:
             row._set_active_charge(charge_cents)
         screen._update_summary()
 
+        # Pattern matches the denom cell text "✓ N × $D.DD = $T.TT"
+        denom_pat = re.compile(
+            r'(\d+)\s*[×x]\s*\$(\d+\.\d{2})\s*=\s*\$(\d+\.\d{2})')
+
         rows = _read_vendor_table(screen)
         for r in rows:
             allocated = r['receipt_cents'] - r['remaining_cents']
             cells_sum = 0
             for cell_text in r['per_method'].values():
                 cells_sum += _extract_method_amount_cents(cell_text)
-            assert cells_sum == allocated, (
+                # New invariant 1: denom cell text must be
+                # internally consistent (T == N × D).
+                m = denom_pat.search(cell_text)
+                if m:
+                    n = int(m.group(1))
+                    d = float(m.group(2))
+                    t = float(m.group(3))
+                    expected_t = round(n * d, 2)
+                    assert abs(t - expected_t) <= 0.01, (
+                        f"V2 (denom-pure) violated for vendor "
+                        f"{r['vendor']!r}: cell shows "
+                        f"{n} × ${d:.2f} = ${t:.2f}, but "
+                        f"{n} × ${d:.2f} actually equals "
+                        f"${expected_t:.2f}.  Cell: {cell_text!r}")
+
+            # New invariant 2 + 3: cells_sum ≤ allocated and
+            # > 0 when allocated > 0 (non-strict equality because
+            # denom cells exclude FAM match).
+            assert cells_sum <= allocated, (
                 f"V2 violated: vendor {r['vendor']!r}: "
-                f"receipt={r['receipt_cents']}c "
-                f"remaining={r['remaining_cents']}c → "
-                f"expected_sum={allocated}c "
-                f"per_method_sum={cells_sum}c.  Row cells:"
-                f"\n  {r['per_method']}")
+                f"per_method_sum ({cells_sum}c) must be ≤ "
+                f"allocated ({allocated}c).  Cells now show "
+                f"denomination-true customer payment (no FAM "
+                f"match), so the sum cannot exceed allocated.  "
+                f"Row cells:\n  {r['per_method']}")
+            if allocated > 0:
+                assert cells_sum > 0, (
+                    f"V2 violated: vendor {r['vendor']!r} has "
+                    f"allocation {allocated}c but cells sum to 0.  "
+                    f"Row cells:\n  {r['per_method']}")
 
 
 def _extract_method_amount_cents(cell_text: str) -> int:

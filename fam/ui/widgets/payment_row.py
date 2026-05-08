@@ -14,7 +14,10 @@ from fam.utils.calculations import charge_to_method_amount, method_amount_to_cha
 from fam.utils.money import dollars_to_cents, cents_to_dollars, format_dollars
 
 logger = logging.getLogger('fam.ui.widgets.payment_row')
-from fam.ui.styles import LIGHT_GRAY, WHITE, ERROR_COLOR, SUBTITLE_GRAY, HARVEST_GOLD, ACCENT_GREEN
+from fam.ui.styles import (
+    LIGHT_GRAY, WHITE, ERROR_COLOR, SUBTITLE_GRAY, MEDIUM_GRAY,
+    HARVEST_GOLD, ACCENT_GREEN, PRIMARY_GREEN,
+)
 from fam.ui.helpers import (
     NoScrollDoubleSpinBox, NoScrollSpinBox, NoScrollComboBox,
 )
@@ -192,6 +195,13 @@ class PaymentRow(QFrame):
 
     changed = Signal()
     remove_requested = Signal(object)  # emits self
+    # v2.0.7+ user-cap radio-button (user-reported 2026-05-07):
+    # emitted when this row's ⚡ toggle flips from Locked → Active.
+    # The PaymentScreen connects this to a handler that Locks all
+    # OTHER non-denom rows, enforcing the "exactly one overflow
+    # target" invariant.  Auto-Distribute then has a single,
+    # unambiguous row to absorb the remainder.
+    auto_distribute_activated = Signal(object)  # emits self
 
     def __init__(self, parent=None, market_id=None,
                  single_vendor_mode: bool = False):
@@ -203,6 +213,20 @@ class PaymentRow(QFrame):
         # this list is intersected with vendor-level eligibility to
         # populate the per-row vendor dropdown.
         self._order_vendors: list[dict] = []
+        # v2.0.7+ user-cap (user-reported 2026-05-07): when the user
+        # types a charge into a non-denom row's amount_spin, mark
+        # this row as "user-capped" — the engine's cap-aware Pass 4
+        # give-back must NOT inflate this row to absorb the budget,
+        # and the UI write-back must NOT clobber the typed value
+        # with the engine's inflated value.  Pre-fix, typing $125
+        # SNAP for a customer who only had $125 on their EBT card
+        # caused the engine to silently inflate to $138.09 ("absorb
+        # the rest") instead of letting Remaining > 0 surface so
+        # the volunteer could add a Cash row for the gap.
+        # Reset when the method changes (different method = different
+        # constraint) or when Auto-Distribute runs (an explicit user
+        # request to redistribute everything).
+        self._user_capped = False
         self.setStyleSheet(f"""
             PaymentRow {{
                 background-color: {WHITE};
@@ -278,8 +302,44 @@ class PaymentRow(QFrame):
                 border: none;
             }}
         """)
-        self.amount_spin.valueChanged.connect(self._on_changed)
+        # v2.0.7+ user-cap: amount_spin.valueChanged is user-only
+        # (programmatic writes via _set_active_charge block signals
+        # on this spinbox), so we can use it as a reliable signal
+        # that the user has explicitly typed a charge.  Mark the
+        # row as user-capped FIRST (so _on_changed sees the flag
+        # when it dispatches the engine recalc), then delegate.
+        self.amount_spin.valueChanged.connect(
+            self._on_amount_user_changed)
         layout.addWidget(self.amount_spin)
+
+        # v2.0.7+ auto-distribute toggle (user-reported 2026-05-07).
+        # Visible only on non-denom rows.  Two states:
+        #   * Active (green ⚡): the row is in Auto-Distribute's
+        #     redistribution pool — clicking Auto-Distribute will
+        #     reset and refill it.  This is the default for newly-
+        #     added rows.
+        #   * Locked (amber ⚡): the row's value is pinned by the
+        #     volunteer — Auto-Distribute will SKIP it and
+        #     redistribute around it.  Set automatically when the
+        #     volunteer types into the amount field; can be
+        #     toggled back to Active by clicking the icon (no need
+        #     to delete + re-add the row to release the cap).
+        # Denom rows always hide this button — physical scrip is
+        # inherently locked by its tangible nature; the stepper
+        # already conveys that.
+        self.auto_distribute_btn = QPushButton("⚡")  # ⚡
+        self.auto_distribute_btn.setFixedSize(28, 28)
+        self.auto_distribute_btn.setCursor(Qt.PointingHandCursor)
+        self.auto_distribute_btn.clicked.connect(
+            self._on_auto_distribute_btn_clicked)
+        # Hidden until a non-denom method is selected (see
+        # _update_input_mode for the visibility rule).  When
+        # revealed, the initial style reflects user_capped=False
+        # (Active state) — fresh rows are in Auto-Distribute's
+        # pool until the volunteer types.
+        self.auto_distribute_btn.setVisible(False)
+        self._refresh_auto_distribute_btn_style()
+        layout.addWidget(self.auto_distribute_btn)
 
         # Denomination hint (visible when method has denomination set but stepper not active)
         self.denom_hint = QLabel("")
@@ -475,6 +535,128 @@ class PaymentRow(QFrame):
         self._recompute()
         self.changed.emit()
 
+    # ── User-cap on charge (v2.0.7+) ────────────────────────────────
+
+    def _on_amount_user_changed(self, _val):
+        """User typed a value into amount_spin → mark the row as
+        user-capped so the engine respects it as a hard maximum.
+
+        Programmatic writes via ``_set_active_charge`` block signals
+        on amount_spin, so this handler fires only for genuine user
+        edits.
+
+        The cap survives method changes — a volunteer who typed
+        $125 before picking SNAP (or vice-versa) intends $125 to
+        stick once the method is selected.  The cap can be cleared
+        explicitly by clicking the row's auto-distribute toggle
+        (⚡ icon) — no need to delete and re-add the row."""
+        self._user_capped = True
+        self._refresh_auto_distribute_btn_style()
+        self._on_changed()
+
+    def _on_auto_distribute_btn_clicked(self):
+        """Toggle the row's auto-distribute eligibility.
+
+        Active → Locked: pin the row's current value (the
+        volunteer wants Auto-Distribute to stop touching it).
+
+        Locked → Active: release the cap AND become the single
+        overflow target.  Emits ``auto_distribute_activated`` so
+        the PaymentScreen can Lock all OTHER non-denom rows
+        (radio-button semantics — exactly one overflow target).
+
+        This lets the volunteer change their mind without
+        deleting and re-adding the row, and ensures Auto-
+        Distribute always has an unambiguous target."""
+        was_locked = self._user_capped
+        self._user_capped = not self._user_capped
+        self._refresh_auto_distribute_btn_style()
+        if was_locked and not self._user_capped:
+            # Locked → Active: claim the overflow-target role.
+            # Screen handler locks the previously-Active row.
+            self.auto_distribute_activated.emit(self)
+        # Notify the screen so any downstream summary / breakdown
+        # recompute reflects the change immediately.
+        self.changed.emit()
+
+    def _refresh_auto_distribute_btn_style(self):
+        """Update the ⚡ icon's visual state to match
+        ``_user_capped``.
+
+        Two visual states with SOLID fill colours so the state
+        is unmistakable at a glance across multiple rows:
+
+          * Active (user_capped=False): solid green ⚡ on white,
+            tooltip says "Auto-Distribute will fill this row".
+          * Locked (user_capped=True): solid grey ⚡ on white,
+            tooltip says "Locked — Auto-Distribute will skip".
+
+        Grey (not orange/warning) is the right semantic for the
+        locked state — locking a row isn't a warning, it's a
+        neutral "this row is fixed by the volunteer, leave it
+        alone" signal.  Reserves the warm/orange palette for
+        actual problems (cap warnings, validation errors)."""
+        if not hasattr(self, 'auto_distribute_btn'):
+            return
+        if self._user_capped:
+            # Locked — SOLID medium-grey fill, white ⚡, hover
+            # darkens.  Reads as neutral/inactive (the row is
+            # disabled from Auto-Distribute's perspective).
+            self.auto_distribute_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {MEDIUM_GRAY};
+                    color: white;
+                    border: 1.5px solid {MEDIUM_GRAY};
+                    border-radius: 14px;
+                    font-weight: bold;
+                    font-size: 13px;
+                    padding: 0px;
+                }}
+                QPushButton:hover {{
+                    background-color: {SUBTITLE_GRAY};
+                    border-color: {SUBTITLE_GRAY};
+                }}
+            """)
+            self.auto_distribute_btn.setToolTip(
+                "Locked — Auto-Distribute will skip this row.\n"
+                "Click to release: the next Auto-Distribute will "
+                "refill it.")
+        else:
+            # Active — SOLID green fill, white ⚡, hover darkens.
+            self.auto_distribute_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {ACCENT_GREEN};
+                    color: white;
+                    border: 1.5px solid {ACCENT_GREEN};
+                    border-radius: 14px;
+                    font-weight: bold;
+                    font-size: 13px;
+                    padding: 0px;
+                }}
+                QPushButton:hover {{
+                    background-color: {PRIMARY_GREEN};
+                    border-color: {PRIMARY_GREEN};
+                }}
+            """)
+            self.auto_distribute_btn.setToolTip(
+                "Auto-Distribute will fill this row.\n"
+                "Click to lock the current value (Auto-Distribute "
+                "will then skip it).")
+
+    def is_user_capped(self) -> bool:
+        """True when the user has explicitly typed a charge into
+        this row's amount_spin since the last cap-clear.  The
+        engine and UI must honour the typed value and not inflate
+        it during cap-aware give-back."""
+        return self._user_capped
+
+    def clear_user_cap(self):
+        """Clear the user-cap flag.  Currently unused by Auto-
+        Distribute (it skips user-capped rows instead of
+        clearing).  Reserved for explicit reset paths."""
+        self._user_capped = False
+        self._refresh_auto_distribute_btn_style()
+
     # ── Vendor binding (denominated rows only) ──────────────────────
 
     def set_order_vendors(self, vendors: list):
@@ -642,6 +824,19 @@ class PaymentRow(QFrame):
             else:
                 self.denom_hint.setVisible(False)
                 self.amount_spin.setSingleStep(1.00)
+        # v2.0.7+ auto-distribute toggle: visible only on non-
+        # denom methods (denom rows are inherently locked by
+        # physical scrip — the stepper conveys that already, the
+        # ⚡ toggle would be confusing).  Also hide when no
+        # method is selected (the placeholder row's intent is
+        # ambiguous — show the toggle once a real method is
+        # picked).
+        if hasattr(self, 'auto_distribute_btn'):
+            is_real_non_denom = bool(
+                method
+                and not (method.get('denomination')
+                         and method['denomination'] > 0))
+            self.auto_distribute_btn.setVisible(is_real_non_denom)
 
     def _get_active_charge(self) -> int:
         """Return charge in integer cents from whichever input is active."""
@@ -676,10 +871,33 @@ class PaymentRow(QFrame):
         the obsolete ``legacy_order_remaining`` floor for bound
         denom rows so they no longer get a phantom max=0 when
         cap-inflated non-denom rows over-count consumption.
+
+        v2.0.7+ user-cap (user-reported 2026-05-07): for non-denom
+        rows the user has explicitly capped (typed a value or
+        toggled the ⚡ icon to Locked), the max is FLOORED at the
+        row's current charge.  Without this, _push_row_limits
+        running after Auto-Distribute would compute Cash's max as 0
+        (because SNAP absorbed the whole budget) and Qt's silent
+        setMaximum() clamp would zero out the volunteer's typed
+        $50.  This is the lowest-layer defence — protects against
+        any current OR future caller passing a sub-current max for
+        a user-capped row.
         """
         if self._stepper_active:
             self._stepper.setMaxCharge(max_charge_cents)
         else:
+            if (getattr(self, '_user_capped', False)
+                    and not self._stepper_active):
+                # Floor the max at the row's current charge so a
+                # tighter computed max (e.g. from _push_row_limits
+                # after another row absorbed the budget) doesn't
+                # silently clamp the volunteer's typed value.  The
+                # max can still RAISE above current — that just
+                # gives the spinbox more headroom, no clamping.
+                current_cents = dollars_to_cents(
+                    self.amount_spin.value())
+                if max_charge_cents < current_cents:
+                    max_charge_cents = current_cents
             self.amount_spin.blockSignals(True)
             self.amount_spin.setMaximum(max(cents_to_dollars(max_charge_cents), 0.0))
             self.amount_spin.blockSignals(False)
@@ -731,6 +949,25 @@ class PaymentRow(QFrame):
             # against per-vendor remaining balance).  None / 0 means
             # non-denominated.
             'denomination': method.get('denomination'),
+            # v2.0.7 (schema v36): preserve any prior Phase B
+            # token-value forfeit through Adjustment round-trips.
+            # set_data() stashes the value here on load; the
+            # forfeit pass updates it during edits; get_data()
+            # returns it so the save path persists the latest.
+            'customer_forfeit_cents': getattr(
+                self, '_customer_forfeit_cents', 0),
+            # v2.0.7+ user-cap (user-reported 2026-05-07): True
+            # when the user has explicitly typed this row's
+            # charge.  The engine's Pass 4 cap-aware give-back
+            # MUST skip user-capped rows (don't inflate their
+            # customer_charged to absorb match-cap shrinkage),
+            # and the UI write-back MUST NOT clobber the typed
+            # value with the engine's inflated value.  Effect:
+            # the typed amount survives recalculation; any
+            # under-coverage surfaces as Remaining > 0 so the
+            # volunteer can add another row to absorb the gap
+            # (e.g. Cash for the rest of the receipt).
+            'user_capped': bool(self._user_capped),
         }
 
     def get_selected_method_id(self):
@@ -826,7 +1063,8 @@ class PaymentRow(QFrame):
         self.total_label.setText(format_dollars(total))
 
     def set_data(self, payment_method_id, method_amount,
-                 customer_charged=None, bound_vendor_id=None):
+                 customer_charged=None, bound_vendor_id=None,
+                 customer_forfeit_cents=0, user_capped=False):
         """Set the row from existing data (DB row).
 
         Parameters
@@ -845,6 +1083,22 @@ class PaymentRow(QFrame):
             For denominated draft restore — selects the saved vendor
             binding in the row's vendor dropdown.  When ``None`` the
             dropdown stays at its placeholder.
+        customer_forfeit_cents : int, optional
+            v2.0.7 (schema v36): Phase B token-value forfeit
+            preserved on this row from a prior save.  Stored on the
+            widget so ``get_data()`` can return it on the next save
+            cycle (preserves forfeit through Adjustment edits that
+            don't change the denomination).  Default 0 (no forfeit).
+        user_capped : bool, optional
+            v2.0.7+ (schema v37, audit 2026-05-07): restore the
+            user-cap flag on a row loaded from DB.  When True, the
+            row comes back Locked (gold ⚡) — Auto-Distribute
+            skips it and the engine preserves customer_charged
+            across cap-aware passes.  Default False so legacy
+            callers (no flag in DB) keep the existing "auto-
+            fillable" semantics.  Set AFTER the method is
+            selected so the toggle button refresh has the right
+            visibility context.
 
         The customer_charged fall-back path produces the wrong charge
         whenever the daily match cap was applied: the cap inflates
@@ -853,6 +1107,8 @@ class PaymentRow(QFrame):
         customer actually paid.  Always pass ``customer_charged`` from
         DB rows when available.
         """
+        # Stash the forfeit so get_data() can round-trip it.
+        self._customer_forfeit_cents = int(customer_forfeit_cents or 0)
         for i in range(self.method_combo.count()):
             m = self.method_combo.itemData(i)
             if m and m['id'] == payment_method_id:
@@ -888,6 +1144,15 @@ class PaymentRow(QFrame):
             else:
                 charge = method_amount
             self._set_active_charge(charge)
+
+        # v2.0.7+ (schema v37, audit 2026-05-07): apply restored
+        # user-cap flag AFTER the method + charge are set so the
+        # toggle button's visibility refresh has the right context
+        # (button shows only on non-denom rows with a real method).
+        # Refreshing the style at the end ensures the icon colour
+        # matches the restored flag immediately on load.
+        self._user_capped = bool(user_capped)
+        self._refresh_auto_distribute_btn_style()
 
     def validate_denomination(self):
         """Return error string if charge violates denomination, else None."""

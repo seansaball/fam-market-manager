@@ -34,7 +34,8 @@
 
 | Button | What it does |
 |---|---|
-| **Auto-Distribute (⚡)** | Balances payment amounts to match the receipt total |
+| **Auto-Distribute (⚡)** | Balances payment amounts to match the receipt total. **Only fills rows whose ⚡ icon is green (Active)**; skips Locked rows |
+| **Per-row ⚡ toggle** | Click the small ⚡ icon on each non-denom payment row to toggle Active (green, gets filled) ↔ Locked (grey, value pinned). Typing into the amount field auto-locks the row |
 | **Confirm** | Saves the transaction. From here on, use Adjustments to change it |
 | **Void** | Cancels the entire transaction. There is no un-void |
 | **Adjust** | Edit a confirmed transaction (changes payment lines, not the receipt total) |
@@ -63,6 +64,9 @@
 | Sync chip red, tooltip says "Network unavailable" | Check Wi-Fi. Once back: Sync to Cloud |
 | Sync chip red, tooltip says "permission" | Sheet not shared with the service account. Coordinator action |
 | "Stale market day was auto-closed" | Normal safety. Open today's day fresh |
+| "Payment row mismatch" / hard block on Payment that ⚡ Auto-Distribute won't fix | **Split the receipts into separate orders, one payment method per order.** Cancel → Discard → re-create as a returning-customer order with only the receipts one method covers → Confirm → repeat for the next method. Cap accounting carries through the same customer label. See in-app Help article `split-orders-when-stuck`. |
+| Auto-Distribute "did nothing" | Check the row's ⚡ icon — if grey (Locked), the value is pinned. Click the grey ⚡ to release it, or add another payment-method row to absorb the remainder. v2.0.7+ |
+| FMNP "Add Entry" button greyed out | "All Market Days" is selected (a browse-only filter). Pick a specific market day from the dropdown to enable the button. v2.0.7+ |
 
 ---
 
@@ -129,4 +133,4 @@ Wi-Fi and click Sync to Cloud.
 ---
 
 > Repo: `github.com/seansaball/fam-market-manager`
-> Version: 2.0.1
+> Version: 2.0.7

@@ -5,7 +5,7 @@
 > If you've inherited responsibility from the project owner, this is
 > what you need to know.
 >
-> Last updated for v2.0.6 — May 2026.
+> Last updated for v2.0.7 — May 2026.
 
 ---
 
@@ -58,7 +58,7 @@ Use the latest release zip from
 4. Right-click `FAM Manager.exe` → Send to → Desktop (create shortcut)
 5. Launch — Windows SmartScreen will warn on first run; click "More info" → "Run anyway"
 
-> **Pre-flight check for image-cloned laptops (v2.0.6+).** If your fleet was deployed by cloning one Windows image across multiple laptops, verify each device has its own MachineGuid registry value before launching the app for the first time. Cloned images can share the same MachineGuid, which v2.0.6 refuses to launch with — it would silently corrupt cross-device cloud sync (every device's rows would collide on the same composite key).
+> **Pre-flight check for image-cloned laptops (v2.0.6+).** If your fleet was deployed by cloning one Windows image across multiple laptops, verify each device has its own MachineGuid registry value before launching the app for the first time. Cloned images can share the same MachineGuid, which v2.0.6+ refuses to launch with — it would silently corrupt cross-device cloud sync (every device's rows would collide on the same composite key).
 >
 > In an elevated PowerShell on each laptop:
 > ```powershell
@@ -422,6 +422,24 @@ Day-of:
   multiple receipts from one customer in the same day.
 - **Match math is automatic.** Don't try to override it — if the math
   looks wrong, something else is wrong (cap reached? FMNP not active?).
+- **Per-row ⚡ toggle on Payment rows (v2.0.7+).** Each non-denom
+  payment row has a small ⚡ icon. **Green** = Auto-Distribute will
+  fill it; **grey** = Locked at the volunteer's typed value. Typing
+  into the amount field auto-locks the row. Only one row can be Active
+  (green) at a time — adding a third payment method defaults the new
+  row to Locked. If a volunteer says "Auto-Distribute did nothing,"
+  check whether the row they expected to fill is grey — they need to
+  click ⚡ to release it, or add another row to absorb the remainder.
+- **FMNP Check Tracking "All Market Days" filter (v2.0.7+).** The
+  market-day dropdown defaults to "All Market Days" for browsing the
+  full FMNP history. The Save button greys out (with a visible inline
+  hint) because new entries need a specific market day. Volunteers
+  pick a date from the dropdown to enable Save.
+- **Customer Forfeit (v2.0.7+).** When a customer hands a $10 token
+  for a $1.45 receipt, the $8.55 over-tender shows in the Customer
+  Forfeit summary card and report column. Vendor still gets the full
+  receipt total ($1.45); the forfeit is just unaccounted token value
+  recorded for the audit trail.
 
 ---
 
@@ -454,8 +472,9 @@ Day-of:
 
 ## Versioning notes
 
-This handbook is for **v2.0.6**. Major changes recently:
+This handbook is for **v2.0.7**. Major changes recently:
 
+- **v2.0.7**: Hotfix release covering post-v2.0.6 onsite findings.  Schema v34 → v35 (one forward migration that backfills SNAP and Cash for every vendor; idempotent).  **Universal SNAP / Cash binding policy** — both methods are now ticked, locked, and labelled "universal" in Settings → Vendors → Eligible Payment Methods; you cannot accidentally configure a vendor as SNAP-ineligible.  Other methods (Food Bucks, Food RX, FMNP) remain per-vendor configurable.  **Denomination preservation through adjustments** (engine snap-back + save-layer guard).  **Adjustment safety gate** for denominated transactions — Adjust on a txn that includes Food Bucks / Food RX / FMNP now opens a Void-Instead / Adjust-Anyway / Cancel dialog.  **Single-vendor multi-receipt allocation** corrected so split receipts at one vendor reconcile cleanly.  **Vendor Reimbursement after voids** — surviving receipts on a partially-voided multi-receipt order roll up correctly now.  **Photo dedup cache cleanup** on void / FMNP delete / FMNP photo replace (a re-attached photo no longer reads as a duplicate of its now-orphaned hash).  **Cap-bound split-order recommendation** — when a returning customer's daily FAM cap is too low to absorb a particular combination of denominated + non-denominated payments, the Payment screen no longer hard-blocks with a generic "row mismatch"; it surfaces a dialog naming the cap as the cause and recommending the volunteer break the customer's receipts into separate orders one method at a time.  Documented in the new in-app help article `split-orders-when-stuck` and troubleshooting flow `ts-payment-screen-hard-block`.  3,504 tests.
 - **v2.0.6**: Production season release.  Per-vendor payment-method eligibility (Settings → Vendors), configurable rewards engine (Settings → Rewards), redesigned Payment Confirmation Dialog.  Multi-workstation cloud sync hardened end-to-end — settings changes propagate to the shared sheet, closed-day mutations sync correctly, Vendor Reimbursement cleanup is multi-market-aware, reset preserves other devices' rows, market renames protected against code-shift orphaning.  Photo dedup cache cleaned on void/delete/replace.  Schema v33 → v34 (additive).  3,387 tests.
 - v2.0.1: Pre-deployment hardening pass — InstanceLock wired into app.py, narrow-scope auto-sync no longer deletes historical rows, FMNP face-value reporting, three-gate reset, defensive UF triggers
 - **v2.0.0**: First production release.  Brings the comprehensive hardening + documentation pass: cross-platform single-instance lock, atomic photo writes, offline-quiet sync logging, customer rewards add-on, 5 hardening sessions (+277 new tests), 11 new in-app help articles, 6 new troubleshooting flows, and three new printable docs (Emergency Runbook, Coordinator Handbook, Quick Reference).  Skipped the v1.9.10 internal designation and went straight from v1.9.9 to v2.0 to signal the production milestone.

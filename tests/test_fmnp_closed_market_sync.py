@@ -213,11 +213,16 @@ class TestAdminScreenClosedDayMutationsScopeCorrectly:
 
 
 class TestFmnpDropdownDefaultSelection:
-    """The market-day dropdown defaults to the currently-OPEN
-    market day on first load, falling back to the most recent day
-    if none open.  Pre-fix the dropdown silently selected the
-    oldest entry (because get_all_market_days returns oldest-first
-    and Qt picks index 0 by default)."""
+    """The market-day dropdown defaults to "All Market Days"
+    (sentinel ``userData=None``) on first load (v2.0.7+, user
+    feedback 2026-05-07).  Volunteers landing on the FMNP Check
+    Tracking page see EVERY entry across the season at a glance
+    instead of having to scroll past historical market days.
+
+    The legacy "default to currently-open / most-recent market
+    day" helper (``_pick_default_market_day_id``) is still
+    present and still tested here — it's used elsewhere as a
+    fallback signal — but no longer auto-fires on first load."""
 
     def test_pick_default_returns_open_market_day_when_one_exists(
             self, qtbot):
@@ -268,10 +273,14 @@ class TestFmnpDropdownDefaultSelection:
         default = screen._pick_default_market_day_id()
         assert default is None
 
-    def test_dropdown_selects_open_market_day_on_first_load(
+    def test_dropdown_defaults_to_all_market_days_on_first_load(
             self, qtbot):
-        """End-to-end: after refresh(), the dropdown's currentData()
-        is the OPEN market day's id."""
+        """End-to-end (v2.0.7+ behaviour): after refresh() the
+        dropdown's currentData() is ``None`` — the sentinel for
+        the "All Market Days" filter.  This is the user-requested
+        change from 2026-05-07: default to the cross-market view
+        instead of forcing the volunteer to scroll past historical
+        market days."""
         from fam.ui.fmnp_screen import FMNPScreen
         conn = get_connection()
         _setup_market_with_closed_and_open_days(conn)
@@ -292,6 +301,10 @@ class TestFmnpDropdownDefaultSelection:
         # Re-call refresh to drive _load_market_days against our
         # seeded data
         screen.refresh()
-        assert screen.md_combo.currentData() == 41, (
-            f"Dropdown should default to the OPEN market day "
-            f"(id=41).  Got currentData={screen.md_combo.currentData()}")
+        assert screen.md_combo.currentData() is None, (
+            f"Dropdown should default to the 'All Market Days' "
+            f"sentinel (currentData=None) per the v2.0.7+ user "
+            f"feedback.  Got currentData="
+            f"{screen.md_combo.currentData()}")
+        # And the first item is labelled "All Market Days".
+        assert screen.md_combo.itemText(0) == "All Market Days"

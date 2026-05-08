@@ -177,9 +177,24 @@ class TestCapAwareForfeitGiveBack:
         assert cards['customer_pays'] == "$210.80", (
             f"Customer Pays card should be $210.80 (= $213.50 − "
             f"$2.70 give-back), got {cards['customer_pays']}")
-        assert cards['allocated'] == "$313.50", (
-            f"Allocated should reflect the $2.70 denom over-allocation, "
-            f"got {cards['allocated']}")
+        # v2.0.7 final policy (user-reported 2026-05-07): the
+        # ``allocated`` card now reflects the POST-FORFEIT
+        # balanced total (= receipt total), not the pre-forfeit
+        # phantom inflation.  Pre-fix this test pinned $313.50
+        # (the engine's pre-forfeit method-sum), which is
+        # exactly what the user complained about: "we shouldn't
+        # see the order total go negative due to forfeited FAM
+        # match funds that never applied in the first place."
+        # Post-fix: allocated = $310.80 (matches receipt).
+        assert cards['allocated'] == "$310.80", (
+            f"Allocated should show the post-forfeit balanced "
+            f"total ($310.80 = receipt), NOT the pre-forfeit "
+            f"phantom $313.50.  Got: {cards['allocated']}")
+        # Remaining must be $0 (post-forfeit balanced).
+        assert cards['remaining'] == "$0.00", (
+            f"Remaining must be $0.00 post-forfeit (no phantom "
+            f"negative number from FAM match that's about to be "
+            f"reduced).  Got: {cards['remaining']}")
 
     def test_snap_row_labels_capped_not_uncapped(
             self, qtbot, four_vendor_db):

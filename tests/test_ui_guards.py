@@ -1482,12 +1482,22 @@ def _create_prior_match_denom(conn, match_cents, customer_label='C-001'):
 
 
 class TestDenominationForfeitWithCap:
-    """Verify denomination forfeit message works when match cap is also active."""
+    """Verify denomination forfeit handling with match cap active.
 
-    def test_denom_overage_detected_with_no_cap(self, qtbot, denom_cap_db):
+    v2.0.7 final policy (user-reported 2026-05-07): the inline
+    warning fires ONLY for Phase B (customer token-value forfeit).
+    Phase A (FAM match reduction) is silent — the engine balances
+    the math and the volunteer doesn't need an alarm.  These tests
+    verify the BALANCED post-forfeit state instead of pinning the
+    old "warning always fires" behavior.
+    """
+
+    def test_denom_overage_phase_a_silent_with_no_cap(self, qtbot, denom_cap_db):
         """FMNP $5 denom (100% match), $66.03 order, no prior match.
-        7 tokens = $35 charge → $70 alloc. Overage = $3.97.
-        Forfeit warning should appear."""
+        7 tokens = $35 charge → $70 method.  Overage = $3.97 fits
+        within the FMNP row's $35 of match → Phase A only fires
+        (match reduced by $3.97).  Per the v2.0.7 final policy:
+        no inline warning, balanced cards."""
         from fam.ui.payment_screen import PaymentScreen
 
         order_id = _create_denom_order(denom_cap_db, 6603)
@@ -1501,15 +1511,18 @@ class TestDenominationForfeitWithCap:
         row._set_active_charge(3500)
         screen._update_summary()
 
-        warning_text = screen.denom_overage_warning.text().lower()
-        assert 'forfeit' in warning_text or 'overage' in warning_text, (
-            f"Denomination forfeit warning should appear, got: '{screen.denom_overage_warning.text()}'"
-        )
+        # Phase A only — warning must NOT fire (silent reduction).
+        assert screen.denom_overage_warning.isHidden() or \
+               screen.denom_overage_warning.text() == '', (
+            f"Phase A only — inline warning must be hidden / "
+            f"empty per the v2.0.7 final policy.  Got text: "
+            f"{screen.denom_overage_warning.text()!r}, "
+            f"hidden={screen.denom_overage_warning.isHidden()}")
 
-    def test_denom_overage_detected_with_active_cap(self, qtbot, denom_cap_db):
-        """FMNP with active cap: forfeit still detected.
-        Prior match=$50 → remaining=$50. Order=$66.03, 7×$5=$35 → $70 alloc.
-        Overage = $3.97. Forfeit should still show."""
+    def test_denom_overage_phase_a_silent_with_active_cap(self, qtbot, denom_cap_db):
+        """FMNP with active cap: still Phase A only, still silent.
+        Prior match=$50 → cap remaining=$50. Order=$66.03, 7×$5=$35 → $70 method.
+        Overage $3.97 absorbed into match (Phase A).  No warning."""
         from fam.ui.payment_screen import PaymentScreen
 
         conn = denom_cap_db
@@ -1525,10 +1538,11 @@ class TestDenominationForfeitWithCap:
         row._set_active_charge(3500)
         screen._update_summary()
 
-        warning_text = screen.denom_overage_warning.text().lower()
-        assert 'forfeit' in warning_text or 'overage' in warning_text, (
-            f"Denomination forfeit should show even with active cap"
-        )
+        assert screen.denom_overage_warning.isHidden() or \
+               screen.denom_overage_warning.text() == '', (
+            f"Phase A only (with cap) — inline warning must "
+            f"be hidden per v2.0.7 final policy.  Got text: "
+            f"{screen.denom_overage_warning.text()!r}")
 
     def test_collect_line_items_preserves_denom_overage(self, qtbot, denom_cap_db):
         """_collect_line_items should NOT cap denominated method_amount."""
@@ -1579,10 +1593,12 @@ class TestDenominationForfeitWithCap:
             f"got {items[0]['method_amount']}"
         )
 
-    def test_two_denom_methods_cumulative_forfeit(self, qtbot, denom_cap_db):
+    def test_two_denom_methods_phase_a_silent(self, qtbot, denom_cap_db):
         """FMNP + JH Tokens, both $5 denom (100% match).
-        Order=$49: each contributes $25 = $50 alloc. Overage=$1.
-        Overage ($1) < sum of denominations ($10), so forfeit accepted."""
+        Order=$49: each contributes $25 = $50 method. Overage=$1.
+        Phase A absorbs the $1 into the FMNP row's match (plenty of
+        headroom — $15 of match available).  Phase A only — no
+        warning per v2.0.7 final policy."""
         from fam.ui.payment_screen import PaymentScreen
 
         order_id = _create_denom_order(denom_cap_db, 4900)
@@ -1600,12 +1616,11 @@ class TestDenominationForfeitWithCap:
 
         screen._update_summary()
 
-        # Total alloc = $50, receipt = $49, overage = $1
-        # overage ($1) ≤ sum of denoms ($10), should be accepted as forfeit
-        warning_text = screen.denom_overage_warning.text().lower()
-        assert 'forfeit' in warning_text or 'overage' in warning_text, (
-            "Two-denom cumulative overage should show forfeit warning"
-        )
+        # Phase A only — silent
+        assert screen.denom_overage_warning.isHidden() or \
+               screen.denom_overage_warning.text() == '', (
+            f"Two-denom Phase A overage must be silent.  "
+            f"Got: {screen.denom_overage_warning.text()!r}")
 
     def test_denom_plus_snap_with_cap_summary_correct(self, qtbot, denom_cap_db):
         """FMNP + SNAP with cap: summary cards show correct values."""
@@ -1681,9 +1696,11 @@ class TestDenominationForfeitWithCap:
         for it in items:
             assert it['match_amount'] >= 0
 
-    def test_denom_two_cent_overage_is_forfeit(self, qtbot, denom_cap_db):
+    def test_denom_two_cent_overage_phase_a_silent(self, qtbot, denom_cap_db):
         """$49.98 order, FMNP $5 denom (100%): 5 units = $25 → $50.
-        Overage = $0.02 — exceeds penny tolerance, should show forfeit."""
+        Overage = $0.02 — Phase A reduces match by $0.02 (plenty of
+        headroom in the $25 match), no Phase B.  Silent per v2.0.7
+        final policy."""
         from fam.ui.payment_screen import PaymentScreen
 
         order_id = _create_denom_order(denom_cap_db, 4998)
@@ -1696,10 +1713,11 @@ class TestDenominationForfeitWithCap:
         row._set_active_charge(2500)  # 5 units → $50 alloc, overage = $0.02
         screen._update_summary()
 
-        warning_text = screen.denom_overage_warning.text().lower()
-        assert 'forfeit' in warning_text or 'overage' in warning_text, (
-            "$0.02 denom overage should show forfeit warning"
-        )
+        # Phase A only — silent.  No customer-side loss.
+        assert screen.denom_overage_warning.isHidden() or \
+               screen.denom_overage_warning.text() == '', (
+            f"$0.02 Phase A overage must be silent.  "
+            f"Got: {screen.denom_overage_warning.text()!r}")
 
     def test_match_values_nonnegative_after_denom_forfeit(self, qtbot, denom_cap_db):
         """After denomination forfeit adjustment, all match values ≥ 0."""
@@ -1762,10 +1780,11 @@ class TestDenominationForfeitWithCap:
             f"Denom max should be ≥ $80 (16 tokens), got {format_dollars(max_charge)}"
         )
 
-    def test_denom_forfeit_accepted_within_effective_denom(self, qtbot, denom_cap_db):
+    def test_denom_forfeit_accepted_phase_a_silent(self, qtbot, denom_cap_db):
         """17 tokens ($85) on $163.54 order: overage $6.46.
-        Effective denom = $10 ($5 × 200% for 100% match method_amount).
-        $6.46 ≤ $10 → accepted as denomination forfeit, not hard error."""
+        Phase A reduces match by $6.46 (the $85 of match has plenty
+        of headroom).  No Phase B.  Per v2.0.7 final policy: no
+        warning, balanced cards, no red error either."""
         from fam.ui.payment_screen import PaymentScreen
 
         order_id = _create_denom_order(denom_cap_db, 16354)
@@ -1778,14 +1797,16 @@ class TestDenominationForfeitWithCap:
         row._set_active_charge(8500)  # 17 tokens × $5
         screen._update_summary()
 
-        # Overage = $170 - $163.54 = $6.46
-        # Effective denom = charge_to_method_amount(500, 100) = 1000
-        # $6.46 ≤ $10.00 → should show gold forfeit warning, NOT red error
-        warning_text = screen.denom_overage_warning.text().lower()
-        assert 'forfeit' in warning_text or 'overage' in warning_text, (
-            f"$6.46 overage within effective denom ($10) should show forfeit. "
-            f"Got: '{screen.denom_overage_warning.text()}'"
-        )
+        # Phase A only — silent.
+        assert screen.denom_overage_warning.isHidden() or \
+               screen.denom_overage_warning.text() == '', (
+            f"$6.46 Phase A overage must be silent.  "
+            f"Got: {screen.denom_overage_warning.text()!r}")
+        # Cards balanced, remaining = $0 (no phantom negative).
+        remaining_text = screen.summary_row.cards['remaining'].value_label.text()
+        assert remaining_text in ('$0.00', '0.00'), (
+            f"Remaining card must show $0 post-forfeit "
+            f"(no phantom negative).  Got: {remaining_text!r}")
 
     def test_denom_with_cap_customer_adds_second_method(self, qtbot, denom_cap_db):
         """With cap active, denominated method may not cover full order.

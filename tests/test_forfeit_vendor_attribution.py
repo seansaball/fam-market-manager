@@ -651,28 +651,52 @@ class TestForfeitPlusAutoDistributeFillIn:
 class TestForfeitSourceGuards:
 
     def test_function_consults_order_transactions_for_vendor_map(self):
-        """Pin that the function actually queries
-        ``_order_transactions`` to build the vendor map.  Without
-        this, the per-vendor-aware path would silently regress to
-        the legacy first-with-match behaviour."""
+        """Pin that the wrapper builds the vendor map from
+        ``_order_transactions`` and forwards it to the canonical
+        forfeit function.  Without this, the per-vendor-aware
+        path would silently regress to the legacy first-with-
+        match behaviour.
+
+        v2.0.7-final consolidation (Option B): the vendor-aware
+        Phase A/B math now lives in
+        ``fam.utils.calculations.apply_denomination_forfeit``.
+        PaymentScreen's ``_apply_denomination_forfeit`` is a thin
+        wrapper that builds ``vendor_receipts`` from
+        ``self._order_transactions`` and delegates."""
         import inspect
         from fam.ui.payment_screen import PaymentScreen
-        src = inspect.getsource(PaymentScreen._apply_denomination_forfeit)
-        assert 'self._order_transactions' in src, (
-            "Forfeit handler must read _order_transactions to map "
-            "bound_vendor_id → receipt total — without it, the "
-            "vendor-aware attribution can't fire.")
-        assert 'bound_vendor_id' in src
-        assert 'vendor_alloc' in src or 'vendor_receipts' in src
+        from fam.utils.calculations import apply_denomination_forfeit
+        wrapper_src = inspect.getsource(
+            PaymentScreen._apply_denomination_forfeit)
+        canonical_src = inspect.getsource(apply_denomination_forfeit)
+        # Wrapper must build the vendor_receipts map from
+        # _order_transactions and forward to the canonical fn.
+        assert 'self._order_transactions' in wrapper_src, (
+            "PaymentScreen wrapper must read _order_transactions "
+            "to build the vendor_receipts map.")
+        assert 'apply_denomination_forfeit' in wrapper_src, (
+            "PaymentScreen wrapper must delegate to the canonical "
+            "fam.utils.calculations.apply_denomination_forfeit.")
+        assert 'vendor_receipts=vendor_receipts' in wrapper_src, (
+            "Wrapper must pass vendor_receipts as a keyword arg "
+            "to the canonical function.")
+        # Canonical function carries the vendor-aware logic.
+        assert 'bound_vendor_id' in canonical_src
+        assert 'vendor_alloc' in canonical_src
+        assert 'vendor_receipts' in canonical_src
 
     def test_legacy_fallback_preserved(self):
-        """The fall-back loop must still exist for residual overage
-        (defensive guard against numerical drift, empty vendor
-        maps, etc.).  Without it, edge-case inputs would silently
-        leave totals unbalanced."""
+        """The fall-back loop (Pass 2: first-with-match) must
+        still exist for residual overage (defensive guard against
+        numerical drift, empty vendor maps, etc.).  Without it,
+        edge-case inputs would silently leave totals unbalanced.
+
+        v2.0.7-final consolidation: this logic moved into the
+        canonical ``fam.utils.calculations.apply_denomination_forfeit``
+        function alongside the vendor-aware Pass 1."""
         import inspect
-        from fam.ui.payment_screen import PaymentScreen
-        src = inspect.getsource(PaymentScreen._apply_denomination_forfeit)
+        from fam.utils.calculations import apply_denomination_forfeit
+        src = inspect.getsource(apply_denomination_forfeit)
         # The fall-back is guarded by ``if remaining_overage > 0:``
         # AFTER the per-vendor pass.
         assert 'if remaining_overage > 0:' in src

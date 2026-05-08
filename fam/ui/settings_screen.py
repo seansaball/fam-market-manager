@@ -321,7 +321,6 @@ class AssignVendorsDialog(QDialog):
         assigned_ids = get_market_vendor_ids(market['id'])
         all_vendors = get_all_vendors()
 
-        from PySide6.QtWidgets import QScrollArea
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {LIGHT_GRAY}; border-radius: 6px; }}")
@@ -410,7 +409,6 @@ class AssignPaymentMethodsDialog(QDialog):
         assigned_ids = get_market_payment_method_ids(market['id'])
         all_methods = get_all_payment_methods(include_system=False)
 
-        from PySide6.QtWidgets import QScrollArea
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {LIGHT_GRAY}; border-radius: 6px; }}")
@@ -503,7 +501,6 @@ class VendorEligiblePaymentMethodsDialog(QDialog):
         assigned_ids = get_vendor_payment_method_ids(vendor['id'])
         all_methods = get_all_payment_methods(include_system=False)
 
-        from PySide6.QtWidgets import QScrollArea
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(
@@ -514,21 +511,38 @@ class VendorEligiblePaymentMethodsDialog(QDialog):
         scroll_layout = QVBoxLayout(scroll_widget)
         scroll_layout.setSpacing(6)
 
+        from fam.models.payment_method import is_universal_vendor_method
         for m in all_methods:
             label = f"{m['name']} ({m['match_percent']:.0f}% match"
             if m.get('denomination'):
-                from fam.utils.money import cents_to_dollars
                 label += f", ${cents_to_dollars(m['denomination']):.2f} denom"
             label += ")"
             if not m['is_active']:
                 label += " (inactive)"
+            # v2.0.7: SNAP and Cash are universal — checked + locked
+            is_universal = is_universal_vendor_method(m['name'])
+            if is_universal:
+                label += "  ✓ universal"
             cb = QCheckBox(label)
-            cb.setChecked(m['id'] in assigned_ids)
+            cb.setChecked(
+                True if is_universal
+                else (m['id'] in assigned_ids))
             cb.setProperty("pm_id", m['id'])
+            if is_universal:
+                cb.setEnabled(False)
+                cb.setToolTip(
+                    f"{m['name']} is a universally-accepted payment "
+                    f"method.  Every vendor accepts it by policy — "
+                    f"the binding cannot be removed.  This eliminates "
+                    f"the eligibility-overflow problem class for "
+                    f"the most common non-denom methods.")
             cb.setStyleSheet(f"""
                 QCheckBox {{
                     font-size: 13px; padding: 4px;
                     background-color: {WHITE};
+                }}
+                QCheckBox:disabled {{
+                    color: #555555;
                 }}
                 QCheckBox::indicator {{
                     width: 16px; height: 16px;
@@ -537,6 +551,10 @@ class VendorEligiblePaymentMethodsDialog(QDialog):
                     border-radius: 3px;
                 }}
                 QCheckBox::indicator:checked {{
+                    background-color: {ACCENT_GREEN};
+                    border-color: {PRIMARY_GREEN};
+                }}
+                QCheckBox::indicator:disabled:checked {{
                     background-color: {ACCENT_GREEN};
                     border-color: {PRIMARY_GREEN};
                 }}
@@ -592,7 +610,6 @@ class AssignMarketsDialog(QDialog):
             dict(r) for r in conn.execute("SELECT * FROM markets ORDER BY name").fetchall()
         ]
 
-        from PySide6.QtWidgets import QScrollArea
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(f"QScrollArea {{ border: 1px solid {LIGHT_GRAY}; border-radius: 6px; }}")
@@ -1256,7 +1273,6 @@ class SettingsScreen(QWidget):
         non-denominated like SNAP/Cash).
         Target = ACTIVE non-system DENOMINATED methods only.
         """
-        from fam.models.payment_method import get_all_payment_methods
         all_methods = get_all_payment_methods(
             active_only=True, include_system=False)
         # Source dropdown — every active method.
@@ -1276,8 +1292,8 @@ class SettingsScreen(QWidget):
         set_rewards_enabled(bool(checked))
 
     def _add_reward_rule(self):
+        # ``dollars_to_cents`` is at module level (line 19).
         from fam.models.reward_rule import create_reward_rule
-        from fam.utils.money import dollars_to_cents
 
         source_id = self.reward_source_combo.currentData()
         target_id = self.reward_target_combo.currentData()
@@ -1322,8 +1338,8 @@ class SettingsScreen(QWidget):
         self.settings_changed.emit()
 
     def _load_reward_rules(self):
+        # ``get_all_payment_methods`` is at module level (line 28).
         from fam.models.reward_rule import get_all_reward_rules
-        from fam.models.payment_method import get_all_payment_methods
 
         # Refresh combo sources in case methods were added/changed.
         self._populate_reward_method_combos()
@@ -2301,7 +2317,7 @@ class SettingsScreen(QWidget):
         check_text = "Never"
         if last_check:
             try:
-                from datetime import datetime
+                # ``datetime`` is at module level (line 7).
                 from fam.utils.timezone import EASTERN
                 dt = datetime.fromisoformat(last_check)
                 if dt.tzinfo is None:

@@ -230,15 +230,33 @@ class PaymentConfirmationDialog(QDialog):
         outer.addWidget(self._build_title())
         outer.addWidget(self._build_subtitle(receipt_count, receipt_total))
         outer.addWidget(self._build_action_zone(action_items, customer_total))
-        if denom_overage > 0:
-            outer.addWidget(self._build_warning_zone(denom_overage))
+        # v2.0.7 final policy (user-reported 2026-05-07): the
+        # warning zone fires ONLY for Phase B forfeit (true
+        # customer-side token-value loss).  Phase A (FAM match
+        # reduction without token-value loss) is NOT a forfeit
+        # from the customer's perspective — the customer never
+        # had the FAM match money to lose; FAM just contributes
+        # less because the receipt has no headroom.  The vendor
+        # still gets the full receipt amount, the customer still
+        # gets the full token's worth of food.  No alarm needed.
+        # ``denom_overage`` (= Phase A + Phase B summed) is kept
+        # as a constructor argument for backward compatibility
+        # and downstream tests, but is no longer the trigger.
+        customer_forfeit_total = sum(
+            li.get('customer_forfeit_cents', 0) or 0
+            for li in line_items)
+        if customer_forfeit_total > 0:
+            outer.addWidget(
+                self._build_warning_zone(customer_forfeit_total))
         # Rewards zone (v1.9.10+) — purely informational.  Lives
         # BELOW the action+warning zones so the volunteer always
         # finishes the financial transaction first; rewards are an
         # add-on, not a gating step.
         if reward_lines:
             outer.addWidget(self._build_rewards_zone(reward_lines))
-        outer.addWidget(self._build_info_footer(receipt_total, match_total))
+        outer.addWidget(self._build_info_footer(
+            receipt_total, match_total,
+            customer_forfeit_total))
         outer.addLayout(self._build_button_row())
 
         self._update_confirm_enabled()
@@ -515,7 +533,43 @@ class PaymentConfirmationDialog(QDialog):
 
         return wrap
 
-    def _build_warning_zone(self, denom_overage: int) -> QFrame:
+    def _build_warning_zone(
+            self, customer_forfeit_cents: int) -> QFrame:
+        """Build the amber warning zone for a Phase B token-value
+        forfeit (the only forfeit class we surface to volunteers).
+
+        v2.0.7 final policy (user-reported 2026-05-07):
+
+          * **Phase A — FAM match reduction.** When a denominated
+            payment's normal FAM match wouldn't fit the receipt,
+            the engine reduces match to keep the per-receipt
+            allocation accurate.  This is NOT a forfeit from the
+            customer's perspective — the customer never had the
+            match money to lose; FAM just contributes less.  The
+            warning zone does NOT fire for this case.  No alarm,
+            no language about "FAM match forfeit" anywhere in
+            the UI or reports.
+
+          * **Phase B — token-value forfeit.** When the
+            customer's denomination unit ALSO exceeds the receipt
+            even after match is fully reduced (e.g. $10 Food RX
+            token to a $6.52 receipt), the excess portion of the
+            token's face value doesn't reach the vendor.  The
+            customer physically handed over more scrip than the
+            transaction needed; that excess is unaccounted in
+            program-policy terms.  THIS is the only forfeit the
+            volunteer needs to be aware of — they may want to
+            offer the customer a smaller denomination, a
+            different payment method, or confirm the customer
+            accepts the loss.
+
+        Args:
+            customer_forfeit_cents: Phase B forfeit amount (token
+                face value the customer handed over but did not
+                translate to vendor reimbursement).  Caller is
+                responsible for passing only positive values —
+                this method does not fire when the value is 0.
+        """
         # Single outer border on a uniquely-named frame; the inner
         # QLabels explicitly carry ``border: none`` so the parent
         # stylesheet can't cascade an unwanted nested box around
@@ -536,8 +590,9 @@ class PaymentConfirmationDialog(QDialog):
         wlay.setSpacing(4)
 
         title = QLabel(
-            f"⚠  DENOMINATION OVERAGE — "
-            f"{format_dollars(denom_overage)} forfeit"
+            f"⚠  CUSTOMER FORFEIT — "
+            f"{format_dollars(customer_forfeit_cents)} of customer's "
+            f"denomination not used"
         )
         title.setStyleSheet(f"""
             QLabel {{
@@ -553,12 +608,19 @@ class PaymentConfirmationDialog(QDialog):
         wlay.addWidget(title)
 
         body = QLabel(
-            f"The customer is forfeiting "
-            f"{format_dollars(denom_overage)} of FAM match because "
-            f"the denominated payment cannot be broken into smaller "
-            f"increments.  Vendor still receives the full receipt "
-            f"amount."
+            f"The customer is handing over "
+            f"<b>{format_dollars(customer_forfeit_cents)}</b> more "
+            f"in denominated payment than this receipt covers.  "
+            f"The vendor will be reimbursed the full receipt total, "
+            f"but the excess token face value is not credited "
+            f"anywhere — it's a real loss for the customer.<br><br>"
+            f"<b>Recommended:</b> if the customer has smaller "
+            f"denominations or other payment methods (Cash, SNAP), "
+            f"cancel and re-enter — they'll keep the full token "
+            f"value.  Otherwise the customer is accepting this "
+            f"loss to use the token they have."
         )
+        body.setTextFormat(Qt.RichText)
         body.setWordWrap(True)
         body.setStyleSheet(f"""
             QLabel {{
@@ -655,12 +717,31 @@ class PaymentConfirmationDialog(QDialog):
         return zone
 
     def _build_info_footer(self, receipt_total: int,
-                           match_total: int) -> QLabel:
+                           match_total: int,
+                           customer_forfeit_total: int = 0) -> QLabel:
+        # v2.0.7-final (Option B, schema v36): include Customer
+        # Forfeit in the footer when Phase B fired.  Mirrors the
+        # PaymentScreen Customer Forfeit summary card so the
+        # volunteer sees the same number on the confirm dialog
+        # they saw on the order screen.  When forfeit is $0
+        # (Phase A only or no overage), the segment is omitted —
+        # don't clutter the typical-case footer with an always-
+        # zero field.
+        forfeit_segment = ""
+        if customer_forfeit_total > 0:
+            forfeit_segment = (
+                f"  ·  "
+                f"<span style='color:{WARNING_COLOR}'>"
+                f"Customer forfeit: "
+                f"<b>{format_dollars(customer_forfeit_total)}</b>"
+                f"</span>"
+            )
         info = QLabel(
             f"<span style='color:{SUBTITLE_GRAY}'>"
             f"Vendor reimbursement: <b>{format_dollars(receipt_total)}</b>  ·  "
             f"FAM match: <b>{format_dollars(match_total)}</b>"
             f"</span>"
+            f"{forfeit_segment}"
         )
         # Bumped from 11px → 13px for accessibility.  Even
         # informative-only text needs to clear the 12px floor for

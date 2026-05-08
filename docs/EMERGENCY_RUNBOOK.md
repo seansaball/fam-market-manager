@@ -6,7 +6,7 @@
 > and the project owner / coordinator cannot be reached. Each
 > section is one symptom and the exact recovery steps.
 >
-> Last updated for v2.0.1 — 2026-05-01.
+> Last updated for v2.0.7 — 2026-05-07.
 
 ---
 
@@ -200,11 +200,48 @@ transaction; Voids cancel it entirely.
 | 2 | Search for the transaction by customer label, vendor name, or receipt total. |
 | 3 | Click **Edit**. The adjustment dialog opens with the existing payment lines. |
 | 4 | Modify amounts, add lines, remove lines as needed. |
-| 5 | If amounts no longer add up: click the **⚡ Auto-Distribute** button to balance everything to the receipt total automatically. |
+| 5 | If amounts no longer add up: click the **⚡ Auto-Distribute** button to balance everything to the receipt total automatically. **v2.0.7+ note**: Auto-Distribute only fills rows whose per-row ⚡ icon is **green** (Active). Grey ⚡ rows are Locked at the volunteer's typed value and won't be touched. Click a grey ⚡ to release the cap and let Auto-Distribute refill it. |
 | 6 | Click **Save**. The original is preserved in the audit log; the new state is what reports show. |
+
+> If the original transaction included a denominated payment method
+> (Food Bucks, Food RX, FMNP), v2.0.7+ pops a safety dialog asking
+> if you'd rather **Void Instead**.  That's usually the safer path
+> for denominated transactions — Void the original and re-enter
+> from Receipt Intake fresh.
 
 > If the payment changes mean the customer hands over different
 > physical money / FMNP / tokens, do that in person too.
+
+---
+
+## 12b. Hard block on the Payment screen — math doesn't reconcile
+
+If the Payment screen refuses to confirm — a "Payment row mismatch"
+warning, a per-vendor over- or under-allocation error, or any other
+dialog that explicitly mentions the customer's daily FAM cap — and a
+click of **⚡ Auto-Distribute** does not clear it: **break the
+receipts into separate orders, one payment method per order.** This
+is the cleanest, safest resolution and works for every cap-bound or
+denomination-aware scenario you'll see at the booth.
+
+| Step | What to do |
+|---|---|
+| 1 | Click **Cancel** on the Payment dialog. Do **not** click Confirm. |
+| 2 | Return to **Receipt Intake**. Click **Discard** on the in-progress order (or **Pending Orders → Discard** if you saved it as a draft). The receipts you typed are not lost — re-add them in step 3. |
+| 3 | Create a new order for the **same customer label** (returning-customer dropdown, or type the label). Add only the receipts that one payment method will cover (e.g. just the Food RX portion). |
+| 4 | **Payment** → enter only that one method → ⚡ Auto-Distribute if needed → Confirm. |
+| 5 | Repeat from step 3 with the remaining receipts and the next payment method (e.g. SNAP for the rest). |
+
+The customer label being the same on every order means the daily
+match cap accounting carries through automatically — the second
+order sees the first's match already used.  Reports group by
+customer label so the customer's day still rolls up to one row per
+category.  Nothing is lost.
+
+If even split orders don't reconcile (very rare): take a phone
+photo of the dialog, write the customer's purchases on paper, and
+confirm what you can.  The coordinator can reconcile the rest later
+via Adjustments.
 
 ---
 

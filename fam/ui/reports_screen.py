@@ -151,6 +151,18 @@ class ReportsScreen(QWidget):
         # customer actually paid, not pure absorption).
         self.summary_row.add_card("fam_absorbed", "FAM Absorbed",
                                   highlight=True)
+        # v2.0.7+ denomination-integrity: Customer Forfeit summary.
+        # Mirrors the Customer Forfeit column in Vendor Reimbursement
+        # + Detailed Ledger and the Customer Forfeit card on the
+        # Payment Screen.  The math identity reads:
+        #   Total Receipts =
+        #     Customer Paid + FAM Match - Customer Forfeit
+        #     + FAM Absorbed + FMNP_External
+        # Without this card the header sums diverge from the per-row
+        # values (per-row Customer Paid is denomination-true, so the
+        # header CUSTOMER PAID is also denomination-true; the forfeit
+        # subtraction term needs its own visible tile).
+        self.summary_row.add_card("customer_forfeit", "Customer Forfeit")
 
         layout.addWidget(self.summary_row)
 
@@ -199,11 +211,16 @@ class ReportsScreen(QWidget):
         # so coordinators can correlate which customer demographics
         # used which payment methods at which vendors.
         self.ledger_table = QTableWidget()
-        self.ledger_table.setColumnCount(10)
+        # v2.0.7 (schema v36): added "Customer Forfeit" column for
+        # Phase B token-value forfeit visibility.  Always 0 except
+        # when a customer hands a denomination unit larger than
+        # the receipt's remaining capacity.
+        self.ledger_table.setColumnCount(11)
         self.ledger_table.setHorizontalHeaderLabels(
             ["Transaction ID", "Timestamp", "Customer", "Zip Code",
              "Vendor", "Receipt Total",
-             "Customer Paid", "FAM Match", "Status", "Payment Methods"]
+             "Customer Paid", "FAM Match", "Customer Forfeit",
+             "Status", "Payment Methods"]
         )
         configure_table(self.ledger_table, resizable=True)
 
@@ -600,7 +617,8 @@ class ReportsScreen(QWidget):
                    pl.method_name_snapshot AS method,
                    COALESCE(SUM(pl.customer_charged), 0) AS customer_total,
                    COALESCE(SUM(pl.match_amount), 0) AS match_total,
-                   COALESCE(SUM(pl.method_amount), 0) AS method_total
+                   COALESCE(SUM(pl.method_amount), 0) AS method_total,
+                   COALESCE(SUM(pl.customer_forfeit_cents), 0) AS forfeit_total
             FROM payment_line_items pl
             JOIN transactions t ON pl.transaction_id = t.id
             JOIN vendors v ON t.vendor_id = v.id
@@ -620,15 +638,32 @@ class ReportsScreen(QWidget):
         all_methods = sorted({r['method'] for r in method_rows})
         method_by_vendor: dict[tuple, dict[str, float]] = {}
         fam_match_by_vendor: dict[tuple, int] = {}
+        # v2.0.7 (schema v36): per-vendor sum of Phase B customer-
+        # side forfeit.  Surfaced as a "Customer Forfeit" column —
+        # see _collect_vendor_reimbursement for the full rationale.
+        customer_forfeit_by_vendor: dict[tuple, int] = {}
         for r in method_rows:
             key = (r['market_name'], r['vendor'])
             if r['method'] == UNALLOCATED_FUNDS_NAME:
                 value = r['method_total']
             else:
-                value = r['customer_total']
+                # v2.0.7+ denomination-integrity: per-method column
+                # = customer's actual denomination payment
+                # (customer_charged + forfeit).  Mirrors
+                # _collect_vendor_reimbursement in
+                # fam/sync/data_collector.py — see that file for
+                # the full rationale.  The Customer Forfeit column
+                # subtracts the over-tender so the row identity is:
+                #   Σ(method-cols) + FAM Match - Customer Forfeit
+                #     = Total Due to Vendor
+                value = (r['customer_total']
+                         + (r['forfeit_total'] or 0))
             method_by_vendor.setdefault(key, {})[r['method']] = value
             fam_match_by_vendor[key] = (
                 fam_match_by_vendor.get(key, 0) + r['match_total'])
+            customer_forfeit_by_vendor[key] = (
+                customer_forfeit_by_vendor.get(key, 0)
+                + (r['forfeit_total'] or 0))
 
         # Build combined vendor dict from transactions
         def _build_addr(row):
@@ -666,6 +701,8 @@ class ReportsScreen(QWidget):
                 'dates': r['transaction_dates'] or '',
                 '_total_due_cents': r['gross_sales'],
                 '_fam_match_cents': fam_match_by_vendor.get(key, 0),
+                '_customer_forfeit_cents':
+                    customer_forfeit_by_vendor.get(key, 0),
                 '_method_cents': dict(method_by_vendor.get(key, {})),
                 '_fmnp_external_cents': 0,
             }
@@ -711,6 +748,7 @@ class ReportsScreen(QWidget):
                     'dates': r['fmnp_dates'] or '',
                     '_total_due_cents': fmnp_cents,
                     '_fam_match_cents': 0,
+                    '_customer_forfeit_cents': 0,
                     '_method_cents': {},
                     '_fmnp_external_cents': fmnp_cents,
                 }
@@ -728,6 +766,8 @@ class ReportsScreen(QWidget):
                 'dates': rc['dates'],
                 'total_due': cents_to_dollars(rc['_total_due_cents']),
                 'fam_match': cents_to_dollars(rc['_fam_match_cents']),
+                'customer_forfeit': cents_to_dollars(
+                    rc.get('_customer_forfeit_cents', 0)),
                 'methods': {m: cents_to_dollars(c)
                              for m, c in rc['_method_cents'].items()},
                 'fmnp_external': cents_to_dollars(
@@ -740,11 +780,19 @@ class ReportsScreen(QWidget):
         # manager can see FAM's contribution at a glance without
         # having to subtract.  Per-method columns now show
         # customer_charged (physical-instrument count × face value).
+        # v2.0.7 (schema v36): 'Customer Forfeit' appears AFTER
+        # the per-method + FMNP-External columns so the row reads
+        # as (vendor reimbursement breakdown) → (customer-side
+        # forfeit) → (admin metadata).  Phase A (FAM match
+        # forfeit) is NOT counted here — those are unused FAM
+        # funds, not customer losses.  Only Phase B (token-value
+        # forfeit) lands in this column.
         fixed_cols = ['Market Name', 'Vendor',
                       'Month', 'Date(s)', 'Total Due to Vendor',
                       'FAM Match']
         method_cols = list(all_methods)
-        tail_cols = ['FMNP (External)', 'Check Payable To', 'Address']
+        tail_cols = ['FMNP (External)', 'Customer Forfeit',
+                     'Check Payable To', 'Address']
         all_cols = fixed_cols + method_cols + tail_cols
 
         self.vendor_table.setSortingEnabled(False)
@@ -777,6 +825,9 @@ class ReportsScreen(QWidget):
 
             self.vendor_table.setItem(i, col, make_item(
                 f"${v['fmnp_external']:.2f}", v['fmnp_external'])); col += 1
+            self.vendor_table.setItem(i, col, make_item(
+                f"${v['customer_forfeit']:.2f}",
+                v['customer_forfeit'])); col += 1
             self.vendor_table.setItem(i, col, make_item(v['check_payable_to'])); col += 1
             self.vendor_table.setItem(i, col, make_item(v['address']))
 
@@ -791,6 +842,7 @@ class ReportsScreen(QWidget):
             for m in method_cols:
                 row_data[m] = v['methods'].get(m, 0)
             row_data['FMNP (External)'] = v['fmnp_external']
+            row_data['Customer Forfeit'] = v['customer_forfeit']
             row_data['Check Payable To'] = v['check_payable_to']
             row_data['Address'] = v['address']
             self._vendor_data.append(row_data)
@@ -813,7 +865,9 @@ class ReportsScreen(QWidget):
         match_rows = conn.execute(f"""
             SELECT pl.method_name_snapshot as method,
                    SUM(pl.method_amount) as total_allocated,
-                   SUM(pl.match_amount) as total_fam_match
+                   SUM(pl.match_amount) as total_fam_match,
+                   COALESCE(SUM(pl.customer_forfeit_cents), 0)
+                       as total_customer_forfeit
             FROM payment_line_items pl
             JOIN transactions t ON pl.transaction_id = t.id
             JOIN market_days md ON t.market_day_id = md.id
@@ -828,6 +882,13 @@ class ReportsScreen(QWidget):
         total_customer = 0
         total_fam_match = 0
         total_fam_absorbed = 0
+        # v2.0.7+ denomination-integrity: aggregate Phase B forfeit
+        # for the Customer Forfeit summary card.  Powers the math
+        # identity in the header tile row:
+        #   Total Receipts =
+        #     Customer Paid + FAM Match - Customer Forfeit
+        #     + FAM Absorbed + FMNP_External
+        total_customer_forfeit = 0
         # v2.0.1: the "FMNP Checks" summary tile must include
         # FMNP captured via Payment Screen (Path 1) AND via the
         # FMNP Entry screen (Path 2 — fmnp_external below).
@@ -840,6 +901,15 @@ class ReportsScreen(QWidget):
         for i, r in enumerate(match_rows):
             allocated = cents_to_dollars(r['total_allocated'])
             fam_match = cents_to_dollars(r['total_fam_match'])
+            # v2.0.7+ denomination-integrity: customer_paid for the
+            # header CUSTOMER PAID card must be denomination-true
+            # (= what the customer literally handed over, including
+            # the over-tender that gets forfeited).  Without this
+            # the header card showed $54.42 while the per-row
+            # Customer Paid columns now sum to $62.97 — visibly
+            # inconsistent.  Adding the forfeit here keeps the
+            # card in lockstep with the per-row values.
+            forfeit = cents_to_dollars(r['total_customer_forfeit'])
             # Unallocated Funds method_amount IS the absorbed loss —
             # FAM funds the entire amount because the customer didn't
             # pay it.  Keep it OUT of "customer_paid" (the customer
@@ -850,10 +920,11 @@ class ReportsScreen(QWidget):
             if is_absorbed:
                 total_fam_absorbed += fam_absorbed
             else:
-                total_customer += (allocated - fam_match)
+                total_customer += (allocated - fam_match + forfeit)
                 total_fam_match += fam_match
+                total_customer_forfeit += forfeit
                 if r['method'] == 'FMNP':
-                    total_fmnp_path1 += (allocated - fam_match)
+                    total_fmnp_path1 += (allocated - fam_match + forfeit)
 
             self.match_table.setItem(i, 0, make_item(r['method']))
             self.match_table.setItem(i, 1, make_item(f"${allocated:.2f}", allocated))
@@ -910,17 +981,50 @@ class ReportsScreen(QWidget):
             "fmnp_total", f"${total_fmnp + total_fmnp_path1:.2f}")
         self.summary_row.update_card("fam_absorbed",
                                      f"${total_fam_absorbed:.2f}")
+        self.summary_row.update_card(
+            "customer_forfeit", f"${total_customer_forfeit:.2f}")
 
         # ── Detailed ledger ──────────────────────────────────────
+        # v2.0.7+ denomination-integrity:
+        #   * customer_paid = customer_charged + forfeit (what
+        #     the customer literally handed over).
+        #   * Payment Methods column = same value broken down per
+        #     method (NOT method_amount, which intermingles FAM
+        #     match).  Mirrors _collect_detailed_ledger in
+        #     fam/sync/data_collector.py — see that file for the
+        #     full rationale.  Reconciliation per row:
+        #       Customer Paid + FAM Match - Customer Forfeit
+        #         = Receipt Total
+        # EXCEPTION — Unallocated Funds (system-managed, schema v25+)
+        # records the FAM-absorbed gap from a customer-gone
+        # adjustment.  customer_charged = 0 (customer didn't pay
+        # it), so the ordinary denomination-true expression would
+        # render "Unallocated Funds: $0.00" for every adjusted
+        # transaction — hiding the absorbed loss.  CASE carve-out
+        # uses method_amount for that one method (matches the per-
+        # method carve-out already in the Vendor Reimbursement
+        # column).  User-reported 2026-05-07.
+        from fam.models.payment_method import UNALLOCATED_FUNDS_NAME
         ledger_rows = conn.execute(f"""
             SELECT t.fam_transaction_id, v.name as vendor,
                    t.receipt_total, t.status, t.created_at,
                    COALESCE(co.customer_label, '') as customer_id,
                    COALESCE(co.zip_code, '') as zip_code,
-                   COALESCE(SUM(pl.customer_charged), 0) as customer_paid,
+                   COALESCE(SUM(pl.customer_charged
+                                + pl.customer_forfeit_cents), 0)
+                       as customer_paid,
                    COALESCE(SUM(pl.match_amount), 0) as fam_match,
+                   COALESCE(SUM(pl.customer_forfeit_cents), 0) as customer_forfeit,
                    GROUP_CONCAT(pl.method_name_snapshot || ': $' ||
-                       PRINTF('%.2f', pl.method_amount / 100.0), ', ') as methods
+                       PRINTF('%.2f',
+                              CASE WHEN pl.method_name_snapshot
+                                        = '{UNALLOCATED_FUNDS_NAME}'
+                                   THEN pl.method_amount / 100.0
+                                   ELSE (pl.customer_charged
+                                         + pl.customer_forfeit_cents)
+                                        / 100.0
+                              END),
+                       ', ') as methods
             FROM transactions t
             JOIN vendors v ON t.vendor_id = v.id
             JOIN market_days md ON t.market_day_id = md.id
@@ -938,6 +1042,7 @@ class ReportsScreen(QWidget):
             rt = cents_to_dollars(r['receipt_total'])
             cp = cents_to_dollars(r['customer_paid'])
             fm = cents_to_dollars(r['fam_match'])
+            cf = cents_to_dollars(r['customer_forfeit'])
             self.ledger_table.setItem(i, 0, make_item(r['fam_transaction_id']))
             self.ledger_table.setItem(i, 1, make_item(r['created_at'] or ''))
             self.ledger_table.setItem(i, 2, make_item(r['customer_id']))
@@ -946,8 +1051,9 @@ class ReportsScreen(QWidget):
             self.ledger_table.setItem(i, 5, make_item(f"${rt:.2f}", rt))
             self.ledger_table.setItem(i, 6, make_item(f"${cp:.2f}", cp))
             self.ledger_table.setItem(i, 7, make_item(f"${fm:.2f}", fm))
-            self.ledger_table.setItem(i, 8, make_item(r['status']))
-            self.ledger_table.setItem(i, 9, make_item(r['methods'] or ''))
+            self.ledger_table.setItem(i, 8, make_item(f"${cf:.2f}", cf))
+            self.ledger_table.setItem(i, 9, make_item(r['status']))
+            self.ledger_table.setItem(i, 10, make_item(r['methods'] or ''))
 
             self._ledger_data.append({
                 'Transaction ID': r['fam_transaction_id'],
@@ -958,6 +1064,7 @@ class ReportsScreen(QWidget):
                 'Receipt Total': rt,
                 'Customer Paid': cp,
                 'FAM Match': fm,
+                'Customer Forfeit': cf,
                 'Status': r['status'],
                 'Payment Methods': r['methods'] or ''
             })
@@ -996,8 +1103,12 @@ class ReportsScreen(QWidget):
                 self.ledger_table.setItem(row_idx, 6, make_item("$0.00", 0))
                 self.ledger_table.setItem(row_idx, 7, make_item(
                     f"${amt:.2f}", amt))
-                self.ledger_table.setItem(row_idx, 8, make_item("FMNP Entry"))
-                self.ledger_table.setItem(row_idx, 9, make_item(check_info))
+                # Customer Forfeit (col 8) — always $0 for external
+                # FMNP entries (vendor matched the check at booth;
+                # no denomination forfeit applies).
+                self.ledger_table.setItem(row_idx, 8, make_item("$0.00", 0))
+                self.ledger_table.setItem(row_idx, 9, make_item("FMNP Entry"))
+                self.ledger_table.setItem(row_idx, 10, make_item(check_info))
 
                 self._ledger_data.append({
                     'Transaction ID': f"FMNP-{r['id']}",
@@ -1008,6 +1119,7 @@ class ReportsScreen(QWidget):
                     'Receipt Total': amt,
                     'Customer Paid': 0,
                     'FAM Match': amt,
+                    'Customer Forfeit': 0,
                     'Status': 'FMNP Entry',
                     'Payment Methods': check_info
                 })
@@ -2119,8 +2231,9 @@ class ReportsScreen(QWidget):
 
     def _load_error_log(self):
         """Parse the log file and populate the Error Log table."""
-        from fam.utils.log_reader import parse_log_file, get_friendly_module
-        from fam.utils.logging_config import get_log_path
+        # parse_log_file (line 33) and get_log_path (line 34) are at
+        # module level — only ``get_friendly_module`` is local.
+        from fam.utils.log_reader import get_friendly_module
 
         log_path = get_log_path()
         entries = parse_log_file(log_path, limit=500)

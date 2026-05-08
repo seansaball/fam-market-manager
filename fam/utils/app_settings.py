@@ -164,7 +164,7 @@ def check_market_code_collisions() -> list[tuple[str, list[str]]]:
     Returns a list of (code, [market_names]) for codes that map to more
     than one market.  An empty list means no collisions.
     """
-    from fam.database.connection import get_connection
+    # ``get_connection`` is at module level (line 5).
     conn = get_connection()
     rows = conn.execute("SELECT name FROM markets").fetchall()
     code_to_names: dict[str, list[str]] = {}

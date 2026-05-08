@@ -8,6 +8,57 @@ from fam.models.audit import log_action
 logger = logging.getLogger('fam.models.transaction')
 
 
+# v2.0.7+ audit (2026-05-07): canonical "active transaction" status
+# set.  Pre-centralisation, this filter was repeated as inline SQL
+# strings at 18+ sites across reports, sync, models, and the admin
+# screen.  Centralising eliminates "forgot to filter Voided" bugs
+# in future reports — a new report adding ``WHERE ... <some
+# condition>`` and forgetting to AND with the active-status filter
+# would silently include Voided/Draft transactions in totals.
+#
+# Status semantics:
+#   * Confirmed: a saved, valid transaction (the normal end state).
+#   * Adjusted: a Confirmed transaction the manager later edited.
+#     Both reports and cap-chain calculations treat this as "live".
+#   * Voided: a Confirmed/Adjusted transaction the manager later
+#     voided.  Excluded from totals across reports + cap chain;
+#     included ONLY in the Detailed Ledger audit trail (status !=
+#     'Draft' filter at fam/sync/data_collector.py:545).
+#   * Draft: a partially-saved transaction the volunteer didn't
+#     confirm.  Always excluded from money totals; included only
+#     in the volunteer's local resume-draft flow.
+#
+# Use ACTIVE_TX_STATUS_CLAUSE in WHERE/JOIN-ON SQL fragments where
+# the status column is on the ``transactions`` table aliased as
+# ``t``.  For other aliases, build the fragment via
+# ``active_tx_status_clause(alias)``.
+ACTIVE_TX_STATUSES = ('Confirmed', 'Adjusted')
+ACTIVE_TX_STATUS_CLAUSE = (
+    f"t.status IN {ACTIVE_TX_STATUSES!r}".replace("'", "'"))
+
+
+def active_tx_status_clause(table_alias: str = 't') -> str:
+    """Return the canonical "active transaction" SQL filter
+    clause for the given table alias.
+
+    Use this instead of inlining ``status IN ('Confirmed',
+    'Adjusted')`` in queries.  Single source of truth for what
+    counts as a live transaction; eliminates "forgot to filter
+    Voided" bugs in future reports.
+
+    Example:
+        # Bad — inline duplication, drift risk:
+        cur.execute("SELECT * FROM transactions t "
+                    "WHERE t.status IN ('Confirmed', 'Adjusted')")
+
+        # Good — canonical, refactor-safe:
+        from fam.models.transaction import active_tx_status_clause
+        cur.execute(f"SELECT * FROM transactions t "
+                    f"WHERE {active_tx_status_clause('t')}")
+    """
+    return f"{table_alias}.status IN {ACTIVE_TX_STATUSES!r}"
+
+
 def generate_transaction_id(market_day_date: str) -> str:
     """Generate a unique FAM-{CODE}-{DEV}-YYYYMMDD-NNNN transaction ID.
 
@@ -291,7 +342,12 @@ def update_transaction(txn_id, commit=True, *, changed_by: str = 'System',
     conn.execute(f"UPDATE transactions SET {', '.join(fields)} WHERE id=?", values)
 
     if not _skip_audit and before:
-        from fam.models.audit import log_action
+        # NOTE: do NOT add a local ``from fam.models.audit import
+        # log_action`` here — module-level import (line 6) already
+        # provides it and a function-local import would shadow it,
+        # creating UnboundLocalError on any code path that references
+        # log_action without first executing this branch.  Same
+        # scoping footgun as the v2.0.7 admin_screen regression.
         for key, value in kwargs.items():
             if key not in allowed:
                 continue
@@ -492,8 +548,90 @@ def save_payment_line_items(transaction_id, line_items, commit=True):
     ``photo_drive_url`` on an item — that takes precedence.
     """
     from fam.utils.photo_paths import parse_photo_paths
+    from fam.models.payment_method import get_payment_method_by_id
     conn = get_connection()
     try:
+        # v2.0.7 fix: denom-alignment guard at the save boundary.
+        # Pre-fix path: engine cap-fallback / penny reconciliation
+        # / Phase B forfeit could leak fractional drift onto a
+        # denom row's ``customer_charged``.  The DB
+        # ``chk_pli_invariant_*`` trigger only validates
+        # ``customer + match = method`` (sum invariant) — it does
+        # NOT enforce ``customer % denomination == 0``.  So a
+        # misaligned denom row saved successfully and surfaced in
+        # reports as e.g. "JH Food Bucks: $0.73" — meaningless
+        # for a $2-denomination method.
+        #
+        # Snap each denom row down to a multiple of denomination
+        # at the absolute write boundary — the last line of
+        # defense before the row hits the DB.  Any remaining
+        # drift moves into match_amount, preserving the sum
+        # invariant.
+        #
+        # v2.0.7 follow-up (user-reported 2026-05-07, schema v36):
+        # skip rows that already carry ``customer_forfeit_cents > 0``.
+        # That field is set ONLY by Phase B of the engine's forfeit
+        # pass, which legitimately produces sub-denomination
+        # ``customer_charged`` (e.g. $10 Food RX token to a $6.52
+        # receipt → cc=$6.52, forfeit=$3.48).  Snapping that down
+        # to $0 here corrupts the carefully-computed Phase B state
+        # and dumps the customer's actual contribution into FAM
+        # match — every report then falsely shows "FAM funded
+        # everything, customer paid nothing."  Verify the
+        # invariant ``cc + forfeit == N × denom`` to catch any
+        # upstream corruption rather than silently mis-saving.
+        for item in line_items:
+            pm_id = item.get('payment_method_id')
+            if not pm_id:
+                continue
+            pm = get_payment_method_by_id(pm_id)
+            if not pm:
+                continue
+            denom = pm.get('denomination') or 0
+            if denom <= 0:
+                continue
+            cc = item.get('customer_charged', 0)
+            if cc < 0 or cc % denom == 0:
+                continue
+            forfeit = int(item.get('customer_forfeit_cents') or 0)
+            if forfeit > 0:
+                # Phase B forfeit already applied — sub-denom cc
+                # is intentional.  Defensive invariant check:
+                # cc + forfeit must be a multiple of denomination
+                # (i.e. the customer's physical token count is
+                # recoverable).
+                if (cc + forfeit) % denom != 0:
+                    logger.error(
+                        "Save layer: Phase B forfeit invariant "
+                        "broken on txn=%s method=%s denom=%dc — "
+                        "customer_charged=%d + forfeit=%d is not a "
+                        "multiple of denomination (remainder %d).  "
+                        "Saving as-received (snap-back skipped) but "
+                        "this indicates upstream forfeit corruption.",
+                        transaction_id,
+                        item.get('method_name_snapshot', '?'),
+                        denom, cc, forfeit,
+                        (cc + forfeit) % denom)
+                continue
+            # Misaligned with NO forfeit metadata — legacy bad data
+            # or sub-denom drift from a non-Phase-B path.  Snap
+            # down so the row at least aligns to a denomination
+            # multiple before hitting the DB.
+            snapped = (cc // denom) * denom
+            drift = cc - snapped
+            old_method = item.get('method_amount', cc + item.get('match_amount', 0))
+            item['customer_charged'] = snapped
+            item['match_amount'] = item.get('match_amount', 0) + drift
+            # method_amount preserved (snapped + match+drift == old_cust + old_match == old_method)
+            item['method_amount'] = old_method
+            logger.warning(
+                "Snapped misaligned denom row at save: txn=%s "
+                "method=%s denom=%dc, customer_charged %d -> %d "
+                "(drift %d absorbed into match)",
+                transaction_id,
+                item.get('method_name_snapshot', '?'),
+                denom, cc, snapped, drift)
+
         # Snapshot existing drive URLs keyed by (pm_id, normalized
         # photo_path) so we can preserve them across the DELETE+INSERT.
         existing_urls: dict[tuple, str] = {}
@@ -520,8 +658,9 @@ def save_payment_line_items(transaction_id, line_items, commit=True):
             conn.execute(
                 """INSERT INTO payment_line_items
                    (transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot,
-                    method_amount, match_amount, customer_charged, photo_path, photo_drive_url, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    method_amount, match_amount, customer_charged, customer_forfeit_cents,
+                    user_capped, photo_path, photo_drive_url, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     transaction_id,
                     item['payment_method_id'],
@@ -530,6 +669,21 @@ def save_payment_line_items(transaction_id, line_items, commit=True):
                     item['method_amount'],
                     item['match_amount'],
                     item['customer_charged'],
+                    # v2.0.7 (schema v36): persist Phase B customer-side
+                    # forfeit so reports (Vendor Reimbursement,
+                    # Detailed Ledger) can surface it as a separate
+                    # column, and AdjustmentDialog re-open can
+                    # reconstruct the original physical token count
+                    # from saved data.
+                    int(item.get('customer_forfeit_cents') or 0),
+                    # v2.0.7+ (schema v37, audit 2026-05-07):
+                    # persist user-cap flag so a row the volunteer
+                    # explicitly locked stays locked across draft
+                    # save/restore + adjustment round-trips.  Without
+                    # persisting, every reload silently resets the
+                    # lock and a tightening cap could re-inflate the
+                    # value behind the volunteer's back.
+                    1 if item.get('user_capped') else 0,
                     item.get('photo_path'),
                     drive_url,
                     eastern_timestamp(),

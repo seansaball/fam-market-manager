@@ -1,6 +1,10 @@
 """Payment method CRUD operations."""
 
+import logging
+
 from fam.database.connection import get_connection
+
+logger = logging.getLogger('fam.models.payment_method')
 
 
 # ── System-managed payment methods (schema v25+) ──────────────────
@@ -14,6 +18,27 @@ from fam.database.connection import get_connection
 # undercharge.  Keeping the name as a constant lets call sites compare
 # against it without spreading magic strings around.
 UNALLOCATED_FUNDS_NAME = 'Unallocated Funds'
+
+# v2.0.7: SNAP and Cash are universally accepted at every vendor.
+# Volunteers cannot un-bind them via the Settings → Vendors → Eligible
+# Payment Methods dialog — the checkboxes render checked + disabled
+# in the UI, and the model layer refuses to remove the binding.  This
+# defensive control eliminates the "non-denom method exceeds eligible-
+# vendor capacity" error class for the most common payment instruments
+# while preserving the per-vendor eligibility infrastructure (and the
+# Layer 2B capacity check) for any future method that DOES have
+# real-world eligibility constraints (e.g. produce-only Food Bucks).
+#
+# The match-by-name approach mirrors how FMNP is identified throughout
+# the codebase — coordinators are explicitly warned not to rename
+# these methods in Settings.
+UNIVERSAL_VENDOR_METHOD_NAMES = frozenset({'SNAP', 'Cash'})
+
+
+def is_universal_vendor_method(method_name: str | None) -> bool:
+    """Return True if the method is universally accepted at every
+    vendor and cannot be unassigned via the Vendor Eligibility UI."""
+    return (method_name or '') in UNIVERSAL_VENDOR_METHOD_NAMES
 
 
 def get_all_payment_methods(active_only=False, include_system=True):
@@ -365,8 +390,31 @@ def assign_payment_method_to_vendor(vendor_id, payment_method_id,
 
 def unassign_payment_method_from_vendor(vendor_id, payment_method_id,
                                          changed_by='System'):
-    """Remove a payment-method registration from a vendor.  Audited."""
+    """Remove a payment-method registration from a vendor.  Audited.
+
+    v2.0.7: Refuses to unassign methods in
+    ``UNIVERSAL_VENDOR_METHOD_NAMES`` (SNAP, Cash).  These are
+    universally accepted at every vendor by policy — preventing
+    them from being un-bound eliminates the mixed-eligibility
+    overflow problem class for the most common non-denom methods.
+    The defensive guard fires regardless of UI state (a misclick,
+    a .fam import, or a direct model call all hit the same gate).
+    Returns silently when the method is universal — caller code
+    typically iterates over a "to remove" set and we don't want
+    to raise on every iteration.
+    """
     from fam.models.audit import log_action
+
+    pm = get_payment_method_by_id(payment_method_id)
+    if pm and is_universal_vendor_method(pm['name']):
+        logger.warning(
+            "Refused to unassign universal vendor method '%s' "
+            "from vendor=%s — SNAP and Cash are bound at every "
+            "vendor by policy (v2.0.7).  No-op.",
+            pm['name'], vendor_id,
+        )
+        return
+
     conn = get_connection()
     try:
         cur = conn.execute(

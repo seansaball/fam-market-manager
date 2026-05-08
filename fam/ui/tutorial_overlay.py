@@ -79,7 +79,11 @@ TUTORIAL_STEPS = [
             "Start here at the beginning of each market day.\n\n"
             "Select your market location, type your name, "
             "and click \"Open Market Day\" to begin recording "
-            "transactions."
+            "transactions.\n\n"
+            "If a market day from a prior date was left open, "
+            "the app auto-closes it at startup with a clear "
+            "notification — you'll always be recording "
+            "today's transactions against today's day."
         ),
         widget_path="market_day_screen",
         position="right",
@@ -90,20 +94,26 @@ TUTORIAL_STEPS = [
             TutorialHint(
                 "Market Setup",
                 "Select your market location, enter your volunteer "
-                "name, and click Open Market Day to start recording.",
+                "name, and click Open Market Day to start recording. "
+                "The market's daily FAM match limit (configured in "
+                "Settings → Markets) applies to every customer "
+                "who shops at this market on this day.",
                 "market_day_screen.create_frame",
             ),
             TutorialHint(
                 "Market Day Status",
                 "Shows the active market day. You can close the "
                 "market here at the end of the day, or reopen it "
-                "if needed.",
+                "if needed. Closing a day flushes in-flight drafts "
+                "and triggers a final cloud sync.",
                 "market_day_screen.status_frame",
             ),
             TutorialHint(
                 "Transaction Overview",
                 "A quick-reference list of all transactions "
-                "recorded during this market day.",
+                "recorded during this market day. Voided and "
+                "Adjusted transactions are tagged so coordinators "
+                "can spot edits at a glance.",
                 "market_day_screen.txn_table",
             ),
         ],
@@ -127,16 +137,24 @@ TUTORIAL_STEPS = [
         hints=[
             TutorialHint(
                 "Customer Info Bar",
-                "Shows the current customer ID, active market, "
-                "and zip code field. Use Returning to look up a "
-                "previous customer or New Customer to start fresh.",
+                "Shows the current customer ID (e.g. C-001-LB1 — "
+                "the LB1 suffix is this laptop's device tag), "
+                "active market, and an optional zip-code field. "
+                "Use Returning to look up a customer who's already "
+                "shopped today; their daily FAM match cap "
+                "accounting carries through automatically across "
+                "every visit. Use New Customer to start fresh.",
                 "receipt_intake_screen.customer_frame",
             ),
             TutorialHint(
                 "Receipt Entry Form",
                 "Select the vendor, enter the receipt total, and "
                 "click Add Receipt to Order. Optionally add notes "
-                "for each receipt.",
+                "for each receipt. Vendor-method eligibility is "
+                "enforced — if a vendor is configured to only "
+                "accept some payment methods (Settings → Vendors), "
+                "the Payment screen will prevent ineligible "
+                "methods from landing on this vendor's receipt.",
                 "receipt_intake_screen.form_frame",
             ),
             TutorialHint(
@@ -173,29 +191,64 @@ TUTORIAL_STEPS = [
         hints=[
             TutorialHint(
                 "Order Summary",
-                "At-a-glance cards showing the order total, how "
-                "much is allocated, what remains, customer amount, "
-                "and the FAM match.",
+                "At-a-glance cards: Total Allocated (filled across "
+                "all methods), Remaining (target = $0.00), Customer "
+                "Pays (what the customer hands over), FAM Match "
+                "(what FAM contributes), and Customer Forfeit "
+                "(over-tender on denominated tokens — non-zero "
+                "only when a customer hands a $10 token to a "
+                "smaller receipt and FAM match can't fully absorb "
+                "the gap; in normal use this card shows $0.00).",
                 "payment_screen.summary_row",
             ),
             TutorialHint(
                 "Vendor Breakdown",
-                "Which vendors are part of this order and their "
-                "individual receipt totals.",
+                "Each vendor on the order with their receipt total, "
+                "remaining balance, and a per-method ✓/✗ "
+                "eligibility grid. ✗ means that vendor is not "
+                "configured to accept that method (Settings → "
+                "Vendors). Denominated rows show the customer's "
+                "physical handout as 'N × $D = $T' (e.g. "
+                "'2 × $10.00 = $20.00' for two $10 Food RX tokens) "
+                "so the total is always denomination-true.",
                 "payment_screen.vendor_table",
             ),
             TutorialHint(
-                "Payment Methods",
-                "Add payment methods (SNAP, Credit, Cash, etc.) "
-                "and enter the amount for each. The FAM match "
-                "calculates automatically.",
+                "Payment Methods + ⚡ toggle",
+                "Add payment methods (SNAP, Cash, Food Bucks, Food "
+                "RX, FMNP) and enter the amount for each. FAM "
+                "match calculates automatically.\n\n"
+                "Each non-denominated row has a per-row ⚡ toggle:\n"
+                "  • Green ⚡ = Active — Auto-Distribute will fill "
+                "this row with the receipt remainder (the "
+                "'overflow target').\n"
+                "  • Grey ⚡ = Locked — the value you typed stays "
+                "exactly as entered, even if the daily match cap "
+                "kicks in.\n\n"
+                "Typing into a row's amount field auto-locks "
+                "(grey). Click ⚡ to switch states. Only one row "
+                "at a time can be the green overflow target. "
+                "Denominated rows (Food Bucks, Food RX, FMNP) use "
+                "a stepper instead of an amount field — their "
+                "physical token count is the input.",
                 "payment_screen.rows_container",
             ),
             TutorialHint(
                 "Confirm & Collect",
-                "The collection checklist shows exactly what to "
-                "collect from the customer. Confirm when done, "
-                "or save as draft to finish later.",
+                "The 'Collect from Customer' panel shows exactly "
+                "what to take, hand over, and stamp before "
+                "committing. Click Confirm Payment to commit, or "
+                "Save as Draft to finish later (drafts survive "
+                "across app restarts and are listed in Receipt "
+                "Intake → Pending Orders). The Confirm flow opens "
+                "a redesigned dialog with marching-ants action "
+                "zones — per-method 'Collect $X.XX' / 'Hand over "
+                "N tokens' rows, a SNAP/EBT swipe acknowledgement "
+                "checkbox, and a Customer Forfeit warning zone "
+                "when applicable. The dialog can also surface a "
+                "'Void Instead' recommendation when the original "
+                "transaction included denominated methods that "
+                "would re-trigger cap-aware adjustments.",
                 "payment_screen.bottom_frame",
             ),
         ],
@@ -206,7 +259,11 @@ TUTORIAL_STEPS = [
             "Need to fix a mistake? Search for any transaction "
             "here to adjust the amount, change the vendor, "
             "or void it entirely.\n\n"
-            "All changes are tracked in the audit log below."
+            "All changes are tracked in the audit log below.\n\n"
+            "If the original transaction included a denominated "
+            "method (Food Bucks, Food RX, FMNP), Adjust opens a "
+            "safety dialog recommending Void + re-enter \u2014 that's "
+            "usually the cleanest path for denominated edits."
         ),
         widget_path="admin_screen",
         position="right",
@@ -217,22 +274,36 @@ TUTORIAL_STEPS = [
         hints=[
             TutorialHint(
                 "Search & Filters",
-                "Filter by market, status, or search by transaction "
-                "ID to find the transaction you need to correct.",
+                "Filter by market, status (Confirmed / Adjusted / "
+                "Voided / Draft), or search by transaction ID, "
+                "customer label, vendor name, or receipt total. "
+                "The date range filter targets last_updated (most "
+                "recent audit activity) so recent edits surface "
+                "first.",
                 "admin_screen.filter_frame",
             ),
             TutorialHint(
                 "Transaction Results",
                 "Matching transactions with details. Use Adjust to "
-                "change amounts or payment methods, or Void to "
-                "cancel a transaction.",
+                "change amounts or payment methods (with the same "
+                "match-cap + denomination logic as the original "
+                "Payment screen), or Void to cancel a transaction. "
+                "Voided transactions are excluded from money "
+                "totals across all reports but kept in the audit "
+                "trail. If a customer has already left when an "
+                "adjustment requires more payment, the "
+                "customer-gone path logs the shortfall as "
+                "Unallocated Funds (FAM-absorbed) so the vendor "
+                "still gets the receipt total.",
                 "admin_screen.table",
             ),
             TutorialHint(
                 "Audit Log",
                 "An append-only record of every change \u2014 who "
-                "changed what, when, and why. Full accountability "
-                "for all adjustments.",
+                "changed what, when, and why \u2014 including any "
+                "ADJUST_OVERRIDE entries when a manager opted to "
+                "Adjust Anyway through the denomination safety "
+                "gate. Full accountability for all adjustments.",
                 "admin_screen.audit_table",
             ),
         ],
@@ -241,9 +312,17 @@ TUTORIAL_STEPS = [
         title="FMNP Check Tracking",
         description=(
             "Use this screen to record FMNP (Farmers Market "
-            "Nutrition Program) check entries from vendors.\n\n"
-            "Select the market day, vendor, and enter the "
-            "check details."
+            "Nutrition Program) checks that vendors took at the "
+            "booth.\n\n"
+            "These are recorded separately from regular "
+            "transactions because the vendor applied the match "
+            "themselves at the booth (treating a $5 FMNP check "
+            "as $10 worth of food). FAM reimburses the face "
+            "value at end-of-month so the vendor is made whole "
+            "on the match they gave away.\n\n"
+            "The market-day dropdown defaults to 'All Market "
+            "Days' for browsing the full FMNP history; pick a "
+            "specific day to add a new entry."
         ),
         widget_path="fmnp_screen",
         position="right",
@@ -254,14 +333,29 @@ TUTORIAL_STEPS = [
         hints=[
             TutorialHint(
                 "FMNP Entry Form",
-                "Select the market day and vendor, enter the check "
-                "amount and count, then add the entry.",
+                "Select the market day and vendor, enter the "
+                "dollar amount (must be a multiple of $5 — the "
+                "FMNP denomination), optionally the check count "
+                "and notes, attach a photo per check, and click "
+                "Add FMNP Entry.\n\n"
+                "When 'All Market Days' is selected, the Save "
+                "button greys out and an inline hint appears "
+                "next to it: '← Pick a specific market day above "
+                "to add a new entry'. Pick a date to enable "
+                "Save — you can't attribute a new entry to "
+                "'all markets'.",
                 "fmnp_screen.form_frame",
             ),
             TutorialHint(
                 "FMNP Entries Table",
-                "All FMNP entries for the selected market day. "
-                "Edit or delete entries as needed.",
+                "FMNP entries with a Market Day column so rows "
+                "from different days are distinguishable. With "
+                "'All Market Days' selected (the default), the "
+                "table mixes entries across the full history; "
+                "use the date-range filter to narrow down. Edit "
+                "or delete entries via the buttons in the "
+                "Actions column — all changes are written to "
+                "the audit log with old + new values.",
                 "fmnp_screen.table",
             ),
         ],
@@ -272,7 +366,10 @@ TUTORIAL_STEPS = [
             "View reports, charts, and export data here.\n\n"
             "Use the filters at the top to narrow by date, "
             "market, vendor, or payment type.\n\n"
-            "Each tab shows a different report you can export."
+            "Each tab shows a different report you can export "
+            "as CSV. Reports are also synced to a shared Google "
+            "Sheet (Settings → Cloud Sync) for coordinators and "
+            "the finance team."
         ),
         widget_path="reports_screen",
         position="right",
@@ -284,20 +381,57 @@ TUTORIAL_STEPS = [
             TutorialHint(
                 "Report Filters",
                 "Narrow results by date range, market, vendor, "
-                "or payment type. Filters apply across all tabs.",
+                "or payment type. Filters apply across all tabs. "
+                "Voided transactions are excluded from money "
+                "totals automatically; the Detailed Ledger keeps "
+                "voided rows visible as an audit trail.",
                 "reports_screen.filter_frame",
             ),
             TutorialHint(
                 "Summary Cards",
-                "Key totals at a glance: total receipts, customer "
-                "payments, FAM match amounts, and FMNP totals.",
+                "Key totals at a glance: Total Receipts, Customer "
+                "Paid, FAM Match, FMNP Checks, FAM Absorbed (the "
+                "Unallocated Funds total — money FAM ate via the "
+                "customer-gone adjustment path), and Customer "
+                "Forfeit (over-tendered token value when a "
+                "denomination unit exceeded the receipt). The "
+                "math identity reads:\n\n"
+                "  Total Receipts = Customer Paid + FAM Match\n"
+                "                 − Customer Forfeit\n"
+                "                 + FAM Absorbed + FMNP_External",
                 "reports_screen.summary_row",
             ),
             TutorialHint(
                 "Report Tabs",
-                "Switch between reports: Vendor Reimbursement, "
-                "FAM Match, Detailed Ledger, Activity Log, and "
-                "more. Each has a CSV export button.",
+                "Switch between reports — each with a CSV export "
+                "button:\n\n"
+                "  • Vendor Reimbursement — per-vendor totals + "
+                "per-method columns (denomination-true: tokens × "
+                "face value) + Customer Forfeit + FMNP "
+                "(External). Identity: Σ(method) + FAM Match − "
+                "Customer Forfeit + FMNP_External = Total Due.\n"
+                "  • FAM Match Report — per-method match totals "
+                "with FAM Absorbed (Unallocated Funds) called "
+                "out separately.\n"
+                "  • Detailed Ledger — per-transaction "
+                "granularity with the Customer Forfeit column + "
+                "Zip Code + Payment Methods breakdown.\n"
+                "  • Transaction Log — append-only audit trail "
+                "across CREATE / CONFIRM / ADJUST / VOID / OPEN "
+                "/ CLOSE / REOPEN actions.\n"
+                "  • Generated Rewards — historical record of "
+                "every reward issued (e.g. $5 SNAP → 1 × $2 Food "
+                "Bucks); rules configured in Settings → Rewards "
+                "but historical entries reflect what was actually "
+                "handed out at the time.\n"
+                "  • Geolocation — Folium-rendered map of "
+                "customers by zip code (when zip codes are "
+                "captured at Receipt Intake).\n"
+                "  • Charts — matplotlib time-series and "
+                "category breakdowns.\n"
+                "  • Error Log — recent local app errors with "
+                "version stamps; useful when emailing diagnostics "
+                "to a coordinator.",
                 "reports_screen.tabs",
             ),
         ],
@@ -328,9 +462,35 @@ TUTORIAL_STEPS = [
             ),
             TutorialHint(
                 "Configuration Tabs",
-                "Markets: add locations and set match limits. "
-                "Vendors: manage the vendor list. Payment Methods: "
-                "configure match percentages and display order.",
+                "Markets: add locations, set the daily FAM match "
+                "limit per customer, and assign which payment "
+                "methods are accepted at this market.\n\n"
+                "Vendors: manage the vendor list AND set per-"
+                "vendor payment-method eligibility (which "
+                "vendors can accept Food Bucks / Food RX / FMNP "
+                "etc.). SNAP and Cash are universally accepted "
+                "at every vendor and cannot be unassigned (their "
+                "checkboxes are ticked + disabled with a "
+                "tooltip explaining why) — eliminates the silent-"
+                "SNAP-onto-ineligible-vendor bug class entirely.\n\n"
+                "Payment Methods: add / edit / toggle methods, "
+                "configure match percentages, denomination "
+                "values (e.g. $2 Food Bucks, $5 FMNP, $10 Food "
+                "RX), display order, and photo-receipt "
+                "requirements. Activating FMNP for the Payment "
+                "screen surfaces a confirmation dialog "
+                "explaining the typical FMNP workflow goes "
+                "through the dedicated FMNP Entry screen, not "
+                "the Payment screen.\n\n"
+                "Rewards: configure rules of the form 'For every "
+                "$X spent on [source method], hand out N units "
+                "of [reward method] worth $Y each.' The default "
+                "rule is the classic $5 SNAP → 1 × $2 JH Food "
+                "Bucks. The Payment Confirmation Dialog tells "
+                "the volunteer in real time exactly how many "
+                "tokens to physically hand over; a Generated "
+                "Rewards tab in Reports lists every reward "
+                "issued for end-of-season reconciliation.",
                 "settings_screen.tabs",
             ),
             TutorialHint(
@@ -383,23 +543,27 @@ TUTORIAL_STEPS = [
             "When something is unclear or you need to look "
             "something up mid-market, the Help sidebar item is "
             "your first stop. Four tabs cover everything:\n\n"
-            "\u2022 Walkthrough \u2014 An animated overview of a "
-            "full market day. Great for new volunteers; loops "
-            "in place so you can watch each step at your own "
-            "pace.\n\n"
-            "\u2022 Browse \u2014 Over 50 articles grouped by "
-            "topic (during the market, FMNP, corrections, "
-            "reports, sync, and more). Type any keyword in the "
-            "search box to filter live.\n\n"
+            "\u2022 Walkthrough \u2014 An animated 5-stage "
+            "overview of a full market day. Great for new "
+            "volunteers; loops in place so you can watch each "
+            "step at your own pace.\n\n"
+            "\u2022 Browse \u2014 75+ articles grouped by topic "
+            "(during the market, FMNP, corrections, reports, "
+            "sync, and more) with key v2.0.8 articles like "
+            "\u201cauto-distribute-toggle\u201d, \u201ccustomer-"
+            "forfeit\u201d, and \u201cfmnp-all-market-days\u201d. "
+            "Type any keyword in the search box to filter live.\n\n"
             "\u2022 Troubleshooting \u2014 Symptom-based guides "
             "(\u201csync is red\u201d, \u201cphoto isn\u2019t "
-            "uploading\u201d, \u201capp is slow\u201d) with "
-            "step-by-step actions.\n\n"
+            "uploading\u201d, \u201cAuto-Distribute did "
+            "nothing\u201d, \u201cpayment screen hard block\u201d) "
+            "with step-by-step actions.\n\n"
             "\u2022 System Status \u2014 A live snapshot of this "
             "laptop \u2014 app version, last sync, disk usage, "
-            "record counts. The \u201cCopy Diagnostic Info\u201d "
-            "button puts everything on your clipboard so you "
-            "can paste it into a coordinator email.\n\n"
+            "record counts, instance-lock state, pending-update "
+            "state, rewards summary. The \u201cCopy Diagnostic "
+            "Info\u201d button puts everything on your clipboard "
+            "so you can paste it into a coordinator email.\n\n"
             "All your data is also kept safe in the background "
             "via automatic backups and an audit log \u2014 see "
             "the Help \u2192 Browse tab for the details."

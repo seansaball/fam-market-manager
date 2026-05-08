@@ -220,7 +220,13 @@ class NoScrollSpinBox(QSpinBox):
 
     def keyPressEvent(self, event):
         text = event.text()
-        if text in '0123456789':
+        # v2.0.7+ fix (user-reported 2026-05-07): same gotcha as
+        # NoScrollDoubleSpinBox below — ``text in '0123456789'``
+        # is True for the empty string (substring semantics),
+        # so non-character keys (Backspace, Shift, arrows, etc.)
+        # fell through to ``int('')`` and crashed the global
+        # exception handler.  Require a single digit character.
+        if len(text) == 1 and text in '0123456789':
             line = self.lineEdit()
             if line.hasSelectedText():
                 line.del_()                          # type-to-replace
@@ -258,7 +264,24 @@ class NoScrollDoubleSpinBox(QDoubleSpinBox):
     def keyPressEvent(self, event):
         text = event.text()
         line = self.lineEdit()
-        if text in '0123456789':
+        # v2.0.7+ fix (user-reported 2026-05-07): require ``text``
+        # to be a non-empty single digit BEFORE entering the
+        # digit-handling branch.  Pre-fix, ``text in '0123456789'``
+        # used Python substring semantics — and the empty string
+        # is a substring of EVERY string, so non-character key
+        # events (Backspace, Delete, Shift, arrow keys, modifier
+        # keys, IME composition keys) all evaluated truthy and
+        # fell through to ``int(text)`` which raised
+        # ``ValueError: invalid literal for int() with base 10: ''``.
+        # The user saw this as "random numbers in random spots
+        # while typing" because each non-digit key press blew up
+        # the global exception handler mid-edit, leaving the
+        # spinbox in a partially-formatted state.  Now the branch
+        # only fires for a single digit character; everything
+        # else (including Backspace and arrow keys) falls through
+        # to ``super().keyPressEvent(event)`` where Qt handles it
+        # natively.
+        if len(text) == 1 and text in '0123456789':
             if line.hasSelectedText():
                 line.del_()                          # type-to-replace
                 super().keyPressEvent(event)

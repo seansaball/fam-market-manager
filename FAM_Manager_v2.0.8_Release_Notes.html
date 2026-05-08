@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FAM Market Manager v2.0.8 — Release Summary</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f3;font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;color:#1a1a1a;line-height:1.55;">
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f5f5f3;padding:24px 12px;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.06);overflow:hidden;max-width:640px;">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:#2d6a4f;color:#ffffff;padding:32px 36px 24px;">
+            <div style="font-size:11pt;font-weight:600;text-transform:uppercase;letter-spacing:2px;opacity:0.85;margin-bottom:6px;">FOOD ASSISTANCE MATCH</div>
+            <div style="font-size:22pt;font-weight:700;line-height:1.15;margin-bottom:4px;">FAM Market Manager v2.0.8</div>
+            <div style="font-size:12pt;opacity:0.92;">Release Summary &nbsp;·&nbsp; May 2026</div>
+          </td>
+        </tr>
+
+        <!-- 30-second summary -->
+        <tr>
+          <td style="padding:28px 36px 8px;">
+            <h2 style="margin:0 0 12px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">In 30 Seconds</h2>
+            <p style="margin:0 0 12px;font-size:11pt;">
+              v2.0.8 is the <strong>first v2.x release reaching the field</strong>. It rolls up a season of
+              hardening, polish, and new features since the last public version (v1.9.8/v1.9.9 in
+              April 2026): a <strong>major UI refresh</strong> on the Payment Screen, a <strong>fully
+              configurable Rewards engine</strong>, <strong>per-vendor payment-method controls</strong>,
+              new <strong>Customer Forfeit accounting</strong> for over-tendered tokens, a
+              <strong>redesigned confirmation dialog</strong> that walks the volunteer through each
+              physical step before commit, and <strong>multi-workstation cloud-sync hardening</strong>
+              for markets running several laptops in parallel.
+            </p>
+            <p style="margin:0 0 12px;font-size:11pt;">
+              The bulk of this release is <strong>user-facing</strong>. Volunteers and market managers
+              will notice changes on the Payment Screen, the FMNP page, and several reports. The
+              behind-the-scenes engine, database, and reliability work is summarized at the end for
+              technical reference.
+            </p>
+            <p style="margin:0 0 6px;font-size:10.5pt;color:#555;">
+              <strong>Schema:</strong> v37 (auto-migrates with pre-migration backup) &nbsp;&middot;&nbsp;
+              <strong>Tests:</strong> 3,646 across 161+ files (was 1,822 at v1.9.8) &nbsp;&middot;&nbsp;
+              <strong>Migration path:</strong> automatic on first launch
+            </p>
+          </td>
+        </tr>
+
+        <!-- What volunteers will see -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">What Volunteers Will See at the Booth</h2>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Redesigned Payment Confirmation Dialog</h3>
+            <p style="margin:0 0 12px;font-size:11pt;">
+              Confirming a payment now opens a dialog that <strong>walks the volunteer through what
+              they need to physically do before the transaction commits</strong>. A
+              <em>marching-ants action zone</em> highlights each step. <strong>Per-method action
+              rows</strong> tell the volunteer exactly what to handle: "Collect $10.00 SNAP," "Hand
+              over 2 &times; $2.00 Food Bucks tokens," "Take 1 &times; $5.00 FMNP check." For SNAP /
+              EBT a <strong>required acknowledgement checkbox</strong> ("Yes, I&rsquo;ve completed
+              the SNAP swipe on the EBT terminal") keeps Confirm disabled until the swipe is done.
+              A <strong>customer-impact summary</strong> shows what to collect and what to give back
+              before the transaction commits.
+            </p>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Per-Row &#x26A1; Auto-Distribute Toggle</h3>
+            <p style="margin:0 0 8px;font-size:11pt;">
+              Each non-denominated payment row (SNAP, Cash, etc.) has a small &#x26A1; icon next to
+              the amount field, with two visual states:
+            </p>
+            <ul style="margin:0 0 10px;padding-left:22px;font-size:11pt;">
+              <li><strong>Green &#x26A1; = Active.</strong> Auto-Distribute will fill or refill this row with the receipt remainder. The row is the "overflow target."</li>
+              <li><strong>Grey &#x26A1; = Locked.</strong> Auto-Distribute will skip this row. The volunteer's typed value stays exactly as entered, even when the daily FAM match cap kicks in.</li>
+            </ul>
+            <p style="margin:0 0 12px;font-size:11pt;">
+              Typing into the amount field auto-locks the row. Adding a third payment row when one
+              is already Active defaults the new row to Locked. Volunteers can click &#x26A1; to
+              switch states without deleting and re-adding the row. <strong>Why it matters:</strong>
+              earlier versions could silently inflate a row's value when the daily match cap shrank
+              the FAM contribution, so a typed "$125 SNAP" might become "$138.09" without warning.
+              The toggle makes intent explicit.
+            </p>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Per-Vendor Payment-Method Eligibility</h3>
+            <p style="margin:0 0 12px;font-size:11pt;">
+              Configure, per vendor, exactly which payment methods that vendor can accept
+              (<em>Settings &rarr; Vendors &rarr; Eligible Payment Methods</em>). Ineligible methods
+              no longer appear as options against ineligible vendors &mdash; a baked-goods booth
+              can&rsquo;t accidentally take Food Bucks. Mid-season changes propagate to every
+              laptop on the next sync. <strong>SNAP and Cash are universally accepted at every
+              vendor</strong> (their checkboxes are ticked, disabled, and tooltipped) &mdash; this
+              eliminates the silent-SNAP-onto-ineligible-vendor reproducer class entirely.
+            </p>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Customer Forfeit Awareness</h3>
+            <p style="margin:0 0 8px;font-size:11pt;">
+              When a customer hands a denomination unit (e.g. a $10 Food RX token) to a vendor whose
+              receipt is smaller than the unit's face value (e.g. $1.45), the over-tendered amount
+              is now tracked end-to-end:
+            </p>
+            <ul style="margin:0 0 10px;padding-left:22px;font-size:11pt;">
+              <li>A new <strong>Customer Forfeit</strong> card on the Payment Screen header shows the running total. $0.00 in normal use; only positive when a denomination unit&rsquo;s face value exceeded what the receipt and FAM match together could absorb.</li>
+              <li>The Payment Confirmation Dialog surfaces a <strong>Customer Forfeit warning zone</strong> when a forfeit is about to commit, so the volunteer can confirm the customer accepts the over-tender.</li>
+              <li>Reports get a dedicated <strong>Customer Forfeit</strong> column for after-the-fact audit (see <em>Reporting Updates</em> below).</li>
+            </ul>
+            <p style="margin:0 0 12px;font-size:11pt;">
+              The vendor still receives the full receipt total &mdash; this is a record of "the
+              customer over-tendered, here&rsquo;s the unaccounted token value," not a shift of money
+              to the vendor.
+            </p>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Configurable Customer Rewards</h3>
+            <p style="margin:0 0 12px;font-size:11pt;">
+              A new <strong>Customer Rewards</strong> add-on (<em>Settings &rarr; Rewards</em>) lets
+              the market operations manager configure rules of the form: <em>"For every $X spent on
+              [source method], hand out N units of [reward method] worth $Y each."</em> The default
+              rule is the classic <strong>$5 SNAP &rarr; 1 &times; $2 JH Food Bucks</strong>, but
+              every part is editable. The Payment Confirmation Dialog now displays a <strong>GIVE
+              TO CUSTOMER</strong> zone telling the volunteer in real time exactly how many tokens
+              to hand over. Reports gain a <strong>Generated Rewards</strong> tab listing every
+              reward issued for end-of-season reconciliation against your token inventory.
+            </p>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">New Action-Oriented Dialogs</h3>
+            <p style="margin:0 0 8px;font-size:11pt;">
+              When the volunteer hits a hard edge case, the Payment Screen now surfaces a clear,
+              action-oriented dialog instead of a generic error.
+            </p>
+            <ul style="margin:0 0 10px;padding-left:22px;font-size:11pt;">
+              <li><strong>Cap-bound impossible-to-balance recommendation.</strong> When the customer's daily FAM match cap can&rsquo;t accommodate their full payment mix, the dialog names the cap as the root cause, shows the exact dollar gap to reduce, and explicitly recommends splitting the customer's receipts into separate orders &mdash; each split gets its own clean cap allocation.</li>
+              <li><strong>Adjustment safety gate for denominated transactions.</strong> Clicking <em>Adjust</em> on a transaction that included Food Bucks / Food RX / FMNP opens a three-button dialog (<em>Void Instead</em> recommended / <em>Adjust Anyway</em> with audit-log entry / <em>Cancel</em>). Void + re-enter is the supported workflow for denominated edits.</li>
+              <li><strong>Customer-gone path.</strong> If a volunteer realizes mid-Adjustment that the customer has already left, the app offers a clear "log as Unallocated Funds" option that records FAM&rsquo;s absorbed loss without leaving the transaction in a broken state.</li>
+            </ul>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">FMNP Check Tracking &mdash; Full History at a Glance</h3>
+            <p style="margin:0 0 12px;font-size:11pt;">
+              The FMNP Check Tracking page&rsquo;s market-day dropdown now defaults to <strong>"All
+              Market Days"</strong>, paired with a date-range filter. Coordinators can search the
+              full FMNP entry history at a glance &mdash; no more scrolling through every prior
+              market day. A new <em>Market Day</em> column in the entries table identifies which
+              date each entry came from. When "All Market Days" is selected, the <em>Add FMNP
+              Entry</em> button greys out (you can&rsquo;t attribute a new entry to "all markets")
+              and an inline hint label appears next to it explaining how to re-enable it.
+            </p>
+          </td>
+        </tr>
+
+        <!-- Reporting updates -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">Reporting Updates &mdash; What Managers See in Reports</h2>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">New Customer Forfeit Column on Vendor Reimbursement &amp; Detailed Ledger</h3>
+            <p style="margin:0 0 10px;font-size:11pt;">
+              Coordinators reviewing end-of-month reimbursements can see, at a glance, when a
+              customer over-tendered a denomination unit and how much went unaccounted. The
+              per-vendor row reconciliation reads:
+            </p>
+            <pre style="background:#f6f9f7;border:1px solid #d8e6df;border-radius:4px;padding:12px 14px;font-size:10pt;font-family:Consolas,'Courier New',monospace;color:#1a1a1a;white-space:pre-wrap;margin:0 0 8px;">&Sigma;(per-method-cols) + FAM Match &minus; Customer Forfeit + FMNP_External
+                                                          = Total Due to Vendor</pre>
+            <p style="margin:0 0 12px;font-size:11pt;">
+              <strong>Total Due to Vendor</strong> is unchanged &mdash; vendors still receive
+              exactly the receipt total. Customer Forfeit is a separate column that closes the math
+              when a customer&rsquo;s physical handout exceeded the receipt.
+            </p>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Denomination-True Per-Method Columns</h3>
+            <p style="margin:0 0 8px;font-size:11pt;">
+              The per-method columns (Food RX, Food Bucks, FMNP, SNAP, Cash) now show the
+              customer&rsquo;s <strong>physical handout</strong> &mdash; denomination-true, no FAM
+              match intermingled.
+            </p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f6f9f7;border-left:3px solid #2d6a4f;border-radius:4px;margin:8px 0 14px;">
+              <tr>
+                <td style="padding:14px 18px;font-size:10.5pt;">
+                  <strong>Example.</strong> A customer hands a $10 Food RX token to a vendor with a $1.45 receipt.
+                  <br><br>
+                  <strong>Earlier versions:</strong> Food RX column = $1.45 (the post-forfeit value &mdash; misleading)
+                  <br>
+                  <strong>v2.0.8:</strong> Food RX column = $10.00 (the actual physical handout) + Customer Forfeit = $8.55
+                  <br><br>
+                  Vendor still gets the receipt total ($1.45). The reports now read the way the volunteer remembers handling it: "they paid $10 in Food RX, and $8.55 of that was forfeited."
+                </td>
+              </tr>
+            </table>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#1a1a1a;">Other New Report Tabs &amp; Columns</h3>
+            <ul style="margin:0 0 10px;padding-left:22px;font-size:11pt;">
+              <li><strong>Generated Rewards tab</strong> &mdash; an append-only historical record of every reward issued (by customer, date, source method, reward method). End-of-season reconciliation against token inventory is straightforward; mid-season rule changes don&rsquo;t alter previously-issued rewards.</li>
+              <li><strong>Zip Code column</strong> on Detailed Ledger, Transaction Log, Generated Rewards, and FMNP Entries (internal + Sheets). Coordinators can pivot on (Zip Code &times; Vendor &times; Payment Method) to see which customer demographics use which programs at which vendors.</li>
+              <li><strong>FAM Match vs FAM Absorbed</strong> as two distinct columns. <em>Match</em> is the multiplier on customer payment; <em>Absorbed</em> is the customer-gone Unallocated Funds path.</li>
+              <li><strong>Customer Forfeit summary tile</strong> on the Reports header alongside Total Receipts / Customer Paid / FAM Match / FMNP Checks / FAM Absorbed.</li>
+              <li><strong>Vendor Reimbursement</strong> rebuilt with accurate per-vendor totals + a separate FMNP (External) column for paper checks recorded via the FMNP Entry screen.</li>
+              <li><strong>Activity Log</strong> with a full audit trail across CREATE / CONFIRM / ADJUST / VOID / OPEN / CLOSE / REOPEN actions, filterable by action type and date range.</li>
+              <li><strong>Charts</strong> (matplotlib) and a <strong>Folium-rendered customer map</strong> for at-a-glance insights.</li>
+              <li><strong>CSV export</strong> for every report with formula-injection sanitization.</li>
+            </ul>
+          </td>
+        </tr>
+
+        <!-- Multi-workstation hardening -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">Multi-Workstation Hardening</h2>
+            <p style="margin:0 0 10px;font-size:11pt;">
+              Markets that run several laptops in parallel will benefit from a systematic pass over
+              the cloud-sync invariants. Every local mutation that affects a cloud-bound row now
+              triggers a sync trigger that reaches every relevant tab, and every cleanup respects
+              per-device ownership.
+            </p>
+            <ul style="margin:0 0 10px;padding-left:22px;font-size:11pt;">
+              <li><strong>Settings changes propagate immediately.</strong> Vendor / market / payment-method add, edit, toggle, delete; the four assignment dialogs; reward-rule changes &mdash; all now trigger a full-scope cloud sync.</li>
+              <li><strong>Closed market day mutations sync.</strong> FMNP entries added to closed days and Admin adjustments / voids on historical receipts now scope to the affected day, not the currently-open one.</li>
+              <li><strong>Vendor Reimbursement cleanup is multi-market-aware.</strong> Stale rows owned by this device are removed across <em>every</em> market it has worked, not just its currently-configured primary.</li>
+              <li><strong>Reset preserves other devices&rsquo; data.</strong> Resetting a local app instance now triggers an immediate sync that clears only this device&rsquo;s rows from the shared sheet &mdash; other workstations&rsquo; data is untouched.</li>
+              <li><strong>Single-instance lock</strong> prevents two app instances from operating on the same database simultaneously &mdash; useful at multi-laptop markets where laptops sometimes share a network folder.</li>
+              <li><strong>Customer labels carry a 3-character device tag</strong> (e.g. <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">C-005-LB1</code>) so coordinators can tell which laptop captured which customer.</li>
+              <li><strong>Market renames protected</strong> &mdash; renames that would shift the derived market_code are blocked once the market has any history; code-stable renames (typo fixes) are always allowed.</li>
+            </ul>
+          </td>
+        </tr>
+
+        <!-- Coordinator-facing rollout -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#a85b00;border-bottom:2px solid #f0d4b3;padding-bottom:6px;">Two Things Coordinators Should Brief Volunteers On</h2>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff8ed;border-left:3px solid #a85b00;border-radius:4px;margin:10px 0;">
+              <tr>
+                <td style="padding:14px 18px;font-size:10.5pt;">
+                  <strong>1. Reports may show different per-method values for transactions where a customer over-tendered a denomination unit.</strong>
+                  <br><br>
+                  Per-method report columns now show the customer&rsquo;s <em>actual physical
+                  handout</em> (e.g. $10 for a $10 Food RX token) with the over-tender ($8.55 if the
+                  receipt was $1.45) recorded in the new <strong>Customer Forfeit</strong> column.
+                  <br><br>
+                  <strong>The vendor reimbursement total is unchanged.</strong> This is a <em>display</em> change reflecting denomination integrity &mdash; no underlying data was modified.
+                </td>
+              </tr>
+            </table>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff8ed;border-left:3px solid #a85b00;border-radius:4px;margin:10px 0;">
+              <tr>
+                <td style="padding:14px 18px;font-size:10.5pt;">
+                  <strong>2. Per-row &#x26A1; toggle on Payment rows.</strong>
+                  <br><br>
+                  Each non-denom payment row has a small &#x26A1; icon. <strong>Green</strong> = Auto-Distribute will fill it. <strong>Grey</strong> = Locked at the volunteer&rsquo;s typed value. Typing in the amount field auto-locks the row. Click &#x26A1; to switch states. Only one row at a time can be the green "overflow target."
+                  <br><br>
+                  If a volunteer says "Auto-Distribute did nothing," check whether the row they expected to fill is grey &mdash; they need to click &#x26A1; to release it, or add another row to absorb the remainder.
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Upgrade -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">Upgrading from v1.9.x</h2>
+
+            <p style="margin:0 0 10px;font-size:11pt;">
+              <strong>Manual update (recommended for the first v2.x install):</strong> download the
+              zip from the GitHub release page, replace the old application folder, re-launch.
+              Existing data is found automatically.
+            </p>
+            <p style="margin:0 0 10px;font-size:11pt;">
+              <strong>After this release</strong> the in-app updater (<em>Settings &rarr; Updates
+              &rarr; Check for Updates &rarr; Download &amp; Install</em>) handles future versions
+              including backup, install, and rollback if anything goes wrong.
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f6f9f7;border-left:3px solid #2d6a4f;border-radius:4px;margin:14px 0;">
+              <tr>
+                <td style="padding:14px 18px;font-size:10.5pt;">
+                  <strong>Data safety:</strong> existing data is preserved automatically. Cloud
+                  credentials, Drive folder, and update-channel settings survive the upgrade. Schema
+                  migrations (v22 &rarr; v37, all additive) run on first launch with a pre-migration
+                  backup written before each step. Any failure rolls back cleanly to your prior data.
+                  <br><br>
+                  <strong>What you&rsquo;ll see on existing Sheets:</strong> several new columns
+                  appear on the next sync &mdash; <em>Customer Forfeit</em> on Vendor Reimbursement
+                  and Detailed Ledger; <em>Zip Code</em> across multiple report tabs; per-method
+                  columns now show denomination-true values for new transactions. Legacy
+                  transactions are unchanged because their forfeit value defaults to 0.
+                </td>
+              </tr>
+            </table>
+
+            <h3 style="margin:14px 0 4px;font-size:11.5pt;color:#a85b00;">Pre-flight check for image-cloned fleet laptops</h3>
+            <p style="margin:0 0 8px;font-size:11pt;">
+              If your fleet was deployed by cloning one Windows image across multiple laptops, take 30
+              seconds to verify each device has its own MachineGuid before upgrading. v2.0.8 refuses
+              to launch on devices that share a synthetic device identity (this prevents silent
+              cross-device sync corruption). In an elevated PowerShell on each laptop:
+            </p>
+            <pre style="background:#f6f9f7;border:1px solid #d8e6df;border-radius:4px;padding:12px 14px;font-size:10pt;font-family:Consolas,'Courier New',monospace;color:#1a1a1a;white-space:pre-wrap;margin:0 0 8px;">(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' MachineGuid).MachineGuid</pre>
+            <p style="margin:0 0 8px;font-size:11pt;">
+              You should see a <strong>unique GUID per device.</strong> If a value is missing, blank,
+              or identical across laptops, generate a fresh one before launching v2.0.8:
+            </p>
+            <pre style="background:#f6f9f7;border:1px solid #d8e6df;border-radius:4px;padding:12px 14px;font-size:10pt;font-family:Consolas,'Courier New',monospace;color:#1a1a1a;white-space:pre-wrap;margin:0 0 8px;">$g = [guid]::NewGuid().ToString()
+Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' MachineGuid $g</pre>
+            <p style="margin:0 0 12px;font-size:10.5pt;color:#555;">
+              If a device hits this on first launch you&rsquo;ll see a <em>Device Identity Required</em>
+              dialog with the same instructions &mdash; no data is touched, and the device runs
+              normally once the registry value is set.
+            </p>
+          </td>
+        </tr>
+
+        <!-- Behind the scenes -->
+        <tr>
+          <td style="padding:18px 36px 0;">
+            <h2 style="margin:18px 0 10px;font-size:14pt;color:#555;border-bottom:2px solid #d8d8d8;padding-bottom:6px;">Behind the Scenes</h2>
+            <p style="margin:0 0 10px;font-size:10.5pt;color:#444;">
+              The user-facing changes above sit on top of a substantial reliability and engine pass.
+              Volunteers and managers don&rsquo;t need to think about any of this &mdash; included
+              for technical reference.
+            </p>
+
+            <ul style="margin:0 0 10px;padding-left:22px;font-size:10.5pt;color:#444;">
+              <li><strong>Reliability hardening:</strong> cross-platform single-instance lock; atomic photo writes (no half-written JPEGs after a mid-write crash); offline-quiet sync logging (~30&times; less log noise during outages); pre-migration database backups (failure to write the backup blocks the migration); per-line invariant DB triggers; Voided-is-terminal DB trigger; auto-update channel pinned with SHA-256 rollback verification.</li>
+              <li><strong>Concurrency baseline:</strong> WAL synchronous + checkpoint thresholds tuned for the market-day workload; cross-thread snapshot isolation; busy_timeout to handle multi-laptop contention.</li>
+              <li><strong>Engine layer:</strong> denomination preservation through adjustments (engine snap-back + save-layer guard + safety gate); user-cap-aware engine paths so a typed value isn&rsquo;t silently inflated; Auto-Distribute cap-deficit Pass 2 fallback to unmatched non-denom rows; charge-integrity Layer 2A/2B/2C confirm-time guards.</li>
+              <li><strong>Database schema:</strong> 15 forward migrations from v22 (v1.9.8 baseline) to v37, all additive. Notable: per-vendor binding junction (v24); Unallocated Funds system method (v25); per-line invariant triggers (v28); UF zero-amount triggers (v33); universal SNAP/Cash bindings backfill (v35); <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;font-size:9.5pt;">customer_forfeit_cents</code> column (v36); <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;font-size:9.5pt;">user_capped</code> column (v37).</li>
+              <li><strong>Documentation overhaul:</strong> three new printable references (<code style="background:#f0eee8;padding:1px 4px;border-radius:3px;font-size:9.5pt;">EMERGENCY_RUNBOOK.md</code>, <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;font-size:9.5pt;">COORDINATOR_HANDBOOK.md</code>, <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;font-size:9.5pt;">QUICK_REFERENCE.md</code>); 75+ in-app help articles (was 51 at v1.9.8); 10 symptom-based troubleshooting flows; System Status diagnostic tab with one-click "Copy Diagnostic Info."</li>
+              <li><strong>Test coverage:</strong> 3,646 tests across 161+ files (was 1,822 at v1.9.8). 52 input-validation tests (SQL injection, path traversal, unicode round-trip, CSV formula injection); UI-volume stress tests (200 vendors, 50 payment methods, 500-customer dropdown); timezone correctness (Eastern, DST, leap day). Three-way reconciliation (Database = Ledger backup = Sheets) verified end-to-end on every tested transaction.</li>
+            </ul>
+          </td>
+        </tr>
+
+        <!-- Reconciliation pull-quote -->
+        <tr>
+          <td style="padding:8px 36px 4px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#2d6a4f;color:#ffffff;border-radius:6px;margin:8px 0;">
+              <tr>
+                <td style="padding:16px 22px;font-size:11pt;text-align:center;">
+                  <strong>Three-way reconciliation verified end-to-end.</strong><br>
+                  For every tested transaction: Database = Ledger backup = Google Sheets sync output.
+                  <br>No penny is lost, duplicated, or misattributed.
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="padding:14px 36px 28px;font-size:9.5pt;color:#777;border-top:1px solid #eee;">
+            <p style="margin:14px 0 4px;">
+              Full release notes are available in the project repository as
+              <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">RELEASE_NOTES_v2.0.8.md</code>.
+              Volunteer / coordinator references in
+              <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">docs/</code>:
+              <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">USER_GUIDE.md</code>,
+              <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">QUICK_REFERENCE.md</code>,
+              <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">EMERGENCY_RUNBOOK.md</code>,
+              <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">COORDINATOR_HANDBOOK.md</code>.
+            </p>
+            <p style="margin:0;">
+              Questions or rollout coordination &mdash; please loop in the operations channel before deploying to production laptops.
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>

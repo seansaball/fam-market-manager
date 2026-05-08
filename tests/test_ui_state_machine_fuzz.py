@@ -146,16 +146,40 @@ def _check_invariants(screen, action_label: str, action_log: list):
     failures = []
 
     # Read the engine's view of the current state.
+    #
+    # v2.0.7+ user-cap (audit 2026-05-07): the entries must
+    # include ``user_capped`` and ``denomination`` to match the
+    # production engine call (see PaymentScreen._confirm_payment
+    # and _update_summary_impl).  Without these flags the engine
+    # would inflate user-capped customer_charged, producing a
+    # result that diverges from what _update_summary just
+    # computed and stored on the cards — V3 then false-fails
+    # on the divergence.
     items = screen._collect_line_items()
     receipt_total = screen._order_total
     if items and receipt_total > 0:
         entries = [{'method_amount': it['method_amount'],
-                    'match_percent': it['match_percent']}
+                    'match_percent': it['match_percent'],
+                    'denomination': it.get('denomination'),
+                    'user_capped': bool(it.get('user_capped', False))}
                    for it in items]
         try:
             result = calculate_payment_breakdown(
                 receipt_total, entries,
                 match_limit=screen._match_limit)
+            # v2.0.7+ user-cap (audit 2026-05-07): also apply
+            # denomination-forfeit if needed, matching the
+            # production confirm path (PaymentScreen._confirm_
+            # payment).  Without forfeit application, scenarios
+            # with denom rows that overshoot a vendor's receipt
+            # produce different customer_charged values in this
+            # audit vs the in-flight engine call → V3/U6
+            # invariants false-fail.
+            overage = screen._check_denomination_overage(
+                result, receipt_total)
+            if overage > 0:
+                screen._apply_denomination_forfeit(
+                    result, items, overage)
         except Exception as e:
             failures.append(
                 f"calculate_payment_breakdown crashed: {e!r}")

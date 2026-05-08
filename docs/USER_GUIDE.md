@@ -1,7 +1,7 @@
 # FAM Market Manager — User Guide
 
 > **For volunteers, coordinators, and market day staff**
-> Version 2.0.1
+> Version 2.0.7
 
 ---
 
@@ -155,6 +155,7 @@ At the top of the screen you will see:
 | **Remaining** | How much is left to allocate (should reach $0.00) |
 | **Customer Pays** | What the customer owes after FAM match |
 | **FAM Match** | How much FAM is covering |
+| **Customer Forfeit** | (v2.0.7+) Token face value the customer over-tendered when a denominated unit (Food RX, Food Bucks) was bigger than the receipt remaining. $0.00 in normal use; non-zero only when the customer hands a $10 token for a $6.52 receipt and the FAM match couldn't fully absorb the gap. |
 
 ### Adding payment methods
 
@@ -168,6 +169,33 @@ You can add multiple payment methods if the customer is splitting their payment.
 **Denomination validation:** For payment methods that use fixed denominations (such as FMNP checks), the app validates that the amount you enter is a valid multiple of the denomination. If you enter an amount that does not divide evenly, a warning appears and the entry is blocked until corrected.
 
 **Automatic balance clamping:** As you enter payment amounts, the app automatically limits each payment method's maximum to the remaining order balance. The stepper's + button disables when one more unit would exceed the remaining amount, and free-text entry fields cap at the remaining balance. This prevents over-allocation before it happens.
+
+### The per-row ⚡ toggle (v2.0.7+)
+
+Each non-denominated payment row (SNAP, Cash, etc.) has a small **⚡ icon** next to the amount field that controls whether that row participates in **Auto-Distribute**. Two states:
+
+| Visual | State | Meaning |
+|---|---|---|
+| **Green ⚡** | Active | Auto-Distribute will fill or refill this row. The row is the "overflow target" that absorbs the remainder. |
+| **Grey ⚡** | Locked | Auto-Distribute will skip this row. The volunteer's typed value stays exactly as entered, even when the daily FAM match cap kicks in. |
+
+**Automatic transitions** (no clicks needed for the common case):
+
+* **Typing into the amount field locks the row.** As soon as you type a value (e.g. "$125"), the icon flips to grey. This is the default "I know exactly how much SNAP the customer has on their card" behavior.
+* **Adding a row when an Active row already exists defaults the new row to Locked.** Only one non-denom row at a time can be the overflow target — if you add a third method, it comes in Locked at $0.00 and you can either type a value or click the ⚡ to activate.
+
+**Manual toggle**:
+
+* **Click a grey ⚡** to activate the row (Auto-Distribute will refill it on the next click). The previously-active row automatically locks so there's still exactly one overflow target.
+* **Click a green ⚡** to lock the current value (pin it where it is).
+
+**When to use each state**:
+
+* **Customer has a fixed amount on one method, rest in cash**: Type SNAP $125 (auto-locks), let the green ⚡ Cash row absorb the rest via Auto-Distribute.
+* **Volunteer wants to manually balance everything**: Lock all rows by typing values; the engine respects every typed amount.
+* **Customer wants to maximize FAM match without specifying amounts**: Leave one row green (Active) and click Auto-Distribute — the engine fills the green row with whatever absorbs the receipt.
+
+**Why this matters**: Pre-v2.0.7, Auto-Distribute would silently inflate any row's value if the daily match cap shrank the FAM contribution. The volunteer would type "$125 SNAP" (because that's all the customer has on their EBT card), click Auto-Distribute, and see SNAP magically become "$138.09" — confusing and unfixable without deleting the row. The ⚡ toggle makes intent explicit and gives volunteers a clear way to say "this value is final."
 
 ### Attaching a receipt photo
 
@@ -232,6 +260,22 @@ at their booth (treating a $5 FMNP check as $10 worth of food).
 The entry appears in the table below. You can **Edit** or **Delete**
 entries using the buttons in the Actions column.  All edits and
 deletions are written to the audit log with old + new values.
+
+### "All Market Days" filter (v2.0.7+)
+
+The market-day dropdown defaults to **"All Market Days"**, which is a
+**browse-only filter** for searching existing FMNP entries across the
+full history (paired with the date-range filter on the same screen).
+
+When "All Market Days" is selected, the **"Add FMNP Entry"** button
+greys out and an inline hint label appears next to it:
+
+> ⚠ ← Pick a specific market day above to add a new entry
+
+This is intentional — you can't attribute a new entry to "all markets,"
+the entry needs a single concrete market day. To add a new entry, pick
+a specific date from the dropdown; the button enables and the hint
+disappears.
 
 ### Attaching check photos
 
@@ -643,6 +687,7 @@ go straight to Troubleshooting.
 | Voided the wrong transaction | Emergency Runbook §10 |
 | Gave reward tokens, then order was voided | Emergency Runbook §11 |
 | Customer wants to change a confirmed payment | Emergency Runbook §12 |
+| Hard block on Payment / "row mismatch" / cap-bound math won't balance | Emergency Runbook §12b — split into separate orders, one payment method per order |
 | Sending diagnostic info without internet | Emergency Runbook §13 |
 | Data appears gone or corrupted | Emergency Runbook §14 |
 
@@ -664,7 +709,22 @@ Open a market day first: **Market** sidebar item → select location → enter y
 
 #### Payment does not balance
 
-If the Remaining card shows a number other than $0.00, click the **⚡ Auto-Distribute** button on the Payment screen. It balances all method amounts to match the receipt total exactly. Manual entry also works — just adjust amounts until Remaining is $0.00.
+If the Remaining card shows a number other than $0.00, click the **⚡ Auto-Distribute** button on the Payment screen. It balances method amounts to match the receipt total. Manual entry also works — just adjust amounts until Remaining is $0.00.
+
+**v2.0.7+ note**: Auto-Distribute now respects per-row **⚡ Locked** (grey) state — it only fills rows whose ⚡ icon is **green** (Active). If clicking Auto-Distribute "does nothing," check the row's ⚡ icon: a grey one means the volunteer (or auto-detection from typing) locked the value. Click the grey ⚡ to release it back to Active, or add a new payment-method row to absorb the remainder.
+
+#### Hard block on the Payment screen — math doesn't reconcile
+
+If the Payment screen refuses to confirm — a "Payment row mismatch" warning, a per-vendor over- or under-allocation error, or an explicit "split this customer's receipts into two separate customer orders" recommendation — and one or two clicks of **⚡ Auto-Distribute** does not fix it, **the simplest, safest resolution is to break the customer's receipts into separate orders, one payment method per order.**
+
+This is always the right answer when the math doesn't balance and nothing else fits. The cleanest sequence:
+
+1. **Cancel** out of the Payment screen and **Discard** the in-progress order from Receipt Intake (or Pending Orders).
+2. Create a new order for the **same customer label** (returning-customer dropdown).
+3. Add only the receipts that one payment method will cover. Confirm.
+4. Repeat for the next payment method on the remaining receipts.
+
+Because the customer label is the same, the daily match cap accounting carries through automatically and reports still group by customer label. Nothing is lost. See the in-app help article `split-orders-when-stuck` and the troubleshooting flow `ts-payment-screen-hard-block` for the step-by-step.
 
 #### "Stale market day was auto-closed" at startup
 
