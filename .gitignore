@@ -52,6 +52,9 @@ desktop.ini
 releases/
 *.zip
 
+# Release-notes HTML (board/email distribution only — not for repo or release page)
+FAM_Manager_v*_Release_Notes.html
+
 # Log files
 *.log
 
