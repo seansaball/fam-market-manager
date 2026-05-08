@@ -24,27 +24,38 @@
         <!-- 30-second summary -->
         <tr>
           <td style="padding:28px 36px 8px;">
-            <h2 style="margin:0 0 12px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">In 30 Seconds</h2>
+            <h2 style="margin:0 0 12px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">In 30 Seconds &mdash; Why This Release Matters</h2>
             <p style="margin:0 0 12px;font-size:11pt;">
-              v2.0.8 is the <strong>first v2.x release reaching the field</strong>. It rolls up a season of
-              hardening, polish, and new features since the last public version (v1.9.8/v1.9.9 in
-              April 2026): a <strong>major UI refresh</strong> on the Payment Screen, a <strong>fully
-              configurable Rewards engine</strong>, <strong>per-vendor payment-method controls</strong>,
-              new <strong>Customer Forfeit accounting</strong> for over-tendered tokens, a
-              <strong>redesigned confirmation dialog</strong> that walks the volunteer through each
-              physical step before commit, and <strong>multi-workstation cloud-sync hardening</strong>
-              for markets running several laptops in parallel.
+              v2.0.8 makes the booth <strong>easier for volunteers</strong>, <strong>cleaner for
+              coordinators</strong>, and <strong>more flexible for the board</strong>. The day-to-day
+              experience is what changed; the math the vendors get paid is unchanged.
             </p>
-            <p style="margin:0 0 12px;font-size:11pt;">
-              The bulk of this release is <strong>user-facing</strong>. Volunteers and market managers
-              will notice changes on the Payment Screen, the FMNP page, and several reports. The
-              behind-the-scenes engine, database, and reliability work is summarized at the end for
-              technical reference.
-            </p>
+            <ul style="margin:0 0 12px;padding-left:22px;font-size:11pt;">
+              <li><strong>Fewer mistakes at the booth.</strong> The screen now tells the volunteer
+                exactly what to collect and what to hand back, step by step, before the transaction
+                commits &mdash; with a required check that the SNAP swipe actually happened. Less
+                guesswork, fewer corrections later.</li>
+              <li><strong>Cleaner reports for vendor reimbursement.</strong> When a customer hands
+                over a token worth more than their receipt (e.g., a $10 Food RX token for a $1.45
+                purchase), the difference is now recorded as <em>Customer Forfeit</em> in its own
+                column. Vendor payouts are unchanged &mdash; the audit trail just finally matches
+                what physically happened.</li>
+              <li><strong>The board can change incentive rules without a code update.</strong> The
+                classic "$5 SNAP earns $2 in Food Bucks" rule is now editable from Settings, so the
+                operations manager can adjust matches, multipliers, and reward tokens season to
+                season without waiting on a developer.</li>
+              <li><strong>Multi-laptop markets are more reliable.</strong> Devices stay in sync
+                even when settings change mid-day, and a customer's record clearly shows which
+                laptop captured them &mdash; no more reconciling "did Laptop 2 already record this?"</li>
+              <li><strong>Vendors only see the methods they actually accept.</strong> Per-vendor
+                payment-method eligibility prevents accidentally taking Food Bucks at a baked-goods
+                booth, which is the #1 source of after-the-fact reimbursement disputes.</li>
+            </ul>
             <p style="margin:0 0 6px;font-size:10.5pt;color:#555;">
-              <strong>Schema:</strong> v37 (auto-migrates with pre-migration backup) &nbsp;&middot;&nbsp;
-              <strong>Tests:</strong> 3,646 across 161+ files (was 1,822 at v1.9.8) &nbsp;&middot;&nbsp;
-              <strong>Migration path:</strong> automatic on first launch
+              <strong>Bottom line:</strong> volunteers do less mental math, coordinators close out
+              faster, vendors get the same correct amount, and the board can tune the program without
+              another release cycle. Existing data and Google Sheets are preserved; the upgrade is
+              automatic on first launch.
             </p>
           </td>
         </tr>
@@ -263,14 +274,18 @@
             <h2 style="margin:18px 0 10px;font-size:14pt;color:#2d6a4f;border-bottom:2px solid #d8e6df;padding-bottom:6px;">Upgrading from v1.9.x</h2>
 
             <p style="margin:0 0 10px;font-size:11pt;">
-              <strong>Manual update (recommended for the first v2.x install):</strong> download the
-              zip from the GitHub release page, replace the old application folder, re-launch.
-              Existing data is found automatically.
+              <strong>Try the in-app updater first</strong> (<em>Settings &rarr; Updates &rarr; Check
+              for Updates &rarr; Download &amp; Install</em>). It will fetch v2.0.8, back up your
+              existing install, swap in the new version, and roll back automatically if anything
+              fails. This is now the recommended path &mdash; the auto-update channel was hardened
+              in v1.9.6 and has been working reliably since.
             </p>
             <p style="margin:0 0 10px;font-size:11pt;">
-              <strong>After this release</strong> the in-app updater (<em>Settings &rarr; Updates
-              &rarr; Check for Updates &rarr; Download &amp; Install</em>) handles future versions
-              including backup, install, and rollback if anything goes wrong.
+              <strong>Manual download as a fallback only.</strong> If the in-app updater can&rsquo;t
+              reach GitHub (network restrictions, certificate issues), download
+              <code style="background:#f0eee8;padding:1px 4px;border-radius:3px;">FAM_Manager_v2.0.8.zip</code>
+              from the GitHub release page, replace the old application folder, and re-launch.
+              Existing data is found automatically.
             </p>
 
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f6f9f7;border-left:3px solid #2d6a4f;border-radius:4px;margin:14px 0;">
