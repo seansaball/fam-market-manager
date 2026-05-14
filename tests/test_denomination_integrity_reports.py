@@ -215,8 +215,8 @@ class TestVendorReimbursementDenominationIntegrity:
             method_sum = sum(
                 v for k, v in r.items()
                 if k not in {
-                    'Market Name', 'Vendor', 'Month', 'Date(s)',
-                    'Total Due to Vendor', 'FAM Match',
+                    'Market Name', 'Vendor', 'Month', 'Year-Month',
+                    'Date(s)', 'Total Due to Vendor', 'FAM Match',
                     'FMNP (External)', 'Customer Forfeit',
                     'Check Payable To', 'Address',
                 })

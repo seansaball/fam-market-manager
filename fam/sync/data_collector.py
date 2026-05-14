@@ -33,6 +33,13 @@ def collect_sync_data(market_day_id: Optional[int] = None) -> dict[str, list[dic
     full history regardless of which day triggered the sync;
     earlier behaviour silently overwrote multi-day vendor totals
     with single-day numbers on every auto-sync.
+
+    v2.0.9: Vendor Reimbursement now emits one row per
+    (market × vendor × year-month) instead of one all-time row.
+    The whole-dataset scope is preserved (every month is re-emitted
+    on every sync), so a closed-day mutation in a prior month
+    correctly updates THAT month's row without leaking into the
+    current month's totals.
     """
     conn = get_connection()
     did = get_device_id() or ''
@@ -135,9 +142,12 @@ def collect_sync_data(market_day_id: Optional[int] = None) -> dict[str, list[dic
 
     # Whole-dataset collectors — run once across ALL market days
     # (NOT the narrow-scope ``md_ids``).  Vendor Reimbursement
-    # aggregates lifetime totals per (market, vendor); narrowing
-    # it to a single day would replace rows on the shared sheet
-    # with single-day-only totals on every auto-sync.
+    # aggregates per-month totals per (market, vendor, year-month)
+    # — see ``_collect_vendor_reimbursement``.  Each sync re-emits
+    # every month so a closed-day mutation in any prior month
+    # correctly updates THAT month's row.  Narrowing this collector
+    # to a single day would replace months' worth of rows on the
+    # shared sheet with single-day-only totals on every auto-sync.
     if is_sync_tab_enabled('Vendor Reimbursement') and all_md_ids:
         try:
             vr_rows = _collect_vendor_reimbursement(conn, all_md_ids)
@@ -177,6 +187,21 @@ def collect_sync_data(market_day_id: Optional[int] = None) -> dict[str, list[dic
 # ── Individual collectors ────────────────────────────────────────
 
 
+def _format_year_month_label(year_month: str) -> str:
+    """Return ``"April 2026"`` for ``"2026-04"`` (empty → empty).
+
+    v2.0.9: human-readable label for the ``Month`` column on the
+    Vendor Reimbursement sheet.  The sortable ``"2026-04"`` form
+    lives in a separate ``Year-Month`` column for upsert keying.
+    """
+    if not year_month or len(year_month) < 7:
+        return ''
+    try:
+        return datetime.strptime(year_month[:7], '%Y-%m').strftime('%B %Y')
+    except ValueError:
+        return ''
+
+
 def _build_vendor_address(row) -> str:
     """Build a single-line address from vendor street/city/state/zip fields."""
     parts = []
@@ -195,11 +220,11 @@ def _build_vendor_address(row) -> str:
 
 
 def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
-    """Vendor Reimbursement — one row per unique (market, vendor) pair.
+    """Vendor Reimbursement — one row per (market × vendor × year-month).
 
-    Layout: Market Name, Vendor, Month, Date(s), Total Due to Vendor,
-    FAM Match, [one column per payment method], FMNP (External),
-    Check Payable To, Address.
+    Layout: Market Name, Vendor, Month, Year-Month, Date(s),
+    Total Due to Vendor, FAM Match, [one column per payment method],
+    FMNP (External), Customer Forfeit, Check Payable To, Address.
 
     Column semantics (v1.9.10+ per user request):
 
@@ -213,14 +238,24 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         across all methods so the manager sees total FAM
         responsibility per vendor in one number.
       * ``Total Due to Vendor`` = ``SUM(t.receipt_total)`` (vendor
-        reimbursement contract — unchanged).  Math identity:
-        ``Σ(method-cols) + FAM Match + FMNP (External) = Total
-        Due to Vendor`` (within penny-rec tolerance).
+        reimbursement contract — unchanged).  Math identity (holds
+        within every monthly row):
+        ``Σ(method-cols) + FAM Match - Customer Forfeit + FMNP
+        (External) = Total Due to Vendor``.
 
     Pre-v1.9.10, the per-method columns showed
     ``SUM(pli.method_amount)`` (= customer + match) which conflated
     physical-instrument counts with FAM contribution and made the
     report ambiguous when forfeit/cap reduced match.
+
+    v2.0.9: rows are now keyed by year-month so a coordinator can
+    reconcile month-over-month.  The Month column is the human-
+    readable ``"April 2026"`` form and the Year-Month column is the
+    sortable ``"2026-04"`` form used as part of the row-identity for
+    upsert (see ``SyncManager.SHEET_KEYS``).  Existing all-time
+    cumulative rows on a v2.0.8 sheet do NOT carry a Year-Month and
+    will appear as orphans on first v2.0.9 sync — coordinators
+    delete them once after the upgrade (see v2.0.9 release notes).
     """
     from fam.models.transaction import active_tx_status_clause
     placeholders = ','.join('?' for _ in md_ids)
@@ -242,6 +277,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         SELECT v.name AS vendor,
                {cpt_expr} AS check_payable_to,
                m.name AS market_name,
+               strftime('%Y-%m', md.date) AS year_month,
                COALESCE(SUM(t.receipt_total), 0) AS gross_sales,
                GROUP_CONCAT(DISTINCT md.date) AS transaction_dates
                {addr_cols}
@@ -250,8 +286,8 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         JOIN market_days md ON t.market_day_id = md.id
         JOIN markets m ON md.market_id = m.id
         {where}
-        GROUP BY m.id, v.id, v.name
-        ORDER BY m.name, v.name
+        GROUP BY m.id, v.id, v.name, year_month
+        ORDER BY m.name, v.name, year_month
     """, params).fetchall()
 
     # Per-method physical-instrument totals (customer_charged) and
@@ -262,6 +298,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
     method_rows = conn.execute(f"""
         SELECT v.name AS vendor,
                m.name AS market_name,
+               strftime('%Y-%m', md.date) AS year_month,
                pl.method_name_snapshot AS method,
                COALESCE(SUM(pl.customer_charged), 0) AS customer_total,
                COALESCE(SUM(pl.match_amount), 0) AS match_total,
@@ -273,7 +310,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         JOIN market_days md ON t.market_day_id = md.id
         JOIN markets m ON md.market_id = m.id
         {where}
-        GROUP BY m.id, v.id, v.name, pl.method_name_snapshot
+        GROUP BY m.id, v.id, v.name, year_month, pl.method_name_snapshot
     """, params).fetchall()
 
     # v1.9.10 follow-up (2026-05-01): keep ALL money values in
@@ -297,6 +334,13 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
     # fail by exactly the absorbed amount.  Now: for the system-
     # managed Unallocated Funds row use ``method_amount`` (the
     # absorbed loss) so the row balances to receipt_total.
+    # v2.0.9: every accumulator is keyed by
+    # ``(market_name, vendor, year_month)`` so each calendar month
+    # gets its own row.  The earlier ``(market_name, vendor)`` key
+    # silently merged all months into one cumulative row, which
+    # made month-over-month reconciliation impossible (and the
+    # ``Month`` column was misleading — it was just whichever date
+    # happened to sort alphabetically first across all history).
     from fam.models.payment_method import UNALLOCATED_FUNDS_NAME
     all_methods = sorted({r['method'] for r in method_rows})
     method_cents_by_vendor: dict[tuple, dict[str, int]] = {}
@@ -315,7 +359,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
     # side losses.
     customer_forfeit_by_vendor: dict[tuple, int] = {}
     for r in method_rows:
-        key = (r['market_name'], r['vendor'])
+        key = (r['market_name'], r['vendor'], r['year_month'])
         if r['method'] == UNALLOCATED_FUNDS_NAME:
             value = r['method_total']
         else:
@@ -344,14 +388,18 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
     # at the end (see _emit_row_in_dollars below).
     vendor_dict_cents: dict[tuple, dict] = {}
     for r in vendor_rows:
-        key = (r['market_name'], r['vendor'])
-        month_str = ''
-        if r['transaction_dates']:
-            month_str = datetime.strptime(r['transaction_dates'][:7], '%Y-%m').strftime('%B')
+        ym = r['year_month'] or ''
+        key = (r['market_name'], r['vendor'], ym)
+        # v2.0.9: ``Month`` is the human-readable "April 2026" form
+        # (was just "April" pre-v2.0.9 — ambiguous once data spanned
+        # more than 12 months) and ``Year-Month`` is the sortable
+        # "2026-04" form used in the upsert key.
+        month_str = _format_year_month_label(ym)
         row = {
             'Market Name': r['market_name'],
             'Vendor': r['vendor'],
             'Month': month_str,
+            'Year-Month': ym,
             'Date(s)': r['transaction_dates'] or '',
             '_total_due_cents': r['gross_sales'],
             '_fam_match_cents': fam_match_by_vendor.get(key, 0),
@@ -368,6 +416,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
     fmnp_rows = conn.execute(f"""
         SELECT v.name AS vendor,
                m.name AS market_name,
+               strftime('%Y-%m', md.date) AS year_month,
                {cpt_expr} AS check_payable_to,
                COALESCE(SUM(fe.amount), 0) AS fmnp_total,
                GROUP_CONCAT(DISTINCT md.date) AS fmnp_dates
@@ -377,12 +426,17 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         JOIN market_days md ON fe.market_day_id = md.id
         JOIN markets m ON md.market_id = m.id
         {fmnp_where}
-        GROUP BY m.id, v.id, v.name
+        GROUP BY m.id, v.id, v.name, year_month
     """, params).fetchall()
 
     for r in fmnp_rows:
-        key = (r['market_name'], r['vendor'])
+        ym = r['year_month'] or ''
+        key = (r['market_name'], r['vendor'], ym)
         if key in vendor_dict_cents:
+            # v2.0.9: same (market, vendor, year-month) — merge into
+            # the existing monthly row.  Vendors with both
+            # transactions and external FMNP entries within the same
+            # month produce ONE row, not two.
             vendor_dict_cents[key]['_fmnp_external_cents'] = r['fmnp_total']
             vendor_dict_cents[key]['_total_due_cents'] += r['fmnp_total']
             existing = set(vendor_dict_cents[key]['Date(s)'].split(',')) \
@@ -391,13 +445,16 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
             all_dates = (existing | new_dates) - {''}
             vendor_dict_cents[key]['Date(s)'] = ','.join(sorted(all_dates))
         else:
-            month_str = ''
-            if r['fmnp_dates']:
-                month_str = datetime.strptime(r['fmnp_dates'][:7], '%Y-%m').strftime('%B')
+            # FMNP-only vendor for this month — no matching
+            # transaction-row to merge into.  The query already
+            # groups by year_month so an FMNP-only vendor with
+            # entries in multiple months produces one fmnp_row per
+            # month, each landing here as its own monthly bucket.
             vendor_dict_cents[key] = {
                 'Market Name': r['market_name'],
                 'Vendor': r['vendor'],
-                'Month': month_str,
+                'Month': _format_year_month_label(ym),
+                'Year-Month': ym,
                 'Date(s)': r['fmnp_dates'] or '',
                 '_total_due_cents': r['fmnp_total'],
                 '_fam_match_cents': 0,
@@ -418,6 +475,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
             'Market Name': rc['Market Name'],
             'Vendor': rc['Vendor'],
             'Month': rc['Month'],
+            'Year-Month': rc['Year-Month'],
             'Date(s)': rc['Date(s)'],
             'Total Due to Vendor': cents_to_dollars(rc['_total_due_cents']),
             'FAM Match': cents_to_dollars(rc['_fam_match_cents']),

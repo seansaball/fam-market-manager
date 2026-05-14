@@ -381,7 +381,7 @@ The Reports screen provides several views of your data, each in its own tab.
 |-----|--------------|
 | **Summary** | Overview metrics and charts for the selected period |
 | **Detailed Ledger** | Every transaction with full payment breakdowns |
-| **Vendor Reimbursement** | How much each vendor is owed (receipt totals, FAM subsidy, customer paid) |
+| **Vendor Reimbursement** | How much each vendor is owed (receipt totals, FAM subsidy, customer paid). The shared Google Sheet version (v2.0.9+) emits one row per (market × vendor × month) so coordinators can reconcile month-over-month. |
 | **FAM Match Report** | FAM match amounts by customer |
 | **Geolocation** | Customer zip code analysis and heat map |
 | **Activity Log** | Detailed audit trail of all actions taken |

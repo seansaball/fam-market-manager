@@ -216,11 +216,15 @@ class TestSheetKeysAreStable:
     old key.  Pin the currently-shipping shape so a reckless rename
     triggers a failing test rather than a silent identity shift."""
 
-    def test_sheet_keys_match_v2_0_6_shape(self):
+    def test_sheet_keys_match_v2_0_9_shape(self):
         from fam.sync.manager import SyncManager
         expected = {
+            # v2.0.9: ``Year-Month`` added to the key so each calendar
+            # month has its own row instead of one all-time cumulative
+            # row.  See data_collector._collect_vendor_reimbursement.
             'Vendor Reimbursement': [
-                'market_code', 'device_id', 'Market Name', 'Vendor'],
+                'market_code', 'device_id', 'Market Name', 'Vendor',
+                'Year-Month'],
             'FAM Match Report': [
                 'market_code', 'device_id', 'Payment Method', 'Date'],
             'Detailed Ledger': [

@@ -344,7 +344,7 @@ and the volunteer's diagnostic info.
 
 From the shared Google Sheet (best — merged across all laptops):
 
-1. **Vendor Reimbursement** filtered by month → vendor totals for payment
+1. **Vendor Reimbursement** — v2.0.9+ emits **one row per vendor per calendar month** (separate columns: human-readable **Month** like "April 2026" and sortable **Year-Month** like "2026-04"). Sort or filter on Year-Month to compare month-over-month per vendor.
 2. **FAM Match Report** filtered by month → total match dollars by payment method
 3. **FMNP Entries** filtered by month → FMNP checks taken to vendors
 4. **Generated Rewards** filtered by month → tokens given to customers (if your market does rewards)
@@ -472,8 +472,9 @@ Day-of:
 
 ## Versioning notes
 
-This handbook is for **v2.0.7**. Major changes recently:
+This handbook is for **v2.0.9**. Major changes recently:
 
+- **v2.0.9**: Vendor Reimbursement shared-sheet rows now split by calendar month — one row per (market × vendor × month) instead of one ever-growing all-time cumulative row.  New **Month** column is human-readable ("April 2026") and a new **Year-Month** column carries the sortable form ("2026-04"). The math identity (Σ method-cols + FAM Match − Customer Forfeit + FMNP_External = Total Due) holds within each monthly row. One-time cleanup needed on upgrade: orphaned all-time rows from v2.0.8 will appear with a blank Year-Month column — delete them manually once after the first v2.0.9 sync. No schema migration; on-screen reports and other tabs unchanged.
 - **v2.0.7**: Hotfix release covering post-v2.0.6 onsite findings.  Schema v34 → v35 (one forward migration that backfills SNAP and Cash for every vendor; idempotent).  **Universal SNAP / Cash binding policy** — both methods are now ticked, locked, and labelled "universal" in Settings → Vendors → Eligible Payment Methods; you cannot accidentally configure a vendor as SNAP-ineligible.  Other methods (Food Bucks, Food RX, FMNP) remain per-vendor configurable.  **Denomination preservation through adjustments** (engine snap-back + save-layer guard).  **Adjustment safety gate** for denominated transactions — Adjust on a txn that includes Food Bucks / Food RX / FMNP now opens a Void-Instead / Adjust-Anyway / Cancel dialog.  **Single-vendor multi-receipt allocation** corrected so split receipts at one vendor reconcile cleanly.  **Vendor Reimbursement after voids** — surviving receipts on a partially-voided multi-receipt order roll up correctly now.  **Photo dedup cache cleanup** on void / FMNP delete / FMNP photo replace (a re-attached photo no longer reads as a duplicate of its now-orphaned hash).  **Cap-bound split-order recommendation** — when a returning customer's daily FAM cap is too low to absorb a particular combination of denominated + non-denominated payments, the Payment screen no longer hard-blocks with a generic "row mismatch"; it surfaces a dialog naming the cap as the cause and recommending the volunteer break the customer's receipts into separate orders one method at a time.  Documented in the new in-app help article `split-orders-when-stuck` and troubleshooting flow `ts-payment-screen-hard-block`.  3,504 tests.
 - **v2.0.6**: Production season release.  Per-vendor payment-method eligibility (Settings → Vendors), configurable rewards engine (Settings → Rewards), redesigned Payment Confirmation Dialog.  Multi-workstation cloud sync hardened end-to-end — settings changes propagate to the shared sheet, closed-day mutations sync correctly, Vendor Reimbursement cleanup is multi-market-aware, reset preserves other devices' rows, market renames protected against code-shift orphaning.  Photo dedup cache cleaned on void/delete/replace.  Schema v33 → v34 (additive).  3,387 tests.
 - v2.0.1: Pre-deployment hardening pass — InstanceLock wired into app.py, narrow-scope auto-sync no longer deletes historical rows, FMNP face-value reporting, three-gate reset, defensive UF triggers

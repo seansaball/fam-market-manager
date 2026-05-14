@@ -368,7 +368,8 @@ class TestVendorReimbursementColumn:
         #     + FMNP (External) = Total Due to Vendor
         method_sum = sum(
             v for k, v in r.items()
-            if k not in {'Market Name', 'Vendor', 'Month', 'Date(s)',
+            if k not in {'Market Name', 'Vendor', 'Month',
+                          'Year-Month', 'Date(s)',
                           'Total Due to Vendor', 'FAM Match',
                           'FMNP (External)', 'Customer Forfeit',
                           'Check Payable To', 'Address'})

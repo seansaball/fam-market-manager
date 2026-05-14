@@ -759,9 +759,10 @@ def audit_post_confirm(conn, market_day_id):
             int(round(v * 100))
             for k, v in vrow.items()
             if k not in (
-                'Market Name', 'Vendor', 'Month', 'Date(s)',
-                'Total Due to Vendor', 'FAM Match',
-                'FMNP (External)', 'Check Payable To', 'Address',
+                'Market Name', 'Vendor', 'Month', 'Year-Month',
+                'Date(s)', 'Total Due to Vendor', 'FAM Match',
+                'FMNP (External)', 'Customer Forfeit',
+                'Check Payable To', 'Address',
                 'market_code', 'device_id')
             and isinstance(v, (int, float))
         )

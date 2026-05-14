@@ -1335,10 +1335,12 @@ class TestVendorReimbursementReport:
         # Math identity per vendor: Σ(method-cols) + FAM Match = Total.
         produce_methods = sum(
             v for k, v in produce.items()
-            if k not in ('Market Name', 'Vendor', 'Month', 'Date(s)',
+            if k not in ('Market Name', 'Vendor', 'Month',
+                         'Year-Month', 'Date(s)',
                          'Total Due to Vendor', 'FAM Match',
-                         'FMNP (External)', 'Check Payable To',
-                         'Address', 'market_code', 'device_id')
+                         'FMNP (External)', 'Customer Forfeit',
+                         'Check Payable To', 'Address',
+                         'market_code', 'device_id')
             and isinstance(v, (int, float)))
         assert round(
             (produce_methods + produce.get('FAM Match', 0)) * 100) == \

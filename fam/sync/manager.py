@@ -19,7 +19,12 @@ class SyncManager:
     # market_code + device_id are always the first two key columns
     # (except Agent Tracker which is keyed by device_id alone).
     SHEET_KEYS: dict[str, list[str]] = {
-        'Vendor Reimbursement': ['market_code', 'device_id', 'Market Name', 'Vendor'],
+        # v2.0.9: ``Year-Month`` is part of the row identity so each
+        # calendar month gets its own row.  Without this, the May row
+        # would overwrite the April row on every sync (rolling totals).
+        # The data collector emits one row per (market × vendor ×
+        # year-month) — see ``_collect_vendor_reimbursement``.
+        'Vendor Reimbursement': ['market_code', 'device_id', 'Market Name', 'Vendor', 'Year-Month'],
         'FAM Match Report':     ['market_code', 'device_id', 'Payment Method', 'Date'],
         'Detailed Ledger':      ['market_code', 'device_id', 'Transaction ID'],
         'Transaction Log':      ['market_code', 'device_id', 'Time', 'Transaction',

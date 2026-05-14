@@ -2127,18 +2127,31 @@ class TestEnhancedVendorReimbursement:
         _enable_all_optional_tabs()
 
     def test_has_month_column(self):
-        """Vendor Reimbursement rows should have a Month column."""
+        """Vendor Reimbursement rows should have Month + Year-Month columns.
+
+        v2.0.9: ``Month`` is the human-readable "Month YYYY" form
+        (e.g. "April 2026") so two rows for the same vendor in
+        different calendar months are visually distinguishable on the
+        sheet.  The sortable ``"YYYY-MM"`` form lives in the new
+        ``Year-Month`` column and is part of the upsert key.
+        """
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
         rows = data['Vendor Reimbursement']
         assert len(rows) >= 1
         assert 'Month' in rows[0]
-        # Month should be a plain text month name (e.g. "October")
-        assert rows[0]['Month'] in [
-            'January', 'February', 'March', 'April', 'May', 'June',
-            'July', 'August', 'September', 'October', 'November', 'December',
-        ]
+        assert 'Year-Month' in rows[0]
+        # Month is "Month YYYY" — e.g. "April 2026".
+        import re
+        assert re.fullmatch(
+            r'(January|February|March|April|May|June|July|August|'
+            r'September|October|November|December) \d{4}',
+            rows[0]['Month']), (
+            f"Expected 'Month YYYY' format, got {rows[0]['Month']!r}")
+        # Year-Month is "YYYY-MM" — e.g. "2026-04".
+        assert re.fullmatch(r'\d{4}-\d{2}', rows[0]['Year-Month']), (
+            f"Expected 'YYYY-MM' format, got {rows[0]['Year-Month']!r}")
 
     def test_has_check_payable_to_column(self):
         """Vendor Reimbursement rows should have Check Payable To."""
@@ -2357,14 +2370,18 @@ class TestEnhancedVendorReimbursement:
         assert fmnp_vendor[0]['Check Payable To'] == 'FMNP Only LLC'
 
     def test_month_derived_from_market_day_date(self):
-        """Month column should be plain text month name from the market day date."""
+        """v2.0.9: Month column is "Month YYYY" from the market day date.
+
+        Year-Month carries the sortable "YYYY-MM" form for upsert keying.
+        """
         md_id, _ = _create_market_day_with_transactions(
             market_date='2025-10-15')
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
         rows = data['Vendor Reimbursement']
         assert len(rows) >= 1
-        assert rows[0]['Month'] == 'October'
+        assert rows[0]['Month'] == 'October 2025'
+        assert rows[0]['Year-Month'] == '2025-10'
 
     def test_market_name_column(self):
         """Market Name column shows full market name, not code."""
