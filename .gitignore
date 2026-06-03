@@ -71,3 +71,6 @@ photos/
 # Google Sheets sync credentials (NEVER commit)
 *credentials*.json
 *service_account*.json
+
+# Local bug backlog — personal session tracking, not for the public repo
+BUGS_BACKLOG.md
