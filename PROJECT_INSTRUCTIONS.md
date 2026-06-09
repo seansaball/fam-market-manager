@@ -1,11 +1,17 @@
 # FAM Market Manager — Project Instructions & Specification
 
-> **Purpose:** This file is the single source of truth for the FAM Market Manager
+> **Purpose:** This file is the deep reference for the FAM Market Manager
 > application. It is written for an AI coding assistant or a new developer who
 > needs to understand, maintain, or extend the project **without** access to
 > previous conversation history. Keep this file up to date with every commit.
 >
-> **Last updated:** 2026-05-07 — v2.0.8 release in flight (first v2.x release reaching the field; consolidates v2.0.0 / v2.0.1 / v2.0.6 / v2.0.7 / v2.0.8 development cycles since v1.9.8/v1.9.9)
+> **Session protocol lives in `CLAUDE.md`** (project root) — it is auto-loaded
+> into every Claude Code session and contains the mandatory hard rules and
+> change-impact protocol. This file is the encyclopedia CLAUDE.md points into;
+> read the sections relevant to your task rather than the whole file.
+>
+> **Last updated:** 2026-06-09 — v2.0.9 shipped (Vendor Reimbursement monthly
+> split). CLAUDE.md added as the auto-loaded session-rules entry point.
 
 ---
 
