@@ -11,10 +11,10 @@ name: Tests
 #   - requirements-build.lock (exact pinned versions used in signed builds)
 #   - pytest 9.0.2 / pytest-qt 4.5.0 (matches the dev environment)
 #
-# The two UI fuzz suites run in a separate non-blocking job: they can
-# hit a pre-existing Qt/Windows pytest-teardown heap crash unrelated to
-# code under test (see CLAUDE.md rule 4).  They report, but never turn
-# master red on their own.
+# The fuzz job is blocking for NEW regressions: the known-failing
+# seeds (BUGS_BACKLOG.md BUG-006) are deselected, and the standalone
+# fuzz simulator runs as a soft-fail step until BUG-006 closes.
+# Green fuzz job = no new fuzz failures.
 
 on:
   push:
@@ -37,9 +37,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -74,9 +74,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: 'pip'
