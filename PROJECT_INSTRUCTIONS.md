@@ -5,6 +5,8 @@
 > needs to understand, maintain, or extend the project **without** access to
 > previous conversation history. Keep this file up to date with every commit.
 >
+> **New team / successor orientation:** start with `SUCCESSOR_NOTES.md` (what is portable vs platform-bound) and `KNOWN_ISSUES.md` (curated open items).
+>
 > **Session protocol lives in `CLAUDE.md`** (project root) — it is auto-loaded
 > into every Claude Code session and contains the mandatory hard rules and
 > change-impact protocol. This file is the encyclopedia CLAUDE.md points into;
