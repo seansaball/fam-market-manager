@@ -32,11 +32,14 @@ the encyclopedia.
    by design (gitignored) — do not "helpfully" publish them.
 
 4. **Run the relevant tests before declaring any change done**, and the
-   full suite before any release work. The two UI fuzz suites
-   (`test_ui_state_machine_fuzz.py`, `test_ui_driven_fuzz.py`) can hit a
-   pre-existing Qt/Windows teardown crash — run them separately if the
-   full run dies. Release gate (mandatory before tagging):
-   `scripts\run_release_audit.bat`.
+   full suite before any release work. Release gate (mandatory before
+   tagging): `scripts\run_release_audit.bat`. Known state: 3 fuzz seeds
+   and the standalone fuzz simulator (gate 4 of the audit gate) are
+   expected-red until BUG-006 closes — see BUGS_BACKLOG.md; CI
+   deselects/soft-fails exactly those, annotated with the bug ID.
+   The historical Qt/Windows pytest-teardown heap crash was root-caused
+   and fixed in commit e2ec756 (`_check_stale_market_days` bails on
+   hidden windows); if a teardown crash reappears, start there.
 
 5. **Check `BUGS_BACKLOG.md`** (local, gitignored, project root) before
    starting fix work — it is the running list of known bugs and planned
