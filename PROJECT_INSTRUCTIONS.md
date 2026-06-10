@@ -26,13 +26,11 @@ If you are a fresh AI session opening this repo, read this first:
   download has happened on any v2.0.x version yet.  It rolls
   up the v2.0.0 / v2.0.1 / v2.0.6 / v2.0.7 / v2.0.8
   development cycles since v1.9.8 / v1.9.9 into a single
-  shipping version.  `RELEASE_NOTES_v2.0.8.md` and
-  `FAM_Manager_v2.0.8_Release_Notes.html` are the sole
-  release-notes-of-record and cover everything since v1.9.9
-  framed as one consolidated release.  The intermediate
-  v2.0.6 / v2.0.7 release-note files have been removed from
-  the repo to avoid drift and confusion — v2.0.8 is the
-  comprehensive log.
+  shipping version.  Release-notes convention: every version's
+  notes are preserved permanently on GitHub Releases; the repo
+  keeps ONLY the current version's markdown
+  (`RELEASE_NOTES_v2.0.9.md`) to avoid drift — older
+  release-note files are removed at each release.
 - Schema bumped v34 → **v37** through three forward migrations:
   - v34 → v35: `_migrate_v34_to_v35` backfills universal SNAP/Cash
     `vendor_payment_methods` rows for every vendor.
