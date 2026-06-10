@@ -1,0 +1,101 @@
+name: Tests
+
+# Mechanical backstop for the local release audit gate
+# (scripts\run_release_audit.bat).  Runs the full pytest suite plus the
+# three simulation gates on every push to master so a commit that
+# skipped local testing cannot sit on master undetected.
+#
+# Mirrors the local environment deliberately:
+#   - windows-latest        (the app ships only on Windows)
+#   - Python 3.12           (matches the dev + build environment)
+#   - requirements-build.lock (exact pinned versions used in signed builds)
+#   - pytest 9.0.2 / pytest-qt 4.5.0 (matches the dev environment)
+#
+# The two UI fuzz suites run in a separate non-blocking job: they can
+# hit a pre-existing Qt/Windows pytest-teardown heap crash unrelated to
+# code under test (see CLAUDE.md rule 4).  They report, but never turn
+# master red on their own.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Headless Qt: render offscreen, no display/session dependency.
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  tests:
+    name: Test suite + simulation gates
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements-build.lock
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.lock
+          pip install pytest==9.0.2 pytest-qt==4.5.0
+
+      # TestAccessibilityFontSizes asserts rendered font pixel sizes,
+      # which only mean anything on a real display.  The offscreen Qt
+      # platform substitutes synthetic font metrics and fails all four
+      # (verified 2026-06-10: 4 failed offscreen, 25/25 pass natively).
+      # They remain part of the local suite and the release audit gate.
+      - name: "Gate 1: pytest suite (excluding UI fuzz)"
+        run: >
+          python -m pytest -q --tb=line
+          --ignore=tests/test_ui_state_machine_fuzz.py
+          --ignore=tests/test_ui_driven_fuzz.py
+          --deselect "tests/test_payment_confirmation_dialog.py::TestAccessibilityFontSizes"
+
+      - name: "Gate 2: production simulation"
+        run: python -m scripts.production_sim
+
+      - name: "Gate 3: v1.9.9 stress simulation"
+        run: python -m scripts.v1_9_9_stress_sim
+
+      - name: "Gate 4: fuzz simulator"
+        run: python -m scripts.fuzz_simulator
+
+  ui-fuzz:
+    name: UI fuzz suites (non-blocking)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # Known pre-existing Qt/Windows teardown crash can kill these runs
+    # through no fault of the change under test.  Informational only.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements-build.lock
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.lock
+          pip install pytest==9.0.2 pytest-qt==4.5.0
+
+      - name: UI fuzz suites
+        run: >
+          python -m pytest -q --tb=line
+          tests/test_ui_state_machine_fuzz.py
+          tests/test_ui_driven_fuzz.py

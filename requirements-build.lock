@@ -1,0 +1,64 @@
+# Pinned BUILD dependencies — exact versions for reproducible signed builds.
+#
+# Captured via `pip freeze` from the build_venv that produced the signed
+# v2.0.9 release binary (2026-06: Python 3.12.2, PyInstaller 6.19.0,
+# PySide6 6.10.2).  build.bat installs from THIS file, not requirements.txt.
+#
+# requirements.txt (loose >= ranges) remains for development installs only.
+#
+# To upgrade deliberately:
+#   1. Update the desired pin(s) here, or recreate build_venv and
+#      `pip install -r requirements.txt pyinstaller` to pull latest.
+#   2. Build, run the FULL release audit gate (scripts\run_release_audit.bat),
+#      and verify the packaged exe launches + syncs before signing.
+#   3. Regenerate this file: build_venv\Scripts\python -m pip freeze
+#      (then restore this header).
+#
+# Never let an unpinned `pip install` decide what goes into a signed
+# release binary.
+altgraph==0.17.5
+branca==0.8.2
+cachetools==7.0.5
+certifi==2026.2.25
+cffi==2.0.0
+charset-normalizer==3.4.4
+contourpy==1.3.3
+cryptography==46.0.5
+cycler==0.12.1
+folium==0.20.0
+fonttools==4.61.1
+google-auth==2.49.0
+google-auth-oauthlib==1.3.0
+gspread==6.2.1
+idna==3.11
+Jinja2==3.1.6
+kiwisolver==1.4.9
+MarkupSafe==3.0.3
+matplotlib==3.10.8
+numpy==2.4.2
+oauthlib==3.3.1
+packaging==26.0
+pandas==3.0.1
+pefile==2024.8.26
+pgeocode==0.5.0
+pillow==12.1.1
+pyasn1==0.6.2
+pyasn1_modules==0.4.2
+pycparser==3.0
+pyinstaller==6.19.0
+pyinstaller-hooks-contrib==2026.1
+pyparsing==3.3.2
+PySide6==6.10.2
+PySide6_Addons==6.10.2
+PySide6_Essentials==6.10.2
+python-dateutil==2.9.0.post0
+pywin32-ctypes==0.2.3
+requests==2.32.5
+requests-oauthlib==2.0.0
+rsa==4.9.1
+setuptools==82.0.0
+shiboken6==6.10.2
+six==1.17.0
+tzdata==2025.3
+urllib3==2.6.3
+xyzservices==2025.11.0

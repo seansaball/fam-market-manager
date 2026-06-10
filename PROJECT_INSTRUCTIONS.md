@@ -617,7 +617,7 @@ the database and a vendor reimbursement check."
 
 ### Development
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt    # loose >= ranges — dev only
 python run.py
 ```
 
@@ -626,6 +626,15 @@ python run.py
 build.bat
 # Output: dist/FAM Manager/FAM Manager.exe
 ```
+
+**Reproducible builds (v2.0.9+):** `build.bat` installs from
+`requirements-build.lock` — exact pinned versions (including PyInstaller)
+captured from the environment that produced the last signed release.
+`requirements.txt` is never used for release builds. To upgrade a build
+dependency deliberately, follow the procedure in the lock file's header:
+update the pin, rebuild, run the full release audit gate, verify the
+packaged exe, then regenerate the lock. Never let an unpinned
+`pip install` decide what goes into a signed binary.
 
 ### Data Persistence
 All data stored in `%APPDATA%\FAM Market Manager\` (separate from exe):

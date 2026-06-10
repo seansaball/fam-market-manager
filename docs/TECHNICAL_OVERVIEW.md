@@ -118,7 +118,7 @@ The application runs as a standalone Windows desktop executable with local SQLit
 | Packaging | PyInstaller | Standalone Windows executable |
 | Testing | pytest + pytest-qt | Unit, integration, and automated UI tests (2 090+ tests) |
 
-**Runtime Dependencies** (`requirements.txt`):
+**Runtime Dependencies** (`requirements.txt` — loose ranges, development only):
 - `PySide6 >= 6.5.0`
 - `pandas >= 2.0.0`
 - `matplotlib >= 3.7.0`
@@ -126,6 +126,12 @@ The application runs as a standalone Windows desktop executable with local SQLit
 - `pgeocode >= 0.4.0`
 - `gspread >= 6.0.0`
 - `google-auth >= 2.20.0`
+
+**Build Dependencies** (`requirements-build.lock` — exact pins, used by
+`build.bat` for release builds): a full `pip freeze` of the environment
+that produced the last signed release, including PyInstaller. Guarantees
+the same dependency set every rebuild; upgrade procedure documented in
+the lock file's header.
 
 ---
 

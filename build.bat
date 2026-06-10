@@ -63,11 +63,21 @@ if not exist "build_venv" (
     python -m venv build_venv
 )
 
-echo [2/4] Installing dependencies...
+echo [2/4] Installing dependencies (pinned build lock)...
 call build_venv\Scripts\activate.bat
 pip install --quiet --upgrade pip
-pip install --quiet pyinstaller
-pip install --quiet -r requirements.txt
+REM Reproducible builds: install EXACT versions from the lock file.
+REM requirements.txt (loose >= ranges) is for development only.
+REM PyInstaller is pinned in the lock too — do not install it separately.
+REM To upgrade deps deliberately, see the header of requirements-build.lock.
+pip install --quiet -r requirements-build.lock
+if errorlevel 1 (
+    echo [ERROR] Failed to install pinned build dependencies from
+    echo         requirements-build.lock.  Check network access and that
+    echo         the pinned versions are still available on PyPI.
+    pause
+    exit /b 1
+)
 
 echo [3/4] Running PyInstaller...
 pyinstaller --clean --noconfirm fam_manager.spec
