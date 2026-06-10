@@ -10,7 +10,14 @@ import matplotlib
 matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import MaxNLocator, FuncFormatter
+
+# Chart face-lift (2026-06): render charts in the app's UI font so
+# they read as part of the app rather than a pasted-in figure.
+# Falls back gracefully when Inter isn't registered with matplotlib.
+matplotlib.rcParams['font.family'] = 'sans-serif'
+matplotlib.rcParams['font.sans-serif'] = [
+    'Inter', 'Segoe UI', 'DejaVu Sans']
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
@@ -1572,33 +1579,6 @@ class ReportsScreen(QWidget):
     # ------------------------------------------------------------------
     # Curated pie-chart palette — 10 hues with wide angular spacing,
     # tested for contrast, colorblind safety, and white/dark text legibility.
-    _PIE_PALETTE = [
-        '#3a7d5e',  # Forest green  (brand-aligned)
-        '#e68a3e',  # Harvest gold  (brand accent)
-        '#4e79a7',  # Steel blue
-        '#c85c4a',  # Terra cotta
-        '#6aab8d',  # Sage
-        '#d4a03c',  # Amber
-        '#8b6fae',  # Plum
-        '#e8927c',  # Peach coral
-        '#5898a0',  # Teal
-        '#9c755f',  # Warm brown
-    ]
-
-    @staticmethod
-    def _text_color_for_bg(hex_color):
-        """Return white or dark text for best contrast on *hex_color*."""
-        r = int(hex_color[1:3], 16) / 255
-        g = int(hex_color[3:5], 16) / 255
-        b = int(hex_color[5:7], 16) / 255
-        luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        return '#FFFFFF' if luminance < 0.55 else '#2C2C2C'
-
-    def _get_pie_colors(self, count):
-        """Return a list of theme-appropriate colors for pie chart slices."""
-        pal = self._PIE_PALETTE
-        return [pal[i % len(pal)] for i in range(count)]
-
     def _show_no_data(self, ax, message="No data available"):
         """Display a centered 'no data' message on an empty axes."""
         ax.set_xlim(0, 1)
@@ -1631,22 +1611,40 @@ class ReportsScreen(QWidget):
 
         labels = [d['method'] for d in self._chart_pie_data]
         sizes = [d['total'] for d in self._chart_pie_data]
-        colors = self._get_pie_colors(len(labels))
+        # Stable per-method identity colors (chart face-lift 2026-06):
+        # the same method renders the same color in every chart and on
+        # every market day, regardless of how many methods have data.
+        from fam.ui.styles import color_for_method
+        colors = [color_for_method(name) for name in labels]
 
-        wedges, texts, autotexts = ax.pie(
-            sizes, labels=None, autopct='%1.1f%%',
-            colors=colors, startangle=90, pctdistance=0.75,
-            wedgeprops={'edgecolor': WHITE, 'linewidth': 1.5}
+        # Donut instead of full pie: the hole carries the total — the
+        # single most important number — and the ring reads cleaner
+        # than wedge-packed percentage labels.  Values move into the
+        # legend ("SNAP — $412.00 (38%)") so each entry is
+        # self-contained and the chart body stays unlabelled.
+        wedges, _texts = ax.pie(
+            sizes, labels=None,
+            colors=colors, startangle=90,
+            wedgeprops={'edgecolor': WHITE, 'linewidth': 1.5,
+                        'width': 0.38}
         )
 
-        # Style percentage labels — adapt text color to slice luminance
-        for t, c in zip(autotexts, colors):
-            t.set_fontsize(9)
-            t.set_fontweight('bold')
-            t.set_color(self._text_color_for_bg(c))
+        total = sum(sizes)
+        ax.text(0, 0.08, f"${total:,.2f}",
+                ha='center', va='center', fontsize=15,
+                fontweight='bold', color=TEXT_COLOR)
+        ax.text(0, -0.14, "all methods",
+                ha='center', va='center', fontsize=9,
+                color=SUBTITLE_GRAY)
 
+        legend_labels = [
+            f"{name} — ${size:,.2f} ({size / total * 100:.0f}%)"
+            if total > 0 else name
+            for name, size in zip(labels, sizes)
+        ]
         ax.legend(
-            wedges, labels, loc='center left', bbox_to_anchor=(1.0, 0.5),
+            wedges, legend_labels, loc='center left',
+            bbox_to_anchor=(1.0, 0.5),
             fontsize=9, frameon=False, labelcolor=TEXT_COLOR
         )
         ax.set_title('Payment Methods Breakdown', fontsize=12,
@@ -1686,6 +1684,9 @@ class ReportsScreen(QWidget):
                       fontweight='bold', color=TEXT_COLOR, pad=12)
         ax.set_xlabel('Market Date', fontsize=10, color=TEXT_COLOR)
         ax.set_ylabel('Amount ($)', fontsize=10, color=TEXT_COLOR)
+        # Dollar-formatted ticks (chart face-lift 2026-06)
+        ax.yaxis.set_major_formatter(
+            FuncFormatter(lambda v, _p: f"${v:,.0f}"))
 
         # Rotate date labels for readability
         ax.tick_params(axis='x', rotation=45, labelsize=8, colors=TEXT_COLOR)

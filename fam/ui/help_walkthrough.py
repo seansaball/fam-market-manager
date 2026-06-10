@@ -163,6 +163,12 @@ class WalkthroughScene(QFrame):
     """
 
     SCENE_HEIGHT = 220
+    # Natural design width of the scene's absolute-coordinate layout.
+    # The walkthrough stage sizes itself to the CURRENT scene's width
+    # (see _show_stage) so narrow scenes stay centered while wide
+    # scenes (Stage3's dual-path payment flow runs to ~x=990) get the
+    # room they were designed for instead of clipping.
+    SCENE_WIDTH = 700
 
     iteration_completed = Signal()
 
@@ -407,6 +413,9 @@ class Stage3Scene(WalkthroughScene):
     """
 
     SCENE_HEIGHT = 130
+    # Widest scene: the dual-path beat-3 row runs to ~x=990
+    # (stamp/paid-mark cards at x=664..892 plus card widths).
+    SCENE_WIDTH = 1000
 
     def _build(self):
         # ── Beat 1: receipts → laptop ──────────────────────────
@@ -680,10 +689,20 @@ class Stage5Scene(WalkthroughScene):
             card_width=130, card_height=110, parent=self)
         self._laptop_card.move(60, 80)
 
-        # Up arrow + cloud (sync path)
+        # Up arrow + cloud (sync path).
+        # Layout fix (2026-06): the arrow originally sat at (225, 50)
+        # — entirely INSIDE the cloud card's 195..355 × 5..115
+        # footprint — and the card is created after it, so the card
+        # painted over the arrow and it was never visible.  Correct
+        # placement (user feedback): centered UNDER the cloud card,
+        # pointing up into it — "laptop data flows up to the cloud".
+        # Cloud center x = 275; arrow is 44px wide → x = 253; y = 122
+        # clears the card bottom (115) and the laptop (x ≤ 190), and
+        # the backup-path elements start at x ≥ 380.  raise_() below
+        # keeps it above any future card reshuffles.
         self._sync_arrow = ArrowIcon(direction='up', size=44,
                                       primary=ACCENT_GREEN, parent=self)
-        self._sync_arrow.move(225, 50)
+        self._sync_arrow.move(253, 122)
         _make_opacity_effect(self._sync_arrow, initial=0.0)
 
         self._cloud_card = SceneCard(
@@ -691,6 +710,7 @@ class Stage5Scene(WalkthroughScene):
             card_width=160, card_height=110, parent=self)
         self._cloud_card.move(195, 5)
         _make_opacity_effect(self._cloud_card, initial=0.0)
+        self._sync_arrow.raise_()
 
         # OR divider
         self._or = QLabel('or, if Wi-Fi is down:', parent=self)
@@ -1251,7 +1271,17 @@ class WorkflowWalkthroughWidget(QWidget):
         self._scene_stack.setStyleSheet('background:transparent;')
         for scene in self._scenes:
             self._scene_stack.addWidget(scene)
-        scene_v.addWidget(self._scene_stack)
+        # Chart face-lift follow-up (2026-06): scenes position their
+        # actors with absolute coordinates designed for a fixed-width
+        # stage.  Pre-fix the stack stretched to the full window
+        # width, leaving narrow compositions crammed into the left
+        # half with dead space on the right.  Center a fixed-width
+        # stage instead, sized to the CURRENT scene's declared
+        # SCENE_WIDTH (scenes differ: most are 700, Stage3's
+        # dual-path row needs 1000 — see _show_stage).
+        self._scene_stack.setFixedWidth(
+            self._scenes[0].SCENE_WIDTH if self._scenes else 700)
+        scene_v.addWidget(self._scene_stack, 0, Qt.AlignHCenter)
         card_v.addWidget(scene_holder)
 
         # ── Inner divider hairline ────────────────────────────
@@ -1450,7 +1480,11 @@ class WorkflowWalkthroughWidget(QWidget):
             self._takeaway.setText(stage.key_takeaway or '')
         self._narrative.setText(stage.narrative)
 
-        # Show the scene
+        # Show the scene — resize the stage to this scene's declared
+        # design width first so wide scenes (Stage3 = 1000) get their
+        # full canvas and narrow scenes (700) stay centered.
+        self._scene_stack.setFixedWidth(
+            self._scenes[idx].SCENE_WIDTH)
         self._scene_stack.setCurrentIndex(idx)
 
         # Update prev/next button states + label.  On the final stage

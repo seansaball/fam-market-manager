@@ -28,6 +28,49 @@ SUBTITLE_GRAY = "#757575"
 CARD_SHADOW = "#22000000"
 FIELD_LABEL_BG = "#ECEAE4"  # Warm tinted label background
 
+# ── Stable payment-method chart colors (chart face-lift, 2026-06) ──
+# One fixed color per well-known method, used by EVERY chart so a
+# method keeps its identity across the donut/line/traffic/vendor
+# charts.  Pre-face-lift the pie assigned colors by POSITION
+# (palette[i % len]), so SNAP's color changed depending on how many
+# methods had data that day — and the same method could render in
+# two different colors on the same screen.
+METHOD_COLORS = {
+    'SNAP':          '#4e79a7',  # Steel blue
+    'Cash':          '#9c755f',  # Warm brown
+    'FMNP':          '#d4a03c',  # Amber
+    'Food RX':       '#c85c4a',  # Terra cotta
+    'JH Food Bucks': '#3a7d5e',  # Forest green (brand-aligned)
+    'JH Tokens':     '#6aab8d',  # Sage
+}
+
+# Deterministic fallback palette for coordinator-created custom
+# methods — hashed by NAME (not list position) so a custom method
+# also keeps one stable color forever.
+_METHOD_FALLBACK_PALETTE = [
+    '#8b6fae',  # Plum
+    '#5898a0',  # Teal
+    '#e8927c',  # Peach coral
+    '#e68a3e',  # Harvest gold
+    '#7a9e3b',  # Olive
+    '#b05f88',  # Mulberry
+]
+
+
+def color_for_method(name: str) -> str:
+    """Return the stable chart color for a payment method name.
+
+    Well-known methods use the fixed brand mapping; unknown (custom)
+    methods hash their name into the fallback palette so the same
+    name always yields the same color, independent of how many
+    methods appear in any given chart's dataset.
+    """
+    color = METHOD_COLORS.get(name)
+    if color:
+        return color
+    digest = sum(ord(c) for c in (name or ''))
+    return _METHOD_FALLBACK_PALETTE[digest % len(_METHOD_FALLBACK_PALETTE)]
+
 # Semantic background tints
 SUCCESS_BG = "#e4ede8"
 ERROR_BG = "#FFEBEE"

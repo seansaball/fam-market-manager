@@ -1620,6 +1620,22 @@ $5 FMNP check as $10 of food).  Cashed check + FAM reimbursement
 
 Date range, markets, vendors.
 
+## The shared Google Sheet version (v2.0.9+)
+
+The **Vendor Reimbursement** tab on the shared Google Sheet emits
+**one row per vendor per calendar month** so you can reconcile
+month-over-month at a glance:
+
+- **Month** — human-readable, e.g. "April 2026"
+- **Year-Month** — sortable form, e.g. "2026-04" (filter or sort on
+  this column to compare months)
+
+Upgrading from an older version: each laptop's old all-time
+cumulative row is **replaced automatically** on its first v2.0.9
+sync.  On multi-laptop markets the old rows disappear one device
+at a time as each laptop upgrades — seeing a mix of old and new
+rows during the rollout window is normal, not data loss.
+
 ## Workflow
 
 1. End of month, filter to the month
