@@ -1453,6 +1453,20 @@ class MainWindow(QMainWindow):
         so they can open today's market.  No-op when nothing was
         stale (the typical case).
         """
+        # v2.0.9 CI fix (2026-06-10): bail when the window isn't shown.
+        # The 300ms singleShot that schedules this check can fire while
+        # pytest-qt drains pending events during test TEARDOWN — opening
+        # a modal QMessageBox on a window that is mid-destruction, which
+        # intermittently dies with Windows heap corruption (0xc0000374,
+        # observed locally alongside the fuzz suites and on the GitHub
+        # Actions runner at 81% of the main suite).  In production the
+        # window is always visible by the time the timer fires
+        # (window.show() precedes app.exec); a hidden window means
+        # we're in shutdown or a test harness — never the right moment
+        # for a modal dialog.  The auto-close itself re-runs on next
+        # launch, so skipping here loses nothing.
+        if not self.isVisible():
+            return
         try:
             from fam.models.market_day import auto_close_stale_market_days
             closed = auto_close_stale_market_days()
