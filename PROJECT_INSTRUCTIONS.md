@@ -21,7 +21,126 @@
 
 If you are a fresh AI session opening this repo, read this first:
 
-- `fam/__init__.py` reports `__version__ = "2.0.8"`.  v2.0.8
+- **v2.1.0 is BUILT but UNRELEASED and HELD OPEN** (Sean,
+  2026-06-11): more enhancements are being added to this release
+  before it ships — do not tag/release; fold new work into v2.1.0
+  and its existing release-notes files. The whole build is
+  uncommitted working-tree state until Sean approves a commit. See
+  the "v2.1.0 RELEASE STATUS" block in BUGS_BACKLOG.md (local) for
+  the standing instructions.
+- **v2.1.0 (2026-06-11, ENH-002): External Payments Entry.** The
+  FMNP Entry screen is generalized to ALL payment methods with
+  `external_matching_accepted` ON (nav: "External Payments"; FMNP
+  remains the default and behaves identically). Schema v37 → **v38**
+  (`_migrate_v37_to_v38`): two channel toggles on `payment_methods`
+  (`external_matching_accepted`, `vendor_cashes_original`; FMNP
+  backfilled 1/1) and `payment_method_id` + four config-snapshot
+  columns on `fmnp_entries` (backfilled to FMNP @ literal 100% /
+  cashes-original — preserves payout == face byte-exactly), with
+  NOT-NULL + snapshot-immutability triggers. Payout is NEVER stored
+  — always derived via `fam/utils/external_payout.py` from the
+  entry's snapshots (EP1–EP4, docs/SYSTEM_INVARIANTS.md Layer 10;
+  formula + money table in docs/FINANCIAL_FORMULA.md §12). New
+  required sheet tab **External Payment Entries** (key:
+  market_code/device_id/Entry ID) carrying ALL entries — FMNP
+  included since design revision R1 (2026-06-11): the `FMNP
+  Entries` tab is DEPRECATED and drains (collector returns []; the
+  empty upsert removes the device's rows; old-version devices keep
+  writing it until they upgrade; coordinator deletes the empty tab
+  once the fleet is uniform). Vendor Reimbursement gains additive
+  `<Method> (External)` columns; the `FMNP (External)` column's
+  feed is unchanged. Guards G1–G5 (payout preview/confirm,
+  denomination multiples, booth+external double-count review,
+  config linter, large-amount threshold). ENH-001 shipped too
+  (JH Food Bucks seeds 0% match). Full build record:
+  `ENH-002_TECHNICAL_PLAN.md` (local-only).
+- **v2.1.0 (2026-06-12, ENH-003): SNAP Settlement report.** New
+  Reports tab (second, after Vendor Reimbursement): one row per
+  customer order
+  (= one EBT terminal swipe) with the order-level SNAP total, so
+  coordinators match the terminal's paper receipts line-by-line
+  (Bryan/Bellevue). LOCAL-ONLY by confirmed requirement — on-screen
+  + CSV (`export_snap_settlement`), no Sheets tab, no collector, no
+  SHEET_KEYS/REQUIRED_SYNC_TABS entry. SNAP detection reuses the
+  confirmation dialog's `is_external_device_method` (keyword
+  snap/ebt) so the settlement figure and the swipe acknowledgement
+  cannot disagree; statuses via `active_tx_status_clause`. Date +
+  Market filters apply; Vendor/Type deliberately ignored
+  (receipt-format integrity). Bundled fix: Generated Rewards tab
+  now respects the Date + Market filters (was a full extract).
+  Follow-up same day: **Verified working-page checkbox** — schema
+  v38 → **v39** (`_migrate_v38_to_v39`) adds
+  `customer_orders.settlement_verified_at` (NULL = unverified);
+  ticks persist per laptop, no audit rows, no sync (operational
+  reconciliation state, not financial data).
+  Tests: tests/test_snap_settlement_report.py +
+  TestReportLevelFilters in tests/test_generated_rewards_report.py.
+- **v2.1.0 (2026-06-12, ENH-005): Market Day shortcut filter on
+  Reports.** "Market Day" dropdown in the shared filter bar
+  ("<date> — <market>", most recent first, "All Market Days"
+  default). Selecting a day constrains EVERY report to that md.id.
+  Interplay with the date range — LAST-TOUCHED-WINS (revised same
+  day after Sean field-tested the original greyed-out-range
+  design and hit a both-set state): picking a day resets the
+  range to "All Dates"; applying a range resets the dropdown to
+  "All Market Days"; the where-builders keep an md-wins date-skip
+  clause as a safety net. Unambiguous when two markets ran the
+  same date. Tests: tests/test_market_day_filter.py.
+- **v2.1.0 (2026-06-12, ENH-006): Vendor Reimbursement Verified
+  column (end-of-market vendor walk + month-end pass).** Schema
+  v39 → **v41** via two table adds: `vendor_day_verifications`
+  (v40, PK market_day_id+vendor_id) and
+  `vendor_range_verifications` (v41, PK vendor_id+market_id+
+  from_date+to_date). FINAL MODEL (rev 2, Sean same day —
+  supersedes an interim all-days rollup): EVERY time scope keeps
+  its OWN INDEPENDENT mark. Market Day selected → the (vendor,
+  day) mark; date range or whole-month pick → the (vendor,
+  market, from, to) mark (a month is its first..last dates, so
+  the same month is always the same key). Toggling one scope
+  NEVER cascades into another — unchecking a month does not
+  uncheck its days, and verified days never make a month read
+  verified. Unscoped view (All Dates + All Market Days) = inert
+  dash (no scope to attach a mark to). Only ticked combinations
+  are stored. Reuses the
+  `_VerifiedBox` painted checkbox. VR header sorting now OFF in
+  all modes (cell widgets don't follow re-sorts). Operational
+  state only: no audit, no sync (collector output pinned
+  Verified-free), zero effect on reimbursement; the CSV gains a
+  Verified column only when a verification scope is active (the
+  interim "Verified Days" k/n rollup was retired with rev 2 before
+  ship — that string exists nowhere in code). The rebuild calls
+  vendor_table.clearContents() — setItem alone leaves stale cell
+  widgets behind. Companion QoL: the date dialog gained a
+  WHOLE-MONTH quick pick (either/or radio vs custom range,
+  helpers.py `_DateRangeDialog`). Tests:
+  tests/test_vendor_day_verification.py +
+  TestLastTouchedWins/month-pick in tests/test_market_day_filter.py
+  (+ 📌 col-offset update in test_ui_workflows
+  TestReportsScreenTotals for the first-column Verified).
+- **v2.1.0 (2026-06-12, ENH-007): standard money typing,
+  app-wide.** The 2026-04-30 cents-builder ladder (digits entered
+  at the penny position; decimal key swallowed) was REVERSED on
+  field evidence — volunteers typing "85" got $8.50 ("a random
+  extra 0").  `NoScrollSpinBox`/`NoScrollDoubleSpinBox` lost their
+  custom keyPressEvent + ladder helpers wholesale; typing is
+  native Qt (WYSIWYG, decimal key works, 2-decimal validator,
+  format on commit).  Select-all-on-focus + wheel-safety retained;
+  all call sites/APIs unchanged; int('') crash class structurally
+  gone.  KEYBOARD TRACKING IS OFF (both NoScroll classes):
+  valueChanged fires on COMMIT, because per-keystroke handlers
+  reading .value() mid-edit re-render the editor and break
+  decimal typing (traced on payment rows: "8.5" → $85).  The
+  payment-row ⚡ lock keeps first-keystroke timing via
+  lineEdit().textEdited (user-edits-only signal; programmatic
+  writes never fire it).  Re-pins: test_spinbox_overtype.py
+  retired → tests/test_money_typing_standard.py (incl. real-
+  keystroke smart-field integration); consistency + crash-guard
+  files re-pinned 📌.  Do NOT re-add custom keyPressEvent and do
+  NOT re-enable keyboard tracking — see the HISTORY note in
+  helpers.py and the ENH-007 backlog record.
+- `fam/__init__.py` reports `__version__ = "2.1.0"`. (The notes
+  below this line describe the v2.0.8/v2.0.9 state and are kept
+  for history.)  v2.0.8
   is the first v2.x release reaching the field — no public
   download has happened on any v2.0.x version yet.  It rolls
   up the v2.0.0 / v2.0.1 / v2.0.6 / v2.0.7 / v2.0.8
@@ -348,19 +467,23 @@ When a customer's total match exceeds the cap, all match amounts are
 
 **market_vendors** — junction table (market_id, vendor_id)
 
-**payment_methods** — name, match_percent (0–999), sort_order, denomination, photo_required, is_active
+**payment_methods** — name, match_percent (0–999), sort_order, denomination, photo_required, is_active, is_system (v25), external_matching_accepted + vendor_cashes_original (v38 — the two external-channel toggles; match % and denomination are deliberately shared between booth and external math)
 
 **market_payment_methods** — junction table (market_id, payment_method_id)
 
 **market_days** — market_id, date, status (Open/Closed), opened_by, closed_by
 
-**customer_orders** — market_day_id, customer_label, zip_code, status
+**customer_orders** — market_day_id, customer_label, zip_code, status, settlement_verified_at (v39 — SNAP Settlement Verified working-page mark; operational reconciliation state, never synced/audited/read by money math)
+
+**vendor_day_verifications** (v40) — market_day_id + vendor_id (PK) + verified_at; the Vendor Reimbursement end-of-market verification mark per (vendor × day). Same operational-only posture as settlement_verified_at: never synced/audited/read by money math
+
+**vendor_range_verifications** (v41) — vendor_id + market_id + from_date + to_date (PK) + verified_at; the independent date-range / whole-month verification mark (ENH-006 rev 2 — each time scope keeps its own mark; no cascade between scopes). Same operational-only posture
 
 **transactions** — fam_transaction_id (FAM-{CODE}-YYYYMMDD-NNNN), market_day_id, vendor_id, receipt_total, status, customer_order_id
 
 **payment_line_items** — transaction_id, payment_method_id, method_name_snapshot, match_percent_snapshot, method_amount, match_amount, customer_charged, photo_path, photo_drive_url
 
-**fmnp_entries** — market_day_id, vendor_id, amount, check_count, photo_path, photo_drive_url, status (Active/Deleted), entered_by
+**fmnp_entries** — market_day_id, vendor_id, amount, check_count, photo_path, photo_drive_url, status (Active/Deleted), entered_by; v38 adds payment_method_id + method_name_snapshot + match_percent_snapshot + vendor_cashes_original_snapshot + denomination_snapshot (entry-time config snapshots — table name kept for compat; it now holds ALL external payment entries, routed by payment_method_id; snapshots are immutable by trigger)
 
 **audit_log** — table_name, record_id, action, field_name, old_value, new_value, reason_code, notes, changed_by, app_version, device_id
 
@@ -399,6 +522,8 @@ When a customer's total match exceeds the cap, all match amounts are
 | v21→v22 | Converted all monetary REAL columns to INTEGER cents (markets.daily_match_limit, payment_methods.denomination, transactions.receipt_total, payment_line_items.method_amount/match_amount/customer_charged, fmnp_entries.amount). Uses ROUND() before CAST to avoid float truncation. |
 | v22→v23 | Enforced UNIQUE on vendors.name (matching markets and payment_methods).  Existing duplicate vendor names are auto-renamed with " (2)", " (3)" suffixes on the higher-id rows so vendor IDs and every FK relationship stay intact; the older record keeps the canonical name.  Implemented as a UNIQUE INDEX (`idx_vendors_name_unique`) since SQLite cannot add a UNIQUE column constraint via ALTER TABLE. |
 | v23→v24 | Added `vendor_payment_methods` junction (vendor_id, payment_method_id, UNIQUE).  Permissive backfill: every existing vendor inherits every payment method so no flow breaks on first launch; coordinators tighten eligibility per-vendor via Settings → Vendors → Methods.  Drives the per-row vendor dropdown for denominated payments on the Payment screen, so denominated instruments commit to a single bound vendor's transaction instead of being proportionally spread. |
+| v24→v37 | (This table was not maintained through the v2.0.x cycle — see §0 handoff notes + release notes: v25 is_system/Unallocated Funds, v28/v31/v33 invariant triggers, v29/v30 rewards tables, v32 composite indexes, v34 schema_version UNIQUE, v35 universal SNAP/Cash vendor bindings, v36 customer_forfeit_cents, v37 user_capped.) |
+| v37→v38 | **External Payments (v2.1.0/ENH-002).** `payment_methods` + `external_matching_accepted` / `vendor_cashes_original` (FMNP backfilled 1/1); `fmnp_entries` + `payment_method_id` (FK) + method_name/match_percent/vendor_cashes_original/denomination snapshots — ALL existing rows backfilled to FMNP @ literal 100.0 + cashes-original (preserves payout == face exactly; denomination snapshot NULL — unknowable).  Triggers: `chk_fmnp_entry_method_insert` (method + snapshots NOT NULL on insert; denomination exempt for legacy no-denom FMNP) and `chk_fmnp_entry_snapshot_immutable` (snapshots can never be changed/cleared — corrections are void + re-enter).  Index `idx_fmnp_entries_method`.  Table-existence guarded for synthetic test DBs. |
 
 ---
 
@@ -473,19 +598,63 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 - Double-click protection on confirm button
 - Signals: `payment_confirmed()`, `draft_saved()`
 
-### Screen 3 — FMNP Entry
-- Market day + vendor + amount + check count
-- Multi-photo attachment — dynamic check photo slots based on amount ÷ denomination
-- Scrollable photo slot area for large check volumes (fixed 160px, scrolls when >3 rows)
+### Screen 3 — External Payments Entry (formerly FMNP Entry, v2.1.0)
+- Market day + **payment method dropdown** (external-enabled methods
+  only; FMNP default, first-by-sort_order fallback) + vendor +
+  amount + count
+- The selected method's settings drive everything: denomination
+  (single-step + whole-multiple validation G2), photo requirement,
+  and the payout math (match % + vendor_cashes_original)
+- **Live payout preview + save-time confirmation (G1)**: "FAM will
+  owe <vendor> $X.XX" with face/basis spelled out; large-amount
+  emphasis above the large-receipt threshold (G5); booth+external
+  double-count review prompt (G3) when the same vendor/method/day
+  has booth transactions
+- Entries **snapshot the method's config at save** — settings
+  changes never re-value history; method is immutable on an entry
+  (corrections = void + re-enter); table shows Method + FAM Owes
+  (derived from the row's own snapshots)
+- Multi-photo attachment — dynamic photo slots based on amount ÷ denomination
+- Scrollable photo slot area for large volumes (fixed 160px, scrolls when >3 rows)
 - Photo dedup: within-entry (hard block) + cross-entry (warning with override)
 - Edit/delete with soft-delete (status: Active/Deleted)
+- Class/module names keep their `fmnp` identifiers (FMNPScreen,
+  fam/ui/fmnp_screen.py, fmnp_entries) — rebrand, not rewrite
 
 ### Screen 4 — Admin Adjustments
 - Search/filter transactions, adjust amounts/vendors, void
 - Audit log with reason codes
 
 ### Screen 5 — Reports
-- Summary, Detailed Ledger, Vendor Reimbursement, FAM Match, Transaction Log, Activity Log, Geolocation, Charts, Error Log
+- Summary cards + tabs in order: Vendor Reimbursement, SNAP Settlement, FAM Match, Detailed Ledger, Transaction Log, Activity Log, Generated Rewards, Geolocation, Charts, Error Log
+- v2.1.0: Vendor Reimbursement gains `<Method> (External)` columns
+  (FAM-owed payouts, after FMNP (External), before Customer
+  Forfeit); FAM Match gains `<Method> (External)` rows; Detailed
+  Ledger gains `EXT-` rows; new "External Payments" summary card.
+  Row identity v2: Σ(method) + FAM Match − Customer Forfeit +
+  FMNP_External + Σ(External cols) = Total Due (EP3)
+- v2.1.0 (ENH-003): SNAP Settlement tab — one row per customer
+  order with the order-level SNAP total (Verified first — VR
+  consistency — then Timestamp / Customer / Zip Code / Market /
+  Receipts / SNAP Total), chronological, local-only (CSV export,
+  no Sheets tab). Honors
+  Date + Market filters only. Verified checkbox = working-page
+  tick while matching paper EBT receipts, persisted to
+  customer_orders.settlement_verified_at (v39). Generated Rewards
+  tab honors Date + Market filters too (was unfiltered v1)
+- v2.1.0 (ENH-005): "Market Day" shortcut dropdown in the shared
+  filter bar — selecting a day constrains all reports to that
+  md.id; Market Day and the date range are last-touched-wins
+  alternatives (picking one resets the other)
+- v2.1.0 (ENH-006): Vendor Reimbursement Verified column (first
+  column) — one INDEPENDENT mark per time scope: day marks in
+  vendor_day_verifications (v40), range/month marks in
+  vendor_range_verifications (v41); toggling one scope never
+  cascades into another; inert dash when NO time scope is set;
+  VR sorting off in all modes; zero effect on reimbursement, no
+  sync/audit; CSV carries Verified when scoped. Date dialog has a
+  whole-month quick pick (either/or with custom range; all
+  controls live — interacting with a side selects its mode)
 - All report table columns auto-fit to content and are manually resizable (drag to adjust)
 - CSV export with market code in filenames and identity columns
 
@@ -495,13 +664,14 @@ All CSV exports inject `market_code` and `device_id` as the first two columns.
 - Device Identity display (read-only market code + device ID)
 - Cloud Sync tab — One-way sync to Google Sheets (credentials, spreadsheet ID, sync now)
 - Updates tab — GitHub repo URL, check for updates, download & install, auto-check toggle
-- **FMNP payment method is togglable** as of v1.9.8.  Defaults to inactive on fresh install / Load Defaults.  When inactive it does NOT appear as a payment-row option on the Payment Screen, but the FMNP Entry screen continues to function regardless (it looks up the FMNP method by name without filtering on `is_active`).  Coordinators activate FMNP for the Payment Screen only when their market wants in-app FMNP-as-payment-method (rare — most markets use the FMNP Entry screen exclusively for vendor-matched FMNP).
+- **FMNP payment method is togglable** as of v1.9.8.  Defaults to inactive on fresh install / Load Defaults.  When inactive it does NOT appear as a payment-row option on the Payment Screen, but the External Payments Entry screen continues to function regardless (`is_active` is the BOOTH gate; the external portal lists external-enabled methods without filtering on it).  Coordinators activate FMNP for the Payment Screen only when their market wants in-app FMNP-as-payment-method (rare — most markets use the entry screen exclusively for vendor-matched FMNP).
+- **External Matching (v2.1.0)** — the Edit Payment Method dialog has an External section: "Accept external matching" (method appears on the External Payments Entry screen) + "Vendor cashes the original instrument" (FAM owes match only — the FMNP model), with a live per-instrument payout preview.  G4 config linter at OK: external-enabled REQUIRES a denomination (hard, also enforced at the model layer); cashes-original @ 0% match warns (FAM would owe $0).  The methods table shows an External column (⚠ when a method is both booth-active and external-enabled — G3 config warning).  Photo requirements are configurable for any external-enabled method (was FMNP-only).
 
 ### Screen 7 — Help
 - **Four tabs**, in order: **Walkthrough** (default — animated training overview), **Browse** (categorized articles + live search), **Troubleshooting** (symptom-based decision-tree flows), **System Status** (live diagnostic snapshot with **Copy Diagnostic Info** button)
 - Walkthrough auto-plays on first activation per session.  Each of the 5 stages loops its animation in place; the volunteer clicks **Next** when ready (the button pulses gold after the first iteration finishes).  Pause / Prev / Restart / Skip Tour controls.
 - Walkthrough scenes are composed from `SceneCard` widgets containing `FlatIcon` pictograms — 18 hand-painted icons in `fam/ui/help_icons.py` (Person, VendorStall, Receipt, Laptop, Card, Check, Cash, Runner, Box, Stamp, Cloud, File, Envelope, Manager, Clipboard, Table, Arrow, Checkmark).  All vector via QPainter — crisp at any DPI, FAM brand colors, no external dependencies.
-- Content lives in `fam/help/content.py` as structured Python data (Categories, Articles, TroubleshootingFlows).  v1.9.9 ships **52 articles across 8 categories** and **10 troubleshooting flows**.
+- Content lives in `fam/help/content.py` as structured Python data (Categories, Articles, TroubleshootingFlows).  v2.1.0 ships **79 articles across 8 categories** (incl. the three new external-payments articles — `external-payments-overview`, `external-payout-math`, `external-fix-wrong-settings` — and the ENH-003 `snap-settlement` article) plus troubleshooting flows.
 - Article bodies are Markdown rendered to HTML by Qt's `QTextBrowser` via a small in-house renderer in `fam/ui/help_screen.py`
 - Search ranks title hits over body hits via `fam/help/search.py`
 - System Status pulls from `fam/help/system_status.py`'s `collect_status()` — never raises, safe to call any time.  Reports app version, sync state, disk usage (DB / photos / backups / log / ledger backup), record counts (transactions, FMNP, audit log).  Copy Diagnostic Info button serializes the snapshot for paste into a coordinator email.
@@ -694,7 +864,7 @@ Optional one-way sync from local SQLite to a shared Google Spreadsheet + Google 
 | Module | Purpose |
 |--------|---------|
 | `sync/base.py` | `SyncResult` dataclass |
-| `sync/data_collector.py` | Queries DB for summary, vendor, payment, transaction, FMNP data + photo URLs. FMNP entries pull from both fmnp_entries table and payment_line_items (FMNP method), expanding into per-check rows with individual photo links and Transaction IDs |
+| `sync/data_collector.py` | Queries DB for summary, vendor, payment, transaction, external-payment data + photo URLs. v2.1.0 (revised R1): ALL external entries — FMNP included — feed the required `External Payment Entries` tab (one self-explanatory row per entry: face, Match %/cashes-original snapshots, derived FAM Owes Vendor, plain-English Reimbursement Basis, voided rows flagged Voided, photo URLs joined in one cell; key: market_code/device_id/Entry ID) and per-method `<Method> (External)` Vendor Reimbursement columns (FMNP (External) feed unchanged). The deprecated `FMNP Entries` collector returns [] on purpose — the empty upsert drains the device's rows (per-check splitting and booth-FMNP PAY- rows retired; booth FMNP remains in Detailed Ledger) |
 | `sync/gsheets.py` | Google Sheets backend via `gspread` (service account auth) |
 | `sync/drive.py` | Google Drive photo upload via REST API (uses `google-auth` AuthorizedSession) |
 | `sync/manager.py` | `SyncManager` — orchestrates data collection + backend calls + agent tracker |
@@ -828,7 +998,7 @@ aggregates them differently by design:
 |-------|-------------------|---------------|-------------|
 | **DB queries** | `transactions` + `payment_line_items` | `fmnp_entries` | Separate tables, never mixed |
 | **Sync (Market Day Summary)** | receipt_total, customer_paid, fam_match | Not included | Transaction-based only |
-| **Sync (FMNP Entries tab)** | Not included | Full FMNP detail | Separate sync sheet |
+| **Sync (External Payment Entries tab)** | Not included | One audit row per entry (ALL methods incl. FMNP since R1; the deprecated FMNP Entries tab drains to empty) | Separate sync sheet |
 | **Ledger backup** | Per-transaction lines | FMNP section within each day | Combined in subtotals and grand totals |
 | **Reports screen** | FAM Match card | FMNP Match card (separate) | Shown as distinct summary cards |
 

@@ -12,7 +12,7 @@ from .connection import get_connection, get_db_path
 
 logger = logging.getLogger('fam.database.schema')
 
-CURRENT_SCHEMA_VERSION = 37
+CURRENT_SCHEMA_VERSION = 41
 
 # v2.0.1: number of versioned pre-migration .bak files to retain
 # alongside the rolling runtime backups in ``backups/``.
@@ -113,7 +113,19 @@ CREATE TABLE IF NOT EXISTS payment_methods (
     sort_order INTEGER DEFAULT 0,
     denomination INTEGER DEFAULT NULL,
     photo_required TEXT DEFAULT NULL,
-    is_system BOOLEAN DEFAULT 0
+    is_system BOOLEAN DEFAULT 0,
+    -- v2.1.0 (schema v38, ENH-002): external-matching channel
+    -- toggles.  ``external_matching_accepted`` gates whether the
+    -- method appears in the External Payments Entry portal;
+    -- ``vendor_cashes_original`` means the vendor retains and
+    -- cashes the physical instrument with the issuing program, so
+    -- FAM owes only the MATCH component (FMNP model).  Match % and
+    -- denomination are deliberately NOT duplicated here — external
+    -- payments introduce ZERO new money fields; both are inherited
+    -- from the columns above (the doubling policy is a property of
+    -- the method, not the channel).
+    external_matching_accepted INTEGER NOT NULL DEFAULT 0,
+    vendor_cashes_original INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS market_days (
@@ -135,7 +147,52 @@ CREATE TABLE IF NOT EXISTS customer_orders (
     zip_code TEXT,
     status TEXT DEFAULT 'Draft',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    -- v2.1.0 (schema v39, ENH-003): SNAP Settlement working-page
+    -- mark.  Set when the coordinator ticks the Verified checkbox
+    -- after matching this order's EBT terminal paper receipt;
+    -- NULL = not yet verified.  Operational reconciliation state,
+    -- NOT financial data: never synced, never audited, never read
+    -- by the engine or any money report.
+    settlement_verified_at TEXT,
     FOREIGN KEY (market_day_id) REFERENCES market_days(id)
+);
+
+-- v2.1.0 (schema v40, ENH-006): Vendor Reimbursement end-of-market
+-- verification marks.  One row per (market day × vendor) the
+-- manager has ticked off while confirming receipt totals with the
+-- vendor in person.  Stored as the atomic per-day FACT (never per
+-- filter window — date-span views derive from these or disable the
+-- checkbox).  Operational reconciliation state, NOT financial
+-- data: never synced, never audited, never read by the engine or
+-- any money report.
+CREATE TABLE IF NOT EXISTS vendor_day_verifications (
+    market_day_id INTEGER NOT NULL,
+    vendor_id INTEGER NOT NULL,
+    verified_at TEXT NOT NULL,
+    PRIMARY KEY (market_day_id, vendor_id),
+    FOREIGN KEY (market_day_id) REFERENCES market_days(id),
+    FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+);
+
+-- v2.1.0 (schema v41, ENH-006 rev 2): date-range / whole-month
+-- verification marks for the Vendor Reimbursement report.  EVERY
+-- time scope is its own INDEPENDENT checkbox (Sean, 2026-06-12):
+-- a month mark says "I reconciled this vendor's month total", a
+-- day mark says "I confirmed this day with the vendor" — neither
+-- implies, sets, or clears the other.  A whole-month pick is just
+-- from_date=1st / to_date=last, so the same month is always the
+-- same key.  Only ticked combinations are stored.  Same
+-- operational-only posture as vendor_day_verifications: never
+-- synced, never audited, never read by money math.
+CREATE TABLE IF NOT EXISTS vendor_range_verifications (
+    vendor_id INTEGER NOT NULL,
+    market_id INTEGER NOT NULL,
+    from_date TEXT NOT NULL,
+    to_date TEXT NOT NULL,
+    verified_at TEXT NOT NULL,
+    PRIMARY KEY (vendor_id, market_id, from_date, to_date),
+    FOREIGN KEY (vendor_id) REFERENCES vendors(id),
+    FOREIGN KEY (market_id) REFERENCES markets(id)
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -210,6 +267,32 @@ CREATE TABLE IF NOT EXISTS fmnp_entries (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT,
     status TEXT DEFAULT 'Active',
+    -- v2.1.0 (schema v38, ENH-002): the table now holds external
+    -- payment entries for ANY external-enabled method; the name
+    -- ``fmnp_entries`` is kept (20+ references, triggers, indexes —
+    -- renaming is all risk, no value).  ``payment_method_id`` routes
+    -- each entry (FMNP method → frozen ``FMNP Entries`` sheet tab;
+    -- everything else → ``External Payment Entries``).
+    --
+    -- The *_snapshot columns capture the method's config AT ENTRY
+    -- TIME (same discipline as payment_line_items.method_name_
+    -- snapshot / match_percent_snapshot): a later settings change
+    -- must never silently re-value historical entries.  Payout is
+    -- NEVER stored — always derived from (amount, match_percent_
+    -- snapshot, vendor_cashes_original_snapshot) via
+    -- fam/utils/external_payout.py, so there is no second copy to
+    -- drift (invariant EP1).
+    --
+    -- ``denomination_snapshot`` is NULLABLE: pre-v38 rows backfill
+    -- NULL (historical value unknowable) and legacy DBs can carry
+    -- FMNP with no denomination at all (the v7→v8 migration insert
+    -- set none) — entries must keep working there exactly as today.
+    -- EP2 (whole-multiple audit) exempts NULL snapshots.
+    payment_method_id INTEGER REFERENCES payment_methods(id),
+    method_name_snapshot TEXT,
+    match_percent_snapshot REAL,
+    vendor_cashes_original_snapshot INTEGER,
+    denomination_snapshot INTEGER,
     FOREIGN KEY (market_day_id) REFERENCES market_days(id),
     FOREIGN KEY (vendor_id) REFERENCES vendors(id)
 );
@@ -1819,6 +1902,308 @@ def _migrate_v36_to_v37(conn):
         "rows)")
 
 
+def _migrate_v37_to_v38(conn):
+    """External Payments Entry (v2.1.0 / ENH-002) schema changes.
+
+    1. ``payment_methods`` gains the two external-matching channel
+       toggles (``external_matching_accepted``,
+       ``vendor_cashes_original``), both defaulting to 0; the FMNP
+       method is backfilled to (1, 1) — preserving the current
+       behavior where FMNP is the one externally-collected method
+       and FAM owes the match component only (the vendor cashes the
+       physical check with the program).
+    2. ``fmnp_entries`` gains ``payment_method_id`` plus the four
+       entry-time config snapshot columns.  ALL existing rows are
+       backfilled to the FMNP method with ``match_percent_snapshot
+       = 100.0`` (the LITERAL, **not** the method's current
+       setting: today's code pays face value regardless of the
+       configured match %, and only 100% × cashes-original
+       reproduces ``payout == face`` byte-exactly for historical
+       rows — pinned by the golden regression test) and
+       ``vendor_cashes_original_snapshot = 1``.
+       ``denomination_snapshot`` backfills NULL — the historical
+       denomination is unknowable, and legacy DBs (v7→v8-inserted
+       FMNP) may carry no denomination at all.
+    3. NOT-NULL enforcement via BEFORE INSERT trigger (SQLite can't
+       ALTER-ADD a NOT NULL column with an FK): every NEW entry must
+       carry the method id + snapshots.  ``denomination_snapshot``
+       is deliberately exempt (see #2).  Safe because only ≥v2.1.0
+       builds can write a v38 DB — older builds refuse to open it
+       (downgrade guard in ``initialize_database``).
+    4. Snapshot-immutability trigger: once set, the method id and
+       config snapshots can never be changed or cleared (NULL→value
+       backfill-style repairs stay allowed).  Corrections are
+       void + re-enter by design; the trigger enforces the snapshot
+       discipline at write time like the other invariant triggers.
+    5. ``idx_fmnp_entries_method`` — every collector now routes by
+       ``payment_method_id``.
+
+    Defensive path: if the FMNP method row is missing entirely
+    (ancient DB where the v7→v8 insert failed) AND fmnp_entries
+    rows exist, re-insert FMNP (mirroring ``_migrate_v7_to_v8``,
+    with the current seed shape) so the backfill has a target.
+
+    Idempotent re-run safe: column adds are PRAGMA-guarded, the
+    backfills are no-ops once applied, triggers/index use IF NOT
+    EXISTS.  Trigger/index creation runs even when the columns
+    already exist (fresh installs get the columns via TABLES_SQL
+    but still need the triggers from this function).  Missing
+    tables are skipped entirely (same pattern as v36→v37) — only
+    synthetic partial-schema DBs in tests hit that path; every
+    real DB has had both tables since v1.
+    """
+    pm_exists = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='payment_methods'"
+    ).fetchone() is not None
+    fe_exists = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='fmnp_entries'"
+    ).fetchone() is not None
+    if not pm_exists or not fe_exists:
+        logger.info(
+            "Migration v37->v38: table(s) not present yet "
+            "(payment_methods=%s, fmnp_entries=%s); skipping "
+            "missing parts (fresh install path creates the columns "
+            "via CREATE TABLE)", pm_exists, fe_exists)
+
+    # ── 1. payment_methods channel toggles ────────────────────
+    if pm_exists:
+        pm_cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info(payment_methods)").fetchall()}
+        if 'external_matching_accepted' not in pm_cols:
+            conn.execute(
+                "ALTER TABLE payment_methods ADD COLUMN "
+                "external_matching_accepted INTEGER NOT NULL DEFAULT 0")
+        if 'vendor_cashes_original' not in pm_cols:
+            conn.execute(
+                "ALTER TABLE payment_methods ADD COLUMN "
+                "vendor_cashes_original INTEGER NOT NULL DEFAULT 0")
+        # Backfill the FMNP method's channel toggles (preserves the
+        # current behavior: FMNP is THE externally-collected method
+        # and the vendor cashes the original check).
+        conn.execute(
+            "UPDATE payment_methods"
+            " SET external_matching_accepted = 1,"
+            " vendor_cashes_original = 1 WHERE name = 'FMNP'")
+
+    if not (pm_exists and fe_exists):
+        conn.commit()
+        return
+
+    # ── 2. fmnp_entries method id + snapshots ─────────────────
+    fe_cols = {row[1] for row in conn.execute(
+        "PRAGMA table_info(fmnp_entries)").fetchall()}
+    fe_added = []
+    for col, decl in (
+            ('payment_method_id',
+             'INTEGER REFERENCES payment_methods(id)'),
+            ('method_name_snapshot', 'TEXT'),
+            ('match_percent_snapshot', 'REAL'),
+            ('vendor_cashes_original_snapshot', 'INTEGER'),
+            ('denomination_snapshot', 'INTEGER')):
+        if col not in fe_cols:
+            conn.execute(
+                f"ALTER TABLE fmnp_entries ADD COLUMN {col} {decl}")
+            fe_added.append(col)
+
+    # ── Defensive: ensure the FMNP method row exists before the
+    # backfills target it.  Name-match is safe: FMNP cannot be
+    # renamed (Settings locks the name field for it).
+    fmnp_row = conn.execute(
+        "SELECT id FROM payment_methods WHERE name = 'FMNP'"
+    ).fetchone()
+    if fmnp_row is None:
+        has_entries = conn.execute(
+            "SELECT 1 FROM fmnp_entries LIMIT 1").fetchone()
+        if has_entries:
+            logger.warning(
+                "Migration v37->v38: FMNP payment method missing "
+                "but fmnp_entries rows exist — re-inserting FMNP "
+                "(v7->v8 style) so the backfill has a target")
+            conn.execute(
+                "INSERT INTO payment_methods (name, match_percent,"
+                " is_active, sort_order, denomination,"
+                " photo_required, external_matching_accepted,"
+                " vendor_cashes_original)"
+                " VALUES ('FMNP', 100.0, 0, 2, 500, 'Optional',"
+                " 1, 1)")
+        else:
+            logger.warning(
+                "Migration v37->v38: FMNP payment method missing "
+                "(no fmnp_entries rows — nothing to backfill; "
+                "coordinator can configure external matching from "
+                "Settings)")
+
+    # ── Backfill existing entries to the FMNP method ──────────
+    # match_percent_snapshot = literal 100.0 (NOT the live
+    # setting) — see docstring #2.
+    conn.execute("""
+        UPDATE fmnp_entries SET
+            payment_method_id = (SELECT id FROM payment_methods
+                                 WHERE name = 'FMNP'),
+            method_name_snapshot = 'FMNP',
+            match_percent_snapshot = 100.0,
+            vendor_cashes_original_snapshot = 1
+        WHERE payment_method_id IS NULL
+    """)
+
+    # ── 3/4/5. Triggers + index (always, IF NOT EXISTS) ───────
+    conn.executescript("""
+    -- New external entries must carry method id + config snapshots
+    -- (denomination_snapshot exempt — legacy no-denom FMNP DBs).
+    CREATE TRIGGER IF NOT EXISTS chk_fmnp_entry_method_insert
+    BEFORE INSERT ON fmnp_entries
+    BEGIN
+        SELECT RAISE(ABORT,
+            'external entry requires payment_method_id and config snapshots')
+        WHERE NEW.payment_method_id IS NULL
+           OR NEW.method_name_snapshot IS NULL
+           OR NEW.match_percent_snapshot IS NULL
+           OR NEW.vendor_cashes_original_snapshot IS NULL;
+    END;
+
+    -- Snapshot discipline at write time: once set, never changed
+    -- or cleared.  NULL -> value (backfill-style repair) allowed.
+    -- Wrong-config entries are fixed by void + re-enter, never by
+    -- editing the snapshot.
+    CREATE TRIGGER IF NOT EXISTS chk_fmnp_entry_snapshot_immutable
+    BEFORE UPDATE OF payment_method_id, method_name_snapshot,
+        match_percent_snapshot, vendor_cashes_original_snapshot,
+        denomination_snapshot ON fmnp_entries
+    BEGIN
+        SELECT RAISE(ABORT,
+            'external entry method/config snapshots are immutable - void and re-enter')
+        WHERE (OLD.payment_method_id IS NOT NULL
+               AND NEW.payment_method_id IS NOT OLD.payment_method_id)
+           OR (OLD.method_name_snapshot IS NOT NULL
+               AND NEW.method_name_snapshot IS NOT OLD.method_name_snapshot)
+           OR (OLD.match_percent_snapshot IS NOT NULL
+               AND NEW.match_percent_snapshot IS NOT OLD.match_percent_snapshot)
+           OR (OLD.vendor_cashes_original_snapshot IS NOT NULL
+               AND NEW.vendor_cashes_original_snapshot
+                   IS NOT OLD.vendor_cashes_original_snapshot)
+           OR (OLD.denomination_snapshot IS NOT NULL
+               AND NEW.denomination_snapshot IS NOT OLD.denomination_snapshot);
+    END;
+
+    CREATE INDEX IF NOT EXISTS idx_fmnp_entries_method
+        ON fmnp_entries(payment_method_id);
+    """)
+
+    conn.commit()
+    logger.info(
+        "Migration v37->v38 complete: external-matching toggles on "
+        "payment_methods (FMNP backfilled ON), fmnp_entries method "
+        "id + config snapshots (%s column(s) added, existing rows "
+        "backfilled to FMNP @ 100%%/cashes-original), NOT-NULL + "
+        "immutability triggers, method index",
+        len(fe_added))
+
+
+def _migrate_v38_to_v39(conn):
+    """SNAP Settlement Verified working-page mark (v2.1.0 / ENH-003).
+
+    ``customer_orders`` gains ``settlement_verified_at TEXT`` (NULL =
+    not verified).  Set/cleared by the Verified checkbox on the SNAP
+    Settlement report tab as the coordinator matches the EBT
+    terminal's paper receipts.  Operational reconciliation state,
+    not financial data: no backfill needed, no trigger, no sync, no
+    audit rows, nothing reads it for money math.
+
+    Idempotent re-run safe: PRAGMA-guarded column add; missing table
+    skipped entirely (synthetic partial-schema test DBs only — every
+    real DB has customer_orders).
+    """
+    co_exists = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='customer_orders'"
+    ).fetchone() is not None
+    if not co_exists:
+        logger.info(
+            "Migration v38->v39: customer_orders not present; "
+            "skipping (fresh install path creates the column via "
+            "CREATE TABLE)")
+        return
+
+    co_cols = {row[1] for row in conn.execute(
+        "PRAGMA table_info(customer_orders)").fetchall()}
+    if 'settlement_verified_at' in co_cols:
+        logger.info(
+            "Migration v38->v39: settlement_verified_at column "
+            "already present; skipping (idempotent re-run)")
+        return
+
+    conn.execute(
+        "ALTER TABLE customer_orders ADD COLUMN "
+        "settlement_verified_at TEXT")
+    conn.commit()
+    logger.info(
+        "Migration v38->v39 complete: customer_orders."
+        "settlement_verified_at added (SNAP Settlement Verified "
+        "working-page mark)")
+
+
+def _migrate_v39_to_v40(conn):
+    """Vendor end-of-market verification marks (v2.1.0 / ENH-006).
+
+    New table ``vendor_day_verifications`` — one row per
+    (market day × vendor) the manager has ticked off while
+    confirming receipt totals with the vendor in person, on the
+    Vendor Reimbursement report's Verified column (active only when
+    a specific Market Day is selected).  Stored per-day FACT, never
+    per filter window.  Operational reconciliation state, not
+    financial data: no backfill, no trigger, no sync, no audit
+    rows, nothing reads it for money math.
+
+    Idempotent re-run safe: CREATE TABLE IF NOT EXISTS.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS vendor_day_verifications (
+            market_day_id INTEGER NOT NULL,
+            vendor_id INTEGER NOT NULL,
+            verified_at TEXT NOT NULL,
+            PRIMARY KEY (market_day_id, vendor_id),
+            FOREIGN KEY (market_day_id) REFERENCES market_days(id),
+            FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+        )""")
+    conn.commit()
+    logger.info(
+        "Migration v39->v40 complete: vendor_day_verifications "
+        "table (Vendor Reimbursement end-of-market verification "
+        "marks)")
+
+
+def _migrate_v40_to_v41(conn):
+    """Independent date-range/month verification marks
+    (v2.1.0 / ENH-006 rev 2).
+
+    New table ``vendor_range_verifications`` — every time scope is
+    its own independent checkbox on the Vendor Reimbursement
+    report (day marks live in ``vendor_day_verifications``; range
+    and whole-month marks live here, keyed vendor × market ×
+    from × to).  Toggling one scope never cascades into another.
+    Operational reconciliation state, not financial data.
+
+    Idempotent re-run safe: CREATE TABLE IF NOT EXISTS.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS vendor_range_verifications (
+            vendor_id INTEGER NOT NULL,
+            market_id INTEGER NOT NULL,
+            from_date TEXT NOT NULL,
+            to_date TEXT NOT NULL,
+            verified_at TEXT NOT NULL,
+            PRIMARY KEY (vendor_id, market_id, from_date, to_date),
+            FOREIGN KEY (vendor_id) REFERENCES vendors(id),
+            FOREIGN KEY (market_id) REFERENCES markets(id)
+        )""")
+    conn.commit()
+    logger.info(
+        "Migration v40->v41 complete: vendor_range_verifications "
+        "table (independent range/month verification marks)")
+
+
 def initialize_database():
     """Create all tables and set schema version if needed."""
     conn = get_connection()
@@ -1891,6 +2276,22 @@ def initialize_database():
         _migrate_v35_to_v36(conn)
         # v36→v37 user_capped column.  Same idempotency rationale.
         _migrate_v36_to_v37(conn)
+        # v37→v38 external-payments columns are in TABLES_SQL for
+        # fresh installs, but the FMNP toggle backfill, the
+        # NOT-NULL/immutability triggers, and the method index only
+        # live in the migration — run it so fresh installs are
+        # protected from the first write.  Idempotent — see
+        # _migrate_v37_to_v38.
+        _migrate_v37_to_v38(conn)
+        # v38→v39 settlement_verified_at column.  No-op on fresh
+        # install (column is in the CREATE TABLE definition above);
+        # idempotent re-runs are safe.
+        _migrate_v38_to_v39(conn)
+        # v39→v40 vendor_day_verifications table.  No-op on fresh
+        # install (table is in TABLES_SQL above); idempotent.
+        _migrate_v39_to_v40(conn)
+        # v40→v41 vendor_range_verifications table.  Same.
+        _migrate_v40_to_v41(conn)
         # ``INSERT OR IGNORE`` is now constraint-protected by the
         # UNIQUE INDEX created above.  On a true fresh install the
         # table is empty so the insert always succeeds; on a
@@ -2092,6 +2493,22 @@ def initialize_database():
     if current_version < 37:
         _migrate_v36_to_v37(conn)
         current_version = 37
+
+    if current_version < 38:
+        _migrate_v37_to_v38(conn)
+        current_version = 38
+
+    if current_version < 39:
+        _migrate_v38_to_v39(conn)
+        current_version = 39
+
+    if current_version < 40:
+        _migrate_v39_to_v40(conn)
+        current_version = 40
+
+    if current_version < 41:
+        _migrate_v40_to_v41(conn)
+        current_version = 41
 
     # Record the final version (avoid duplicate if already at this version).
     # As of v34 there is a UNIQUE INDEX on schema_version.version, so this

@@ -120,7 +120,16 @@ def collect_sync_data(market_day_id: Optional[int] = None) -> dict[str, list[dic
         ('Transaction Log',      lambda c, mid: _collect_transaction_log(mid)),
         ('Activity Log',         lambda c, mid: _collect_activity_log(c, mid)),
         ('Geolocation',          lambda c, mid: _collect_geolocation(c, mid)),
+        # DEPRECATED tab, kept registered ON PURPOSE (R1,
+        # 2026-06-11): the collector returns [] so the empty upsert
+        # drains this device's rows from the shared sheet; the
+        # coordinator deletes the tab once every market is on
+        # v2.1.0+.  See _collect_fmnp_entries docstring.
         ('FMNP Entries',         lambda c, mid: _collect_fmnp_entries(c, mid)),
+        # v2.1.0 (ENH-002): ALL external entries — FMNP, Food RX,
+        # Food Bucks, … — one self-explanatory row per entry.
+        ('External Payment Entries',
+         lambda c, mid: _collect_external_payment_entries(c, mid)),
         ('Market Day Summary',   lambda c, mid: _collect_market_day_summary(c, mid)),
         ('Generated Rewards',    lambda c, mid: _collect_generated_rewards(c, mid)),
     ]
@@ -200,6 +209,46 @@ def _format_year_month_label(year_month: str) -> str:
         return datetime.strptime(year_month[:7], '%Y-%m').strftime('%B %Y')
     except ValueError:
         return ''
+
+
+def _fmnp_method_id(conn) -> int:
+    """The FMNP payment method's id — the tab-routing key (v2.1.0).
+
+    Entries with this method id feed the FROZEN ``FMNP Entries``
+    tab and the ``FMNP (External)`` Vendor Reimbursement column,
+    byte-identically to pre-v2.1.0; every other method's entries
+    feed the new ``External Payment Entries`` tab and per-method
+    ``<Method> (External)`` columns.  Routing is by ID, never by
+    name; display uses ``method_name_snapshot``.  Returns -1 when
+    no FMNP method exists (no row can match — the v38 migration
+    re-inserts FMNP whenever entries exist, so this is a fresh-DB
+    edge only).
+    """
+    row = conn.execute(
+        "SELECT id FROM payment_methods WHERE name = 'FMNP'"
+    ).fetchone()
+    return row['id'] if row else -1
+
+
+def _external_payout_fields(amount_cents, match_percent_snapshot,
+                            vendor_cashes_original_snapshot):
+    """(payout_cents, basis_str) derived from an entry's SNAPSHOTS.
+
+    Single call site for EP1 discipline in this module: payout is
+    never stored and never read from current settings.  NULL match
+    snapshots (impossible post-backfill, defensive only) fall back
+    to the FMNP-identity config so the result equals face value.
+    """
+    from fam.utils.external_payout import (
+        compute_external_payout_cents, reimbursement_basis)
+    match_pct = (match_percent_snapshot
+                 if match_percent_snapshot is not None else 100.0)
+    cashes = bool(vendor_cashes_original_snapshot
+                  if vendor_cashes_original_snapshot is not None
+                  else 1)
+    return (compute_external_payout_cents(amount_cents, match_pct,
+                                          cashes),
+            reimbursement_basis(amount_cents, match_pct, cashes))
 
 
 def _build_vendor_address(row) -> str:
@@ -405,14 +454,22 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
             '_fam_match_cents': fam_match_by_vendor.get(key, 0),
             '_customer_forfeit_cents': customer_forfeit_by_vendor.get(key, 0),
             '_fmnp_external_cents': 0,
+            '_external_method_cents': {},
             '_method_cents': dict(method_cents_by_vendor.get(key, {})),
             'Check Payable To': r['check_payable_to'],
             'Address': _build_vendor_address(r),
         }
         vendor_dict_cents[key] = row
 
-    # Merge external FMNP entries (cents-only)
-    fmnp_where = f"WHERE fe.market_day_id IN ({placeholders}) AND fe.status = 'Active'"
+    # Merge external FMNP entries (cents-only).
+    # v2.1.0 (ENH-002): the FMNP-method filter keeps this FROZEN
+    # column fed by FMNP entries only — non-FMNP external entries
+    # merge separately below into their own <Method> (External)
+    # columns.  Output-identical for all pre-v2.1.0 data.
+    fmnp_method_id = _fmnp_method_id(conn)
+    fmnp_where = (f"WHERE fe.market_day_id IN ({placeholders}) "
+                  f"AND fe.status = 'Active' "
+                  f"AND fe.payment_method_id = ?")
     fmnp_rows = conn.execute(f"""
         SELECT v.name AS vendor,
                m.name AS market_name,
@@ -427,7 +484,7 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         JOIN markets m ON md.market_id = m.id
         {fmnp_where}
         GROUP BY m.id, v.id, v.name, year_month
-    """, params).fetchall()
+    """, params + [fmnp_method_id]).fetchall()
 
     for r in fmnp_rows:
         ym = r['year_month'] or ''
@@ -460,10 +517,77 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
                 '_fam_match_cents': 0,
                 '_customer_forfeit_cents': 0,
                 '_fmnp_external_cents': r['fmnp_total'],
+                '_external_method_cents': {},
                 '_method_cents': {},
                 'Check Payable To': r['check_payable_to'],
                 'Address': _build_vendor_address(r),
             }
+
+    # ── Merge non-FMNP external payment entries (v2.1.0/ENH-002) ──
+    # Per-ENTRY payout derivation (rounding is per entry — EP1;
+    # summing faces and applying match % to the sum could differ by
+    # a cent), accumulated per (market, vendor, year-month, method).
+    # Each method becomes a ``<Method> (External)`` column carrying
+    # the FAM-OWED amount (what the reimbursement check needs), and
+    # payouts add into Total Due to Vendor.  Row identity v2 (EP3):
+    #   Σ(method-cols) + FAM Match - Customer Forfeit
+    #     + FMNP (External) + Σ <Method> (External)
+    #     = Total Due to Vendor
+    # Old devices write blanks into these columns on their own rows
+    # only (gsheets row.get(header, '') semantics) — which is also
+    # semantically correct, since they cannot produce such entries.
+    ext_entry_rows = conn.execute(f"""
+        SELECT v.name AS vendor,
+               m.name AS market_name,
+               strftime('%Y-%m', md.date) AS year_month,
+               md.date AS md_date,
+               {cpt_expr} AS check_payable_to,
+               fe.amount, fe.method_name_snapshot,
+               fe.match_percent_snapshot,
+               fe.vendor_cashes_original_snapshot
+               {addr_cols}
+        FROM fmnp_entries fe
+        JOIN vendors v ON fe.vendor_id = v.id
+        JOIN market_days md ON fe.market_day_id = md.id
+        JOIN markets m ON md.market_id = m.id
+        WHERE fe.market_day_id IN ({placeholders})
+          AND fe.status = 'Active'
+          AND fe.payment_method_id != ?
+    """, params + [fmnp_method_id]).fetchall()
+
+    all_external_cols: set[str] = set()
+    for r in ext_entry_rows:
+        ym = r['year_month'] or ''
+        key = (r['market_name'], r['vendor'], ym)
+        payout_cents, _basis = _external_payout_fields(
+            r['amount'], r['match_percent_snapshot'],
+            r['vendor_cashes_original_snapshot'])
+        col = f"{r['method_name_snapshot'] or 'Unknown'} (External)"
+        all_external_cols.add(col)
+        if key not in vendor_dict_cents:
+            vendor_dict_cents[key] = {
+                'Market Name': r['market_name'],
+                'Vendor': r['vendor'],
+                'Month': _format_year_month_label(ym),
+                'Year-Month': ym,
+                'Date(s)': '',
+                '_total_due_cents': 0,
+                '_fam_match_cents': 0,
+                '_customer_forfeit_cents': 0,
+                '_fmnp_external_cents': 0,
+                '_external_method_cents': {},
+                '_method_cents': {},
+                'Check Payable To': r['check_payable_to'],
+                'Address': _build_vendor_address(r),
+            }
+        row = vendor_dict_cents[key]
+        ext = row['_external_method_cents']
+        ext[col] = ext.get(col, 0) + payout_cents
+        row['_total_due_cents'] += payout_cents
+        existing = (set(row['Date(s)'].split(','))
+                    if row['Date(s)'] else set())
+        all_dates = (existing | {r['md_date'] or ''}) - {''}
+        row['Date(s)'] = ','.join(sorted(all_dates))
 
     # Final pass — emit dollar values from the integer-cents
     # accumulators.  ``cents_to_dollars`` is called exactly once
@@ -483,6 +607,16 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         for m in all_methods:
             out_row[m] = cents_to_dollars(rc['_method_cents'].get(m, 0))
         out_row['FMNP (External)'] = cents_to_dollars(rc['_fmnp_external_cents'])
+        # v2.1.0 (ENH-002): per-method external columns, FAM-owed
+        # amounts, emitted for every row (0.0 when none) so the
+        # column set is consistent across the batch.  Placed after
+        # FMNP (External), before Customer Forfeit.  NOTE: on a
+        # pre-existing spreadsheet the auto-widening appends new
+        # headers at the END of the header row instead (writes are
+        # by header name, so manual column reordering is safe).
+        for ext_col in sorted(all_external_cols):
+            out_row[ext_col] = cents_to_dollars(
+                rc['_external_method_cents'].get(ext_col, 0))
         # v2.0.7: Customer Forfeit appears AFTER the per-method
         # columns and FMNP (External) so the row reads naturally
         # as (vendor reimbursement breakdown) → (customer-side
@@ -536,12 +670,15 @@ def _collect_fam_match(conn, md_id: int) -> list[dict]:
                              if is_absorbed else 0),
         })
 
-    # Add external FMNP total
+    # Add external FMNP total.  v2.1.0: FMNP-method filter keeps
+    # this FROZEN row's feed identical; non-FMNP external methods
+    # get their own rows below.
     fmnp_total = conn.execute("""
         SELECT COALESCE(SUM(fe.amount), 0) AS total
         FROM fmnp_entries fe
         WHERE fe.market_day_id = ? AND fe.status = 'Active'
-    """, [md_id]).fetchone()['total']
+          AND fe.payment_method_id = ?
+    """, [md_id, _fmnp_method_id(conn)]).fetchone()['total']
 
     if fmnp_total > 0:
         result.append({
@@ -549,6 +686,48 @@ def _collect_fam_match(conn, md_id: int) -> list[dict]:
             'Date': md_date,
             'Total Allocated': cents_to_dollars(fmnp_total),
             'Total FAM Match': 0,
+            'FAM Absorbed': 0,
+        })
+
+    # v2.1.0 (ENH-002): one ``<Method> (External)`` row per non-FMNP
+    # external method.  Total Allocated = Σ derived payouts (what
+    # FAM pays out); Total FAM Match = Σ match components.  Additive
+    # rows on this tab — keyed by Payment Method + Date, so they
+    # never collide with existing rows and old devices are
+    # unaffected.
+    from fam.utils.external_payout import match_component_cents
+    ext_rows = conn.execute("""
+        SELECT fe.amount, fe.method_name_snapshot,
+               fe.match_percent_snapshot,
+               fe.vendor_cashes_original_snapshot
+        FROM fmnp_entries fe
+        WHERE fe.market_day_id = ? AND fe.status = 'Active'
+          AND fe.payment_method_id != ?
+    """, [md_id, _fmnp_method_id(conn)]).fetchall()
+
+    ext_totals: dict[str, dict[str, int]] = {}
+    for r in ext_rows:
+        payout_cents, _ = _external_payout_fields(
+            r['amount'], r['match_percent_snapshot'],
+            r['vendor_cashes_original_snapshot'])
+        match_pct = (r['match_percent_snapshot']
+                     if r['match_percent_snapshot'] is not None
+                     else 100.0)
+        match_cents = match_component_cents(r['amount'], match_pct)
+        name = r['method_name_snapshot'] or 'Unknown'
+        bucket = ext_totals.setdefault(
+            name, {'payout': 0, 'match': 0})
+        bucket['payout'] += payout_cents
+        bucket['match'] += match_cents
+
+    for name in sorted(ext_totals):
+        result.append({
+            'Payment Method': f"{name} (External)",
+            'Date': md_date,
+            'Total Allocated': cents_to_dollars(
+                ext_totals[name]['payout']),
+            'Total FAM Match': cents_to_dollars(
+                ext_totals[name]['match']),
             'FAM Absorbed': 0,
         })
 
@@ -661,15 +840,20 @@ def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
             row_dict['Photos'] = ' | '.join(txn_photos[r['txn_id']])
         result.append(row_dict)
 
-    # Append external FMNP entries
+    # Append external FMNP entries.  v2.1.0: FMNP-method filter
+    # keeps these FROZEN rows (FMNP- ids, FAM Match = face
+    # convention) fed identically; non-FMNP methods get EXT- rows
+    # below.
+    fmnp_method_id = _fmnp_method_id(conn)
     fmnp_rows = conn.execute("""
         SELECT fe.id, v.name AS vendor, fe.amount, fe.check_count,
                fe.created_at
         FROM fmnp_entries fe
         JOIN vendors v ON fe.vendor_id = v.id
         WHERE fe.market_day_id = ? AND fe.status = 'Active'
+          AND fe.payment_method_id = ?
         ORDER BY fe.id
-    """, [md_id]).fetchall()
+    """, [md_id, fmnp_method_id]).fetchall()
 
     for r in fmnp_rows:
         check_info = (f"FMNP (External) - {r['check_count']} checks"
@@ -691,6 +875,49 @@ def _collect_detailed_ledger(conn, md_id: int) -> list[dict]:
             'Customer Forfeit': 0,
             'Status': 'FMNP Entry',
             'Payment Methods': check_info,
+        })
+
+    # v2.1.0 (ENH-002): append non-FMNP external entries as EXT-
+    # rows.  Conventions (mirroring the FMNP rows above, with the
+    # generalized money split): Receipt Total = derived payout
+    # (what FAM owes the vendor), FAM Match = match component,
+    # Customer Paid = 0 (no booth customer), Forfeit = 0.
+    from fam.utils.external_payout import match_component_cents
+    ext_ledger_rows = conn.execute("""
+        SELECT fe.id, v.name AS vendor, fe.amount, fe.check_count,
+               fe.created_at, fe.method_name_snapshot,
+               fe.match_percent_snapshot,
+               fe.vendor_cashes_original_snapshot
+        FROM fmnp_entries fe
+        JOIN vendors v ON fe.vendor_id = v.id
+        WHERE fe.market_day_id = ? AND fe.status = 'Active'
+          AND fe.payment_method_id != ?
+        ORDER BY fe.id
+    """, [md_id, fmnp_method_id]).fetchall()
+
+    for r in ext_ledger_rows:
+        payout_cents, _basis = _external_payout_fields(
+            r['amount'], r['match_percent_snapshot'],
+            r['vendor_cashes_original_snapshot'])
+        match_pct = (r['match_percent_snapshot']
+                     if r['match_percent_snapshot'] is not None
+                     else 100.0)
+        match_cents = match_component_cents(r['amount'], match_pct)
+        name = r['method_name_snapshot'] or 'Unknown'
+        info = (f"{name} (External) - {r['check_count']} items"
+                if r['check_count'] else f"{name} (External)")
+        result.append({
+            'Transaction ID': f"EXT-{r['id']}",
+            'Timestamp': r['created_at'] or '',
+            'Customer': '',
+            'Zip Code': '',
+            'Vendor': r['vendor'],
+            'Receipt Total': cents_to_dollars(payout_cents),
+            'Customer Paid': 0,
+            'FAM Match': cents_to_dollars(match_cents),
+            'Customer Forfeit': 0,
+            'Status': 'External Entry',
+            'Payment Methods': info,
         })
 
     return result
@@ -816,140 +1043,111 @@ def _collect_geolocation(conn, md_id: int) -> list[dict]:
 
 
 def _collect_fmnp_entries(conn, md_id: int) -> list[dict]:
-    """FMNP Entries — one row per check from both the dedicated FMNP Entry
-    tab *and* FMNP collected through the normal Payment flow.
+    """FMNP Entries — DEPRECATED tab, deliberately empty (design
+    revision R1, 2026-06-11).
+
+    FMNP entries now flow to the ``External Payment Entries`` tab
+    alongside every other external method (one row per entry).  This
+    collector returns ``[]`` ON PURPOSE: the tab stays registered in
+    ``SHEET_KEYS`` / ``REQUIRED_SYNC_TABS`` so the empty upsert
+    DRAINS this device's historical rows from the shared sheet on
+    the next full sync (gsheets ``upsert_rows`` removes all of the
+    device's rows when given no data; it tolerates an
+    already-deleted worksheet and absent rows — see
+    fam/sync/gsheets.py).  Old app versions keep writing the tab
+    until they upgrade; once every market is on v2.1.0+ the tab is
+    empty and the coordinator deletes it manually.
+
+    Retired with the old tab (Sean, 2026-06-11): per-check row
+    splitting (the new tab is one row per entry; all photo URLs ride
+    in its Photos cell) and Source B booth-paid FMNP ``PAY-`` rows
+    (booth FMNP remains fully visible in the Detailed Ledger as part
+    of its transaction).
+
+    Do NOT remove this function or the tab registration until the
+    fleet is uniform and the tab has been deleted — removing them
+    early would stop the drain and strand stale rows.
+    """
+    return []
+
+
+def _collect_external_payment_entries(conn, md_id: int) -> list[dict]:
+    """External Payment Entries — one row per entry, ALL methods
+    (v2.1.0; FMNP included since design revision R1, 2026-06-11 —
+    the old ``FMNP Entries`` tab is deprecated and drains).
+
+    The per-entry AUDIT layer for the finance team: every row is
+    SELF-EXPLANATORY (user requirement 2026-06-10).  Because entries
+    snapshot their config at entry time, a settings correction
+    produces old-wrong and new-right rows side by side; each row
+    carries its own Match % / Vendor Cashes Original snapshots, the
+    derived FAM Owes Vendor amount, and a plain-English
+    Reimbursement Basis so any row can be audited in isolation —
+    without knowing what Settings said on any given day.  FMNP rows
+    read "Match only (… × 100%)" — FAM owes the match; the vendor
+    cashes the check with the program.
+
+    One ROW per entry (not per instrument).  The ``Instruments``
+    column carries the count; all photo URLs ride in ``Photos``.
+    Historical replication on upgrade is automatic: every sync
+    re-emits the device's full history, so a freshly-upgraded
+    market's complete FMNP record appears here on first sync.
+
+    Voided (soft-deleted) entries ARE included with Status='Voided'
+    — audit-trail precedent of the sync Detailed Ledger — and are
+    excluded from every rollup (Vendor Reimbursement, FAM Match,
+    ledger backup), which all filter status='Active'.
     """
     from fam.utils.photo_paths import parse_photo_paths
 
-    # Look up FMNP denomination for per-check amount calculation
-    try:
-        from fam.models.payment_method import get_payment_method_by_name
-        fmnp_method = get_payment_method_by_name('FMNP')
-        denomination = (fmnp_method or {}).get('denomination') or 0
-    except Exception:
-        # v2.0.1: was silently swallowed.  An FMNP-method lookup
-        # failure means the FMNP collector falls back to denom=0
-        # which would mis-split multi-check entries — surface it.
-        logger.warning(
-            "collect_sync_data: could not resolve FMNP method "
-            "denomination, falling back to 0 (multi-check splits "
-            "may be incorrect)",
-            exc_info=True)
-        denomination = 0
-
-    result = []
-
-    # ── Source A: fmnp_entries table (dedicated FMNP Entry tab) ──
-    fe_rows = conn.execute("""
-        SELECT fe.id, v.name AS vendor, fe.amount,
-               fe.check_count, fe.notes, fe.entered_by,
-               fe.photo_drive_url, fe.created_at
+    rows = conn.execute("""
+        SELECT fe.id, v.name AS vendor, fe.amount, fe.check_count,
+               fe.notes, fe.entered_by, fe.photo_drive_url,
+               fe.created_at, fe.status, md.date AS md_date,
+               fe.method_name_snapshot, fe.match_percent_snapshot,
+               fe.vendor_cashes_original_snapshot,
+               fe.denomination_snapshot
         FROM fmnp_entries fe
         JOIN vendors v ON fe.vendor_id = v.id
-        WHERE fe.market_day_id = ? AND fe.status = 'Active'
+        JOIN market_days md ON fe.market_day_id = md.id
+        WHERE fe.market_day_id = ?
         ORDER BY fe.id
     """, [md_id]).fetchall()
 
-    for r in fe_rows:
+    result = []
+    for r in rows:
+        payout_cents, basis = _external_payout_fields(
+            r['amount'], r['match_percent_snapshot'],
+            r['vendor_cashes_original_snapshot'])
+        # Instrument count: explicit count, else derived from the
+        # entry's own denomination snapshot, else blank.
+        if r['check_count'] and r['check_count'] > 0:
+            instruments = r['check_count']
+        elif r['denomination_snapshot']:
+            instruments = r['amount'] // r['denomination_snapshot']
+        else:
+            instruments = ''
         urls = parse_photo_paths(r['photo_drive_url'])
-        total_amount_cents = r['amount']
-
-        # Determine number of checks: use photo count, else check_count,
-        # else derive from denomination, else 1
-        num_checks = len(urls) if urls else (
-            r['check_count'] if r['check_count'] and r['check_count'] > 0
-            else (int(total_amount_cents / denomination) if denomination > 0
-                  else 1))
-        if num_checks < 1:
-            num_checks = 1
-
-        base_check_cents = total_amount_cents // num_checks
-        remainder_cents = total_amount_cents % num_checks
-
-        for i in range(num_checks):
-            check_cents = base_check_cents + (1 if i < remainder_cents else 0)
-            result.append({
-                'Entry ID': f"FE-{r['id']}-{i + 1}",
-                'Transaction ID': '',
-                'Timestamp': r['created_at'] or '',
-                # v2.0.6: Source A entries from the dedicated FMNP
-                # Entry tab are not tied to a customer order — empty
-                # strings here for column-schema parity with Source B.
-                'Customer': '',
-                'Zip Code': '',
-                'Vendor': r['vendor'],
-                'Check Amount': cents_to_dollars(check_cents),
-                'Check': f"{i + 1} of {num_checks}",
-                'Total Amount': cents_to_dollars(total_amount_cents),
-                'Source': 'FMNP Entry',
-                'Entered By': r['entered_by'] or '',
-                'Notes': r['notes'] or '',
-                'Photo': urls[i] if i < len(urls) else '',
-            })
-
-    # ── Source B: payment_line_items where method = FMNP ──
-    #
-    # v2.0.1 fix: the "Check Amount" / "Total Amount" columns
-    # represent the **physical face value** of the FMNP scrip the
-    # customer handed over — i.e. ``customer_charged``.  Earlier
-    # versions used ``method_amount`` here, which equals
-    # ``customer_charged + match_amount`` and is double the face
-    # value when match is 100% (the FMNP default).  Source A
-    # (fmnp_entries.amount) is the face value.  Both sources must
-    # agree so vendor redemption reports tally correctly.
-    pli_rows = conn.execute("""
-        SELECT pl.id, pl.customer_charged, pl.method_amount,
-               pl.photo_drive_url, pl.created_at,
-               t.fam_transaction_id, v.name AS vendor,
-               co.customer_label, co.zip_code
-        FROM payment_line_items pl
-        JOIN transactions t ON pl.transaction_id = t.id
-        JOIN vendors v ON t.vendor_id = v.id
-        LEFT JOIN customer_orders co ON t.customer_order_id = co.id
-        WHERE t.market_day_id = ?
-          AND pl.method_name_snapshot = 'FMNP'
-          AND t.status IN ('Confirmed', 'Adjusted')
-        ORDER BY pl.id
-    """, [md_id]).fetchall()
-
-    for r in pli_rows:
-        urls = parse_photo_paths(r['photo_drive_url'])
-        # Physical face value (what the vendor will redeem at the bank).
-        total_amount_cents = r['customer_charged']
-        txn_id = r['fam_transaction_id'] or ''
-
-        num_checks = len(urls) if urls else (
-            int(total_amount_cents / denomination) if denomination > 0 else 1)
-        if num_checks < 1:
-            num_checks = 1
-
-        base_check_cents = total_amount_cents // num_checks
-        remainder_cents = total_amount_cents % num_checks
-
-        for i in range(num_checks):
-            check_cents = base_check_cents + (1 if i < remainder_cents else 0)
-            result.append({
-                'Entry ID': f"PAY-{r['id']}-{i + 1}",
-                'Transaction ID': txn_id,
-                'Timestamp': r['created_at'] or '',
-                # v2.0.6: customer + zip code on payment-flow FMNP
-                # entries so the FMNP Entries sheet can correlate
-                # check redemptions with customer demographics.
-                # Source A (manual FMNP Entry tab) is not tied to a
-                # customer order — column included with empty string
-                # for schema parity.
-                'Customer': r['customer_label'] or '',
-                'Zip Code': r['zip_code'] or '',
-                'Vendor': r['vendor'],
-                'Check Amount': cents_to_dollars(check_cents),
-                'Check': f"{i + 1} of {num_checks}",
-                'Total Amount': cents_to_dollars(total_amount_cents),
-                'Source': 'Payment',
-                'Entered By': 'Payment',
-                'Notes': '',
-                'Photo': urls[i] if i < len(urls) else '',
-            })
-
+        match_pct = r['match_percent_snapshot']
+        result.append({
+            'Entry ID': f"FE-{r['id']}",
+            'Timestamp': r['created_at'] or '',
+            'Market Day Date': r['md_date'] or '',
+            'Vendor': r['vendor'],
+            'Payment Method': r['method_name_snapshot'] or '',
+            'Face Value': cents_to_dollars(r['amount']),
+            'Instruments': instruments,
+            'Match %': match_pct if match_pct is not None else '',
+            'Vendor Cashes Original':
+                'Yes' if r['vendor_cashes_original_snapshot'] else 'No',
+            'FAM Owes Vendor': cents_to_dollars(payout_cents),
+            'Reimbursement Basis': basis,
+            'Status': ('Voided' if r['status'] == 'Deleted'
+                       else (r['status'] or 'Active')),
+            'Entered By': r['entered_by'] or '',
+            'Notes': r['notes'] or '',
+            'Photos': ' | '.join(urls) if urls else '',
+        })
     return result
 
 

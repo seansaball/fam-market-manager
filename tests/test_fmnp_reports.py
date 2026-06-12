@@ -114,15 +114,27 @@ def _seed(conn):
         VALUES (3, 2, 'Cash', 0.0, 2000, 0, 2000)""")
 
     # ── External FMNP Entries ──
+    # (v38 fixture columns: method id + config snapshots are NOT NULL
+    # at insert time — values mirror the migration backfill so the
+    # FROZEN assertions below stay byte-identical.)
     conn.execute("""INSERT INTO fmnp_entries
-        (id, market_day_id, vendor_id, amount, check_count, entered_by, notes)
-        VALUES (1, 1, 3, 5000, 5, 'Admin', 'Five $10 checks')""")
+        (id, market_day_id, vendor_id, amount, check_count, entered_by, notes,
+         payment_method_id, method_name_snapshot, match_percent_snapshot,
+         vendor_cashes_original_snapshot)
+        VALUES (1, 1, 3, 5000, 5, 'Admin', 'Five $10 checks',
+                3, 'FMNP', 100.0, 1)""")
     conn.execute("""INSERT INTO fmnp_entries
-        (id, market_day_id, vendor_id, amount, check_count, entered_by, notes)
-        VALUES (2, 2, 4, 2500, 2, 'Admin', 'Two checks')""")
+        (id, market_day_id, vendor_id, amount, check_count, entered_by, notes,
+         payment_method_id, method_name_snapshot, match_percent_snapshot,
+         vendor_cashes_original_snapshot)
+        VALUES (2, 2, 4, 2500, 2, 'Admin', 'Two checks',
+                3, 'FMNP', 100.0, 1)""")
     conn.execute("""INSERT INTO fmnp_entries
-        (id, market_day_id, vendor_id, amount, check_count, entered_by, notes)
-        VALUES (3, 1, 4, 1500, 1, 'Admin', 'One check')""")
+        (id, market_day_id, vendor_id, amount, check_count, entered_by, notes,
+         payment_method_id, method_name_snapshot, match_percent_snapshot,
+         vendor_cashes_original_snapshot)
+        VALUES (3, 1, 4, 1500, 1, 'Admin', 'One check',
+                3, 'FMNP', 100.0, 1)""")
 
     conn.commit()
 
@@ -672,6 +684,10 @@ class TestFMNPCrudAndAudit:
         conn.execute("INSERT INTO markets (id, name, address) VALUES (1, 'M', '1')")
         conn.execute("INSERT INTO market_days (id, market_id, date, status) VALUES (1, 1, '2026-01-01', 'Open')")
         conn.execute("INSERT INTO vendors (id, name, is_active) VALUES (1, 'V1', 1)")
+        # v38: create_fmnp_entry resolves the FMNP method row to
+        # snapshot its config (denomination NULL preserves the
+        # legacy check_count-based splitting in these tests).
+        conn.execute("INSERT INTO payment_methods (id, name, match_percent, is_active, sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
         conn.commit()
 
     def test_create_entry(self, fresh_db):
@@ -909,9 +925,12 @@ class TestEdgeCases:
         conn.execute("INSERT INTO markets (id, name, address) VALUES (1, 'M', '1')")
         conn.execute("INSERT INTO market_days (id, market_id, date, status) VALUES (1, 1, '2026-01-01', 'Open')")
         conn.execute("INSERT INTO vendors (id, name, is_active) VALUES (1, 'V1', 1)")
+        conn.execute("INSERT INTO payment_methods (id, name, match_percent, is_active, sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
         conn.execute("""INSERT INTO fmnp_entries
-            (market_day_id, vendor_id, amount, check_count, entered_by)
-            VALUES (1, 1, 10000, 10, 'Admin')""")
+            (market_day_id, vendor_id, amount, check_count, entered_by,
+             payment_method_id, method_name_snapshot, match_percent_snapshot,
+             vendor_cashes_original_snapshot)
+            VALUES (1, 1, 10000, 10, 'Admin', 90, 'FMNP', 100.0, 1)""")
         conn.commit()
 
         vendors = _query_vendor_reimbursement(conn)
@@ -956,15 +975,22 @@ class TestEdgeCases:
         conn.execute("INSERT INTO markets (id, name, address) VALUES (1, 'M', '1')")
         conn.execute("INSERT INTO market_days (id, market_id, date, status) VALUES (1, 1, '2026-01-01', 'Open')")
         conn.execute("INSERT INTO vendors (id, name, is_active) VALUES (1, 'V1', 1)")
+        conn.execute("INSERT INTO payment_methods (id, name, match_percent, is_active, sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
         conn.execute("""INSERT INTO fmnp_entries
-            (market_day_id, vendor_id, amount, check_count, entered_by)
-            VALUES (1, 1, 2000, 2, 'Admin')""")
+            (market_day_id, vendor_id, amount, check_count, entered_by,
+             payment_method_id, method_name_snapshot, match_percent_snapshot,
+             vendor_cashes_original_snapshot)
+            VALUES (1, 1, 2000, 2, 'Admin', 90, 'FMNP', 100.0, 1)""")
         conn.execute("""INSERT INTO fmnp_entries
-            (market_day_id, vendor_id, amount, check_count, entered_by)
-            VALUES (1, 1, 3000, 3, 'Admin')""")
+            (market_day_id, vendor_id, amount, check_count, entered_by,
+             payment_method_id, method_name_snapshot, match_percent_snapshot,
+             vendor_cashes_original_snapshot)
+            VALUES (1, 1, 3000, 3, 'Admin', 90, 'FMNP', 100.0, 1)""")
         conn.execute("""INSERT INTO fmnp_entries
-            (market_day_id, vendor_id, amount, check_count, entered_by)
-            VALUES (1, 1, 5000, 5, 'Admin')""")
+            (market_day_id, vendor_id, amount, check_count, entered_by,
+             payment_method_id, method_name_snapshot, match_percent_snapshot,
+             vendor_cashes_original_snapshot)
+            VALUES (1, 1, 5000, 5, 'Admin', 90, 'FMNP', 100.0, 1)""")
         conn.commit()
 
         vendors = _query_vendor_reimbursement(conn)

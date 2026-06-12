@@ -6,7 +6,7 @@
 > and the project owner / coordinator cannot be reached. Each
 > section is one symptom and the exact recovery steps.
 >
-> Last updated for v2.0.7 — 2026-05-07.
+> Last updated for v2.1.0 — 2026-06-11.
 
 ---
 
@@ -110,8 +110,8 @@ functional offline.
 | You can't click "Sync to Cloud" | Correct — it's grayed out until internet returns. |
 | Auto-sync stops trying | Correct — it'll resume automatically once internet is back. |
 
-**At the booth:** Continue Receipt Intake → Payment → FMNP →
-Adjustments as normal. Print receipts (if you have a printer).
+**At the booth:** Continue Receipt Intake → Payment → External
+Payments → Adjustments as normal. Print receipts (if you have a printer).
 The app saves everything to the local database AND a plain-text
 ledger file every time you confirm.
 
@@ -141,7 +141,7 @@ on the sheet.
 
 | Step | What to do |
 |---|---|
-| 1 | Click the **right sheet tab** in your browser. Receipts go to "Detailed Ledger." Vendor totals to "Vendor Reimbursement." FMNP to "FMNP Entries." |
+| 1 | Click the **right sheet tab** in your browser. Receipts go to "Detailed Ledger." Vendor totals to "Vendor Reimbursement." External scrip — FMNP checks, Food RX, Food Bucks — to "External Payment Entries." (The old "FMNP Entries" tab only carries markets still on pre-v2.1.0 versions; an upgraded market's rows move to the new tab automatically.) |
 | 2 | Refresh your browser (Ctrl + R). |
 | 3 | Each row has columns called **`market_code`** and **`device_id`** at the far left. Filter the sheet by your market_code (the 4-letter code in your title bar). Your rows are tagged with this code. |
 | 4 | If your market runs multiple laptops: each laptop has a unique `device_id`. The same customer label (C-005) might appear from two different laptops — they're different customers. |
@@ -287,6 +287,28 @@ happened this afternoon, you'll need to re-enter transactions
 between those times. Open `fam_ledger_backup.txt` in Notepad —
 that file lists every confirmed transaction in plain English and
 is your reference for what to re-enter.
+
+---
+
+## 15. I entered external payments under the wrong settings
+
+Someone recorded External Payments entries while a payment method
+had the wrong match % or the wrong "Vendor cashes the original
+instrument" toggle. **Nothing is silently wrong in your reports** —
+each entry snapshots the settings it was saved under, and reports
+stay correct *for what was entered*. The fix is to replace the
+wrong entries, not to edit Settings and hope.
+
+| Step | What to do |
+|---|---|
+| 1 | Find the affected entries. The **Reimbursement Basis** column (entries table, External Payment Entries sheet tab) shows which configuration each entry was valued under — e.g. "Match only ($10.00 × 100%)" vs "Face + match ($10.00 × 2.0)". Entries made under the wrong settings show the wrong basis text. |
+| 2 | **Delete (void) the wrong entries** on the External Payments screen. They stay visible as voided rows — that's the audit trail, not a problem. |
+| 3 | Fix the method's settings: Settings → Payment Methods → Edit → correct the match % / toggles. The dialog's live preview shows what FAM will owe for one instrument under the new settings. |
+| 4 | **Re-enter the entries.** The new entries snapshot the corrected settings; the confirmation popup names the FAM-owed amount — check it reads right. |
+
+> Fixing Settings WITHOUT re-entering does nothing to the recorded
+> entries — settings changes never re-value history. That's by
+> design: it's what keeps last month's reports stable.
 
 ---
 

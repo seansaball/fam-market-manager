@@ -4,10 +4,10 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QLabel, QPushButton, QAbstractItemView,
     QComboBox, QWidget, QHBoxLayout, QVBoxLayout, QLineEdit, QDateEdit,
     QDialog, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QFormLayout,
-    QStyledItemDelegate
+    QStyledItemDelegate, QRadioButton
 )
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QPalette
-from PySide6.QtCore import Qt, Signal, QEvent, QDate, QTimer
+from PySide6.QtCore import Qt, Signal, QEvent, QDate, QTimer, QObject
 from fam.ui.styles import (
     FIELD_LABEL_BG, ERROR_COLOR, PRIMARY_GREEN, TEXT_COLOR, LIGHT_GRAY, WHITE
 )
@@ -65,151 +65,134 @@ def _safe_select_all(widget):
         pass
 
 
-def _try_overtype_next_char(line_edit) -> bool:
-    """Helper: in overtype mode, before Qt inserts the typed digit at
-    the cursor position, delete the character currently sitting there
-    so the new keystroke replaces it (not push-inserts beside it).
+# ── Money/number typing model (v2.1.0, ENH-007) ─────────────────
+# The NoScroll spin boxes type the STANDARD way: left-to-right,
+# what-you-type-is-what-you-see, native Qt editing.  Type "85" and
+# commit → $85.00; type "85.5" → $85.50; the decimal key inserts a
+# real decimal point; the value formats to two decimals when the
+# field commits (Tab / Enter / focus-out).
+#
+# HISTORY — do not re-introduce the "cents-builder" ladder: from
+# 2026-04-30 to 2026-06-12 these widgets implemented an ATM/POS
+# cents-first typing system (overtype + shift-left: typing 8,5
+# produced $8.50, the decimal key was silently swallowed).  Field
+# evidence killed it: volunteers type calculator-style, so "85"
+# became $8.50 — perceived as "a random extra 0 at the end" — and
+# "85.5" became $8.55 (10× off).  Amounts typed with exactly two
+# decimals coincidentally worked, which made the failures look
+# random.  The ladder, its helpers (_try_overtype_next_char,
+# _shift_left_append, _reformat_and_park_cursor_before_decimal)
+# and its custom keyPressEvent overrides were removed wholesale —
+# native Qt typing has no custom digit branch, which also
+# structurally eliminates the int('') crash class fixed on
+# 2026-05-07 (see tests/test_spinbox_keypress_empty_text.py).
 
-    Returns ``True`` when the helper consumed a character and the
-    caller should let ``super().keyPressEvent`` insert the typed
-    digit.  Returns ``False`` when the cursor has nothing to
-    overtype — the caller should then fall back to *cents-builder*
-    shift-left mode (``_shift_left_append``).
 
-    Behaviour:
-      * Cursor on a digit  → ``del_()`` removes that digit;
-        returns ``True``.
-      * Cursor on a decimal point → skip past the ``.`` and remove
-        the next digit; returns ``True``.
-      * Cursor at end / on non-digit non-``.`` char (e.g. prefix
-        space) → returns ``False`` so caller falls back to
-        shift-left.
-      * Selection already present → returns ``False`` so caller
-        handles the selection branch separately.
+def _clamp_selection_to_value(spin):
+    """Clamp the current selection to the editable VALUE region —
+    called at EDIT-KEYSTROKE time only, never while selecting.
+
+    QAbstractSpinBox's own ``selectAll()`` (our focus-in behavior)
+    deliberately excludes the prefix — but a USER Ctrl+A or drag
+    selects the "$ " prefix/suffix too, and Qt refuses edits that
+    would damage them: Backspace just collapses the cursor to the
+    front and typing PREPENDS instead of replacing (field-reported
+    2026-06-12, the highlight-and-retype bug).
+
+    TIMING MATTERS (second field report, same day): an earlier cut
+    clamped on ``selectionChanged`` — but correcting a selection
+    DURING a mouse drag resets Qt's drag anchor, so dragging left
+    past the "$" flipped the selection to the prefix alone and the
+    prepend bug returned.  So the visual selection stays fully
+    native (the "$" may highlight, as in any Qt app); the clamp
+    runs from a KeyPress event filter immediately before the edit
+    applies, when no gesture can be in progress.
+
+    A selection lying entirely inside the prefix/suffix collapses
+    to the nearest value edge so the keystroke lands predictably.
     """
-    if line_edit.hasSelectedText():
-        return False
-    cursor_pos = line_edit.cursorPosition()
-    full_text = line_edit.text()
-    if cursor_pos >= len(full_text):
-        return False
-    ch = full_text[cursor_pos]
-    if ch.isdigit():
-        line_edit.del_()
-        return True
-    if ch == '.' and cursor_pos + 1 < len(full_text) \
-            and full_text[cursor_pos + 1].isdigit():
-        line_edit.setCursorPosition(cursor_pos + 1)
-        line_edit.del_()
-        return True
-    return False
-
-
-# Backward-compatible alias for tests that imported the original.
-_overtype_eat_next_digit = _try_overtype_next_char
-
-
-def _reformat_and_park_cursor_before_decimal(spin):
-    """After the selection-replace branch fires, the spinbox's
-    QLineEdit shows the user-typed digits raw (e.g. ``$ 1``) — Qt
-    only reformats to the full ``$ 1.00`` display on focus loss.
-
-    For the canonical user-pinned typing ladder
-    (``1 → $1.00, 1 → $1.10, 1 → $1.11, 1 → $11.11``) to work, we
-    need the lineEdit to show ``$ 1.00`` *immediately* so the second
-    keystroke sees ``.`` under the cursor and overtype-skips it.
-
-    Without this helper, ``$ 1`` (length 3) leaves cursor at end →
-    second keystroke triggers cents-builder shift-left → ``$ 10.0X``,
-    which the user reported as the receipt-total bug ("type 12 →
-    $10.02").  Reproducible only on fields with
-    ``setSpecialValueText`` set + tab-in-with-selectAll entry.
-
-    Implementation:
-      * Re-render lineEdit text from ``textFromValue(self.value())``
-        wrapped with prefix + suffix.
-      * Park cursor immediately before the ``.`` so the next
-        keystroke hits the overtype branch (skip ``.``, replace next).
-      * Suppress signals during ``setText`` so we don't trigger a
-        spurious ``valueChanged`` (the value didn't actually change).
-
-    Integer ``QSpinBox`` short-circuits — no decimal to park before;
-    cursor stays at end and shift-left is the correct next branch.
-
-    Single-decimal fields (e.g. percent, ``decimals=1``) also short-
-    circuit: their typing pattern is naturally shift-left ("type 50
-    → 50.0%") and parking on the decimal would force an extra
-    keystroke to skip past it.  Only ``decimals >= 2`` (currency)
-    benefits from the ladder pattern $1.00 → $1.10 → $1.11 → $11.11.
-    """
-    if not isinstance(spin, QDoubleSpinBox) or spin.decimals() < 2:
-        return
     line = spin.lineEdit()
-    formatted = spin.prefix() + spin.textFromValue(spin.value()) + spin.suffix()
-    if line.text() != formatted:
-        line.blockSignals(True)
-        line.setText(formatted)
-        line.blockSignals(False)
-    dot_pos = formatted.find('.')
-    if dot_pos >= 0:
-        line.setCursorPosition(dot_pos)
+    if not line.hasSelectedText():
+        return
+    text = line.text()
+    prefix = spin.prefix()
+    suffix = spin.suffix()
+    lo = len(prefix) if prefix and text.startswith(prefix) else 0
+    hi = (len(text) - len(suffix)
+          if suffix and text.endswith(suffix) else len(text))
+    start = line.selectionStart()
+    end = start + len(line.selectedText())
+    new_start = max(start, lo)
+    new_end = min(end, hi)
+    if (new_start, new_end) == (start, end):
+        return
+    if new_end > new_start:
+        line.setSelection(new_start, new_end - new_start)
+    else:
+        # Entirely inside the prefix (or suffix): deselect and park
+        # the cursor at the nearest value edge.
+        line.setCursorPosition(lo if end <= lo else hi)
 
 
-def _shift_left_append(spin, digit: int):
-    """Cents-builder fallback: shift the spinbox value left by one
-    decimal place and append the typed digit.
+class _PrefixSafeEditFilter(QObject):
+    """Dedicated event-filter object for the NoScroll spin boxes:
+    clamps prefix/suffix-spanning selections to the value region at
+    the moment an edit keystroke arrives (see
+    ``_clamp_selection_to_value`` for the full story).
 
-    Activated when the user has already overtyped past the last
-    editable digit and the cursor is at end-of-text.  Without this,
-    the field would silently swallow further keystrokes (Option A
-    pure-overtype behaviour from the original UX assessment).
+    A standalone QObject child ON PURPOSE — an earlier cut made the
+    spinbox subclass its own filter via a Python mixin overriding
+    ``eventFilter``, and the full suite hard-crashed mid-run
+    (interpreter death, no traceback) at a deterministic point:
+    PySide6 dispatching a C++ virtual into a non-QObject Python
+    mixin for every lineEdit event is exactly the pattern that
+    breaks during heavy widget churn.  The filter never consumes or
+    rewrites events — it only adjusts the selection and returns
+    False so Qt processes the key natively; the
+    no-custom-keyPressEvent guarantee (ENH-007) stands."""
 
-    Pattern (currency, decimals=2 starting at $ 0.00, cursor at
-    pos 2 right after the prefix):
+    def __init__(self, spin):
+        super().__init__(spin)
+        self._spin = spin
 
-        keystroke 1 (selection-replace):  $ 0.00 → $ 1.00
-        keystroke 2 (overtype on '.'):    $ 1.00 → $ 1.10
-        keystroke 3 (overtype on '0'):    $ 1.10 → $ 1.11
-        keystroke 4 (cursor at end →
-                     shift-left):         $ 1.11 → $ 11.11
-        keystroke 5 (cursor at end):      $ 11.11 → $ 111.11
-        ...                               (until ``maximum()``)
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress:
+            try:
+                line = self._spin.lineEdit()
+                if obj is line and line.hasSelectedText():
+                    _clamp_selection_to_value(self._spin)
+            except RuntimeError:
+                pass   # C++ object already mid-destruction
+        return False
 
-    Math is done in integer space (multiply by ``10**decimals``)
-    so float drift can't sneak in.  Values that would exceed
-    ``spin.maximum()`` are clamped — extra keystrokes are silently
-    ignored, matching how Qt clamps step-up at the max.
+
+class _PrefixSafeEditingMixin:
+    """Install hook shared by the NoScroll spin boxes (the actual
+    filtering lives in ``_PrefixSafeEditFilter`` — see its
+    docstring for why it is a separate QObject)."""
+
+    def _install_prefix_safe_editing(self):
+        self._prefix_safe_filter = _PrefixSafeEditFilter(self)
+        self.lineEdit().installEventFilter(self._prefix_safe_filter)
+
+
+class NoScrollSpinBox(_PrefixSafeEditingMixin, QSpinBox):
+    """QSpinBox with scroll-safe focus and select-all-on-focus.
+
+    Typing is NATIVE Qt — left-to-right, exactly what you see (see
+    the ENH-007 history note above; no custom keyPressEvent, on
+    purpose).  Select-all on focus gives type-to-replace: tabbing
+    into the field and typing starts a fresh number.
+
+    Keyboard tracking is OFF (ENH-007): ``valueChanged`` fires on
+    COMMIT (Tab / Enter / focus-out / arrows), not per keystroke.
+    See the double-spin sibling for the trace that forced this.
     """
-    decimals = spin.decimals() if hasattr(spin, 'decimals') else 0
-    factor = 10 ** decimals
-    current_int = round(spin.value() * factor)
-    new_int = current_int * 10 + digit
-    max_int = round(spin.maximum() * factor)
-    if new_int > max_int:
-        return  # at cap; absorb the keystroke
-    new_value = new_int / factor if decimals > 0 else new_int
-    spin.setValue(new_value)
-    # Pin cursor to end so the next keystroke continues shifting.
-    spin.lineEdit().setCursorPosition(len(spin.lineEdit().text()))
 
-
-class NoScrollSpinBox(QSpinBox):
-    """QSpinBox that ignores mouse wheel events and supports
-    select-all-on-focus, overtype (type-to-replace), and
-    cents-builder shift-left for keystrokes past the last digit.
-
-    Overtype: pressing a digit replaces the digit currently under
-    the cursor instead of inserting beside it.  Matches the
-    expectation a cashier brings from POS terminals — type the
-    new value over the old, no manual delete-key dance.
-
-    Shift-left fallback: once the cursor reaches the end of the
-    text, additional digits *push* existing digits left (calculator-
-    style) so the user can keep building the number naturally.
-
-    Backspace, Delete, arrows, paste, Ctrl+A, Tab, etc. all retain
-    standard Qt behaviour; only digit keys are intercepted.
-    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setKeyboardTracking(False)
+        self._install_prefix_safe_editing()
 
     def wheelEvent(self, event):
         event.ignore()
@@ -218,41 +201,39 @@ class NoScrollSpinBox(QSpinBox):
         super().focusInEvent(event)
         QTimer.singleShot(0, lambda: _safe_select_all(self))
 
-    def keyPressEvent(self, event):
-        text = event.text()
-        # v2.0.7+ fix (user-reported 2026-05-07): same gotcha as
-        # NoScrollDoubleSpinBox below — ``text in '0123456789'``
-        # is True for the empty string (substring semantics),
-        # so non-character keys (Backspace, Shift, arrows, etc.)
-        # fell through to ``int('')`` and crashed the global
-        # exception handler.  Require a single digit character.
-        if len(text) == 1 and text in '0123456789':
-            line = self.lineEdit()
-            if line.hasSelectedText():
-                line.del_()                          # type-to-replace
-                super().keyPressEvent(event)
-                # Integer field: no decimal to park before — cursor
-                # already at end is correct for shift-left next.
-                return
-            if _try_overtype_next_char(line):        # overtype mode
-                super().keyPressEvent(event)
-                return
-            # Cursor at end → cents-builder shift-left.
-            _shift_left_append(self, int(text))
-            return
-        super().keyPressEvent(event)
 
+class NoScrollDoubleSpinBox(_PrefixSafeEditingMixin, QDoubleSpinBox):
+    """QDoubleSpinBox with scroll-safe focus and select-all-on-focus.
 
-class NoScrollDoubleSpinBox(QDoubleSpinBox):
-    """QDoubleSpinBox that ignores mouse wheel events and supports
-    select-all-on-focus, overtype (type-to-replace), and
-    cents-builder shift-left for keystrokes past the last digit.
+    Typing is NATIVE Qt — left-to-right, exactly what you see: type
+    ``85`` and commit → ``$ 85.00``; type ``85.5`` → ``$ 85.50``;
+    the decimal key inserts a real decimal point and Qt's validator
+    caps the fraction at ``decimals()`` digits.  The value formats
+    on commit (Tab / Enter / focus-out).  See the ENH-007 history
+    note above for why there is deliberately NO custom keyPressEvent
+    here.  Select-all on focus gives type-to-replace: tabbing into
+    the field and typing starts a fresh number.
 
-    See ``NoScrollSpinBox`` for the rationale.  The decimal-spin
-    variant additionally skips over the ``.`` character — typing
-    a digit while sitting on the decimal point lands on the
-    fractional part rather than overwriting the period.
+    Keyboard tracking is OFF (ENH-007): ``valueChanged`` fires on
+    COMMIT, not per keystroke.  With tracking on, app handlers
+    listening to valueChanged (payment-row recompute, payout
+    previews) read ``.value()`` mid-edit, which makes Qt re-render
+    the editor text — traced on the payment row: after typing "8"
+    the text snapped back to "$ 8.00", so the volunteer's "."
+    keystroke was rejected (a dot already existed) and "8.5" became
+    $85.  Tracking-off is Qt's canonical remedy: keystrokes never
+    run value handlers, so nothing can rewrite the editor while the
+    user is typing.  Programmatic ``setValue`` still emits
+    valueChanged immediately (tracking only affects typing).
+    Listeners that need a FIRST-KEYSTROKE signal (payment-row ⚡
+    lock) hook ``lineEdit().textEdited`` instead — it fires only
+    for user edits, never for programmatic writes.
     """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setKeyboardTracking(False)
+        self._install_prefix_safe_editing()
 
     def wheelEvent(self, event):
         event.ignore()
@@ -260,50 +241,6 @@ class NoScrollDoubleSpinBox(QDoubleSpinBox):
     def focusInEvent(self, event):
         super().focusInEvent(event)
         QTimer.singleShot(0, lambda: _safe_select_all(self))
-
-    def keyPressEvent(self, event):
-        text = event.text()
-        line = self.lineEdit()
-        # v2.0.7+ fix (user-reported 2026-05-07): require ``text``
-        # to be a non-empty single digit BEFORE entering the
-        # digit-handling branch.  Pre-fix, ``text in '0123456789'``
-        # used Python substring semantics — and the empty string
-        # is a substring of EVERY string, so non-character key
-        # events (Backspace, Delete, Shift, arrow keys, modifier
-        # keys, IME composition keys) all evaluated truthy and
-        # fell through to ``int(text)`` which raised
-        # ``ValueError: invalid literal for int() with base 10: ''``.
-        # The user saw this as "random numbers in random spots
-        # while typing" because each non-digit key press blew up
-        # the global exception handler mid-edit, leaving the
-        # spinbox in a partially-formatted state.  Now the branch
-        # only fires for a single digit character; everything
-        # else (including Backspace and arrow keys) falls through
-        # to ``super().keyPressEvent(event)`` where Qt handles it
-        # natively.
-        if len(text) == 1 and text in '0123456789':
-            if line.hasSelectedText():
-                line.del_()                          # type-to-replace
-                super().keyPressEvent(event)
-                # Force the lineEdit to show the full formatted
-                # display (e.g. "$ 1.00" instead of "$ 1") and park
-                # cursor before the decimal — without this, the next
-                # keystroke would land at end-of-text and trigger
-                # shift-left ("type 12 → $10.02" bug on fields with
-                # setSpecialValueText, reported 2026-04-30).
-                _reformat_and_park_cursor_before_decimal(self)
-                return
-            if _try_overtype_next_char(line):        # overtype mode
-                super().keyPressEvent(event)
-                return
-            # Cursor at end → cents-builder shift-left.
-            _shift_left_append(self, int(text))
-            return
-        if text == '.' and line.hasSelectedText():
-            # Existing carve-out: typing a literal "." with a
-            # selection wipes the selection so super() can insert.
-            line.del_()
-        super().keyPressEvent(event)
 
 
 class NoScrollComboBox(QComboBox):
@@ -550,7 +487,8 @@ class _DateRangeDialog(QDialog):
         "July", "August", "September", "October", "November", "December"
     ]
 
-    def __init__(self, from_date, to_date, min_date, max_date, parent=None):
+    def __init__(self, from_date, to_date, min_date, max_date,
+                 parent=None, range_active=False):
         super().__init__(parent)
         self.setWindowTitle("Select Date Range")
         self.setMinimumWidth(420)
@@ -559,10 +497,48 @@ class _DateRangeDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(16)
 
+        # ── Whole-month quick pick (v2.1.0, Bryan QoL) ───────────
+        # Month-end reconciliation is "show me June" — making the
+        # coordinator type 6/1 and 6/30 is busywork.  Either/or
+        # with the custom range: the radios gate which inputs are
+        # live, and selected_from()/selected_to() answer from the
+        # active mode, so callers see an ordinary date range.
+        month_row = QHBoxLayout()
+        month_row.setSpacing(8)
+        self.month_mode = QRadioButton("Whole month:")
+        self.month_mode.setStyleSheet(
+            "font-weight: bold; font-size: 14px;")
+        month_row.addWidget(self.month_mode)
+        self.month_combo = NoScrollComboBox()
+        _cursor = QDate(max_date.year(), max_date.month(), 1)
+        _floor = QDate(min_date.year(), min_date.month(), 1)
+        while _cursor >= _floor:
+            self.month_combo.addItem(
+                f"{self._MONTHS[_cursor.month() - 1]} "
+                f"{_cursor.year()}",
+                _cursor.toString("yyyy-MM"))
+            _cursor = _cursor.addMonths(-1)
+        month_row.addWidget(self.month_combo, 1)
+        layout.addLayout(month_row)
+
+        self.range_mode = QRadioButton("Custom range:")
+        self.range_mode.setStyleSheet(
+            "font-weight: bold; font-size: 14px;")
+        self.range_mode.setChecked(True)
+        layout.addWidget(self.range_mode)
+        # Every control stays LIVE; interacting with one side
+        # auto-selects its radio (a disabled-until-radio month
+        # combo proved undiscoverable in the field — "the dropdown
+        # isn't clickable", Sean 2026-06-12).  The radios indicate
+        # which side Apply will use.
+        self.month_combo.activated.connect(
+            lambda _i: self.month_mode.setChecked(True))
+
         # ── Start Date row ────────────────────────────────────────
-        start_lbl = QLabel("Start Date")
-        start_lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(start_lbl)
+        self._start_lbl = QLabel("Start Date")
+        self._start_lbl.setStyleSheet(
+            "font-weight: bold; font-size: 14px;")
+        layout.addWidget(self._start_lbl)
 
         start_row = QHBoxLayout()
         start_row.setSpacing(8)
@@ -588,9 +564,10 @@ class _DateRangeDialog(QDialog):
         layout.addLayout(start_row)
 
         # ── End Date row ──────────────────────────────────────────
-        end_lbl = QLabel("End Date")
-        end_lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(end_lbl)
+        self._end_lbl = QLabel("End Date")
+        self._end_lbl.setStyleSheet(
+            "font-weight: bold; font-size: 14px;")
+        layout.addWidget(self._end_lbl)
 
         end_row = QHBoxLayout()
         end_row.setSpacing(8)
@@ -615,6 +592,44 @@ class _DateRangeDialog(QDialog):
 
         layout.addLayout(end_row)
 
+        # Editing any custom-range field auto-selects range mode
+        # (counterpart of the month-combo connection above).
+        for _w in (self.start_month, self.end_month):
+            _w.activated.connect(
+                lambda _i: self.range_mode.setChecked(True))
+        for _w in (self.start_day, self.start_year,
+                   self.end_day, self.end_year):
+            _w.valueChanged.connect(
+                lambda _v: self.range_mode.setChecked(True))
+
+        # Default mode (Sean, 2026-06-12): WHOLE MONTH opens
+        # active — it's the primary reconciliation flow ("when I
+        # first open the window I want the custom range greyed
+        # out").  Exceptions keep the dialog honest about the
+        # CURRENT selection: an active range that is exactly a
+        # whole calendar month opens in month mode with that month
+        # preselected; any other active range opens in custom mode.
+        if range_active:
+            _first = QDate(from_date.year(), from_date.month(), 1)
+            _last = QDate(_first.year(), _first.month(),
+                          _first.daysInMonth())
+            _ym_idx = self.month_combo.findData(
+                _first.toString("yyyy-MM"))
+            if (from_date == _first and to_date == _last
+                    and _ym_idx >= 0):
+                self.month_combo.setCurrentIndex(_ym_idx)
+                self.month_mode.setChecked(True)
+            else:
+                self.range_mode.setChecked(True)
+        else:
+            self.month_mode.setChecked(True)
+
+        # Active side highlighted, inactive side faded (Sean,
+        # 2026-06-12 — "it's not clear which is taking effect").
+        # The radios are exclusive, so one toggled hook covers both.
+        self.month_mode.toggled.connect(self._update_mode_styles)
+        self._update_mode_styles()
+
         # ── Validation message ────────────────────────────────────
         self._error_label = QLabel("")
         self._error_label.setStyleSheet(f"color: {ERROR_COLOR}; font-size: 12px;")
@@ -638,6 +653,41 @@ class _DateRangeDialog(QDialog):
         btn_row.addWidget(apply_btn)
 
         layout.addLayout(btn_row)
+
+    # ── Mode emphasis ─────────────────────────────────────────────
+    _FADED_CSS = "color: #9A9A9A;"
+    _FADED_FIELD_CSS = "color: #9A9A9A; background-color: #F5F4F1;"
+
+    def _update_mode_styles(self):
+        """Highlight the active mode's controls and FADE the
+        inactive side's — so it's obvious which one Apply Range
+        will use (Sean, 2026-06-12).
+
+        The faded side stays ENABLED on purpose: disabling it
+        brought back the dead-click trap ("the dropdown isn't
+        clickable") — interacting with a faded control is exactly
+        how you switch modes.  Fading is purely the visual cue.
+        """
+        month_on = self.month_mode.isChecked()
+        radio_active = ("font-weight: bold; font-size: 14px; "
+                        f"color: {PRIMARY_GREEN};")
+        radio_idle = ("font-weight: bold; font-size: 14px; "
+                      + self._FADED_CSS)
+        self.month_mode.setStyleSheet(
+            radio_active if month_on else radio_idle)
+        self.range_mode.setStyleSheet(
+            radio_idle if month_on else radio_active)
+        self.month_combo.setStyleSheet(
+            "" if month_on else self._FADED_FIELD_CSS)
+        custom_css = self._FADED_FIELD_CSS if month_on else ""
+        for w in (self.start_month, self.start_day, self.start_year,
+                  self.end_month, self.end_day, self.end_year):
+            w.setStyleSheet(custom_css)
+        lbl_css = "font-weight: bold; font-size: 14px;"
+        if month_on:
+            lbl_css += " " + self._FADED_CSS
+        self._start_lbl.setStyleSheet(lbl_css)
+        self._end_lbl.setStyleSheet(lbl_css)
 
     # ── Day clamping (adjusts max day when month/year changes) ────
     def _clamp_start_day(self):
@@ -676,6 +726,12 @@ class _DateRangeDialog(QDialog):
         return self._cleared
 
     def selected_from(self):
+        if self.month_mode.isChecked():
+            ym = self.month_combo.currentData() or ''
+            first = QDate.fromString(f"{ym}-01", "yyyy-MM-dd")
+            if first.isValid():
+                return first
+            return QDate()   # invalid → _on_apply shows the error
         return QDate(
             self.start_year.value(),
             self.start_month.currentIndex() + 1,
@@ -683,6 +739,12 @@ class _DateRangeDialog(QDialog):
         )
 
     def selected_to(self):
+        if self.month_mode.isChecked():
+            first = self.selected_from()
+            if first.isValid():
+                return QDate(first.year(), first.month(),
+                             first.daysInMonth())
+            return QDate()
         return QDate(
             self.end_year.value(),
             self.end_month.currentIndex() + 1,
@@ -777,6 +839,7 @@ class DateRangeWidget(QWidget):
             self._from_date, self._to_date,
             self._min_date, self._max_date,
             parent=self.window(),
+            range_active=self._active,
         )
         if dlg.exec() == QDialog.Accepted:
             if dlg.was_cleared():

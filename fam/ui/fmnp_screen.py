@@ -1,4 +1,14 @@
-"""Screen D: FMNP Entry."""
+"""Screen D: External Payments Entry (formerly FMNP Entry).
+
+v2.1.0 (ENH-002): generalized from FMNP-only to any payment method
+with ``external_matching_accepted`` ON.  The selected method drives
+the denomination (slot count, whole-multiple validation, G2), the
+photo requirement, and the payout preview (G1) — all inherited from
+the method's existing Settings fields; entries snapshot that config
+at save time (see fam/models/fmnp.py).  The class name FMNPScreen
+and the ``entry_saved`` signal are kept — both are pinned by the
+sync mutation-wiring tests and main_window plumbing.
+"""
 
 import logging
 import os
@@ -57,6 +67,15 @@ class FMNPScreen(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._editing_id = None
+        # v2.1.0 (ENH-002): while editing, the entry's own config
+        # snapshots ((match%, cashes_original) tuple or None) and
+        # denomination snapshot drive payout + validation; the
+        # method dropdown is locked.  _temp_method_item marks a
+        # dropdown item added just to display a no-longer-external
+        # method during an edit.
+        self._editing_snapshots = None
+        self._editing_denom_snapshot = None
+        self._temp_method_item = False
         # Multi-photo slots: list of dicts with 'source_path' and 'stored_path'
         self._photo_slots: list[dict] = []
         self._photo_slot_widgets: list[dict] = []  # UI widgets per slot
@@ -68,7 +87,7 @@ class FMNPScreen(QWidget):
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(6)
 
-        title = QLabel("FMNP Check Tracking")
+        title = QLabel("External Payments Entry")
         title.setObjectName("screen_title")
         layout.addWidget(title)
 
@@ -94,6 +113,37 @@ class FMNPScreen(QWidget):
         row1.addWidget(self.md_combo)
         row1.addStretch()
         form_layout.addLayout(row1)
+
+        # ── Payment method (v2.1.0 / ENH-002) ─────────────────
+        # External-enabled methods only (Settings → Payment
+        # Methods → External Matching).  Defaults to FMNP — the
+        # most common external method, and the continuity choice
+        # for existing FMNP users.
+        row1b = QHBoxLayout()
+        row1b.addWidget(make_field_label("Payment Method"))
+        self.method_combo = NoScrollComboBox()
+        self.method_combo.setMinimumWidth(180)
+        self.method_combo.currentIndexChanged.connect(
+            self._on_method_changed)
+        row1b.addWidget(self.method_combo)
+        # Hint when NO method is external-enabled (the screen is
+        # unusable until Settings opts one in).
+        self.no_methods_hint = QLabel(
+            "No payment methods are enabled for external matching "
+            "— enable one in Settings → Payment Methods.")
+        self.no_methods_hint.setStyleSheet(f"""
+            color: {HARVEST_GOLD};
+            background-color: {WARNING_BG};
+            border: 1px solid {HARVEST_GOLD};
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-weight: bold;
+            font-size: 12px;
+        """)
+        self.no_methods_hint.setVisible(False)
+        row1b.addWidget(self.no_methods_hint)
+        row1b.addStretch()
+        form_layout.addLayout(row1b)
 
         row2 = QHBoxLayout()
         row2.addWidget(make_field_label("Vendor"))
@@ -180,6 +230,21 @@ class FMNPScreen(QWidget):
         # Connect amount changes to rebuild photo slots
         self.amount_spin.valueChanged.connect(self._on_amount_changed)
 
+        # ── Payout preview (G1, v2.1.0 / ENH-002) ─────────────
+        # Live money line driven by the SELECTED method's match %
+        # and cashes-original config — the same values the entry
+        # will snapshot at save time.
+        self.payout_preview = QLabel("")
+        self.payout_preview.setWordWrap(True)
+        self.payout_preview.setStyleSheet(f"""
+            color: {PRIMARY_GREEN}; font-weight: bold;
+            font-size: 13px; padding: 2px;
+        """)
+        self.payout_preview.setVisible(False)
+        form_layout.addWidget(self.payout_preview)
+        self.vendor_combo.currentIndexChanged.connect(
+            self._update_payout_preview)
+
         self.error_label = QLabel("")
         self.error_label.setStyleSheet(f"""
             color: {ERROR_COLOR}; font-weight: bold;
@@ -192,7 +257,7 @@ class FMNPScreen(QWidget):
         form_layout.addWidget(self.error_label)
 
         btn_row = QHBoxLayout()
-        self.save_btn = QPushButton("Add FMNP Entry")
+        self.save_btn = QPushButton("Add Entry")
         self.save_btn.setObjectName("primary_btn")
         self.save_btn.clicked.connect(self._save_entry)
         btn_row.addWidget(self.save_btn)
@@ -237,7 +302,7 @@ class FMNPScreen(QWidget):
         # see ``_load_market_days`` for the "All Market Days"
         # sentinel).
         layout.addWidget(make_section_label(
-            "FMNP Entries (filter below)"))
+            "External Payment Entries (filter below)"))
         filter_row = QHBoxLayout()
         filter_row.addWidget(make_field_label("Date range"))
         self.date_range = DateRangeWidget()
@@ -258,13 +323,18 @@ class FMNPScreen(QWidget):
         # identify which market each entry belongs to when the
         # "All Market Days" filter is active and the table mixes
         # entries from multiple market days.
+        # v2.1.0 (ENH-002): added "Method" (entry's snapshot — the
+        # table mixes methods now) and "FAM Owes" (payout derived
+        # from the entry's OWN config snapshots, never the method's
+        # current settings).
         self.table = QTableWidget()
-        self.table.setColumnCount(10)
+        self.table.setColumnCount(12)
         self.table.setHorizontalHeaderLabels(
-            ["ID", "Market Day", "Vendor", "Amount", "Checks",
-             "Entered By", "Notes", "Photo", "Status", "Actions"]
+            ["ID", "Market Day", "Method", "Vendor", "Amount",
+             "FAM Owes", "Count", "Entered By", "Notes", "Photo",
+             "Status", "Actions"]
         )
-        configure_table(self.table, actions_col=9, actions_width=160)
+        configure_table(self.table, actions_col=11, actions_width=160)
         layout.addWidget(self.table)
 
     def refresh(self):
@@ -275,34 +345,125 @@ class FMNPScreen(QWidget):
         # photos) when the volunteer briefly navigated away to
         # check Reports.  Now we only cancel if there's nothing in
         # progress to lose.
-        self._configure_fmnp_denomination()
+        self._load_methods()
+        self._configure_selected_method()
         self._load_market_days()
         self._load_vendors()
         self._load_entries()
         if not self._has_in_progress_edit():
             self._cancel_edit()
 
-    def _configure_fmnp_denomination(self):
-        """Look up FMNP payment method and configure denomination + photo requirement."""
-        from fam.models.payment_method import get_payment_method_by_name
+    # ── Method selection (v2.1.0 / ENH-002) ───────────────────
+
+    def _load_methods(self):
+        """Populate the method dropdown with external-enabled
+        methods, preserving the current selection across refresh.
+        Default: FMNP when external-enabled (the common case and
+        the continuity choice), else the first method by
+        sort_order."""
+        from fam.models.payment_method import (
+            get_external_payment_methods)
+        if getattr(self, '_editing_id', None):
+            # The dropdown is LOCKED to the entry's method during an
+            # edit (possibly showing a temp item for a no-longer-
+            # external method) — rebuilding would clobber that.
+            return
+        previous = (self.method_combo.currentData()
+                    if self.method_combo.count() else None)
+        self._external_methods = get_external_payment_methods()
+        self.method_combo.blockSignals(True)
+        try:
+            self.method_combo.clear()
+            for m in self._external_methods:
+                self.method_combo.addItem(m['name'], userData=m['id'])
+            if self.method_combo.count():
+                target = -1
+                if previous is not None:
+                    target = self.method_combo.findData(previous)
+                if target < 0:
+                    target = self.method_combo.findText('FMNP')
+                if target < 0:
+                    target = 0
+                self.method_combo.setCurrentIndex(target)
+        finally:
+            self.method_combo.blockSignals(False)
+        if hasattr(self, 'no_methods_hint'):
+            self.no_methods_hint.setVisible(
+                self.method_combo.count() == 0)
+        self._refresh_save_button_state()
+
+    def _selected_method(self):
+        """The selected method's row dict, or None."""
+        mid = (self.method_combo.currentData()
+               if hasattr(self, 'method_combo') else None)
+        for m in getattr(self, '_external_methods', []):
+            if m['id'] == mid:
+                return m
+        return None
+
+    def _on_method_changed(self):
+        self._configure_selected_method()
+        self._on_amount_changed()
+        self._update_payout_preview()
+        self._refresh_save_button_state()
+
+    def _configure_selected_method(self):
+        """Configure denomination + photo requirement from the
+        SELECTED method (pre-v2.1.0 this was hardwired to FMNP).
+
+        ``self._fmnp_denomination`` keeps its historical name (it
+        now means "the denomination driving the form": several
+        tests set it directly) and holds, in priority order:
+          1. the entry's own ``denomination_snapshot`` while
+             EDITING an entry that has one — so a legacy entry
+             still validates against the denomination it was
+             recorded under, not today's setting;
+          2. the selected method's current denomination.
+        """
+        method = self._selected_method()
         self._fmnp_denomination = None
         self._photo_required = 'Off'
-        fmnp = get_payment_method_by_name('FMNP')
-        if fmnp:
-            if fmnp.get('denomination'):
-                denom_cents = fmnp['denomination']  # DB stores cents
-                self._fmnp_denomination = denom_cents
-                denom_dollars = cents_to_dollars(denom_cents)
-                self.amount_spin.setSingleStep(denom_dollars)
-                self.denom_hint.setText(f"({format_dollars(denom_cents)} increments)")
-                self.denom_hint.setVisible(True)
-            else:
-                self.amount_spin.setSingleStep(1.00)
-                self.denom_hint.setVisible(False)
-            self._photo_required = fmnp.get('photo_required') or 'Off'
+        denom_cents = None
+        if method:
+            denom_cents = method.get('denomination')
+            self._photo_required = method.get('photo_required') or 'Off'
+        if (getattr(self, '_editing_id', None)
+                and getattr(self, '_editing_denom_snapshot', None)):
+            denom_cents = self._editing_denom_snapshot
+        if denom_cents:
+            self._fmnp_denomination = denom_cents  # DB stores cents
+            denom_dollars = cents_to_dollars(denom_cents)
+            self.amount_spin.setSingleStep(denom_dollars)
+            self.denom_hint.setText(
+                f"({format_dollars(denom_cents)} increments)")
+            self.denom_hint.setVisible(True)
         else:
             self.amount_spin.setSingleStep(1.00)
             self.denom_hint.setVisible(False)
+
+    def _update_payout_preview(self):
+        """G1 live preview: what FAM will owe the vendor for the
+        amount currently typed, under the selected method's
+        config."""
+        if not hasattr(self, 'payout_preview'):
+            return
+        method = self._selected_method()
+        amount_cents = dollars_to_cents(self.amount_spin.value())
+        if not method or amount_cents <= 0:
+            self.payout_preview.setVisible(False)
+            return
+        from fam.utils.external_payout import (
+            compute_external_payout_cents, reimbursement_basis)
+        payout = compute_external_payout_cents(
+            amount_cents, method['match_percent'],
+            bool(method.get('vendor_cashes_original')))
+        basis = reimbursement_basis(
+            amount_cents, method['match_percent'],
+            bool(method.get('vendor_cashes_original')))
+        vendor = self.vendor_combo.currentText() or "the vendor"
+        self.payout_preview.setText(
+            f"FAM will owe {vendor} {format_dollars(payout)} — {basis}")
+        self.payout_preview.setVisible(True)
 
     def _load_market_days(self):
         # v2.0.2 fix (UF-H5): preserve the volunteer's selected
@@ -482,13 +643,20 @@ class FMNPScreen(QWidget):
         if not hasattr(self, 'save_btn'):
             return  # called during _build_ui before save_btn exists
         md_selected = self.md_combo.currentData() is not None
-        self.save_btn.setEnabled(md_selected)
+        # v2.1.0: also requires an external-enabled method to exist.
+        has_method = (not hasattr(self, 'method_combo')
+                      or self.method_combo.count() > 0)
+        self.save_btn.setEnabled(md_selected and has_method)
         if md_selected:
-            self.save_btn.setToolTip("")
+            self.save_btn.setToolTip(
+                "" if has_method else
+                "No payment methods are enabled for external "
+                "matching — enable one in Settings → Payment "
+                "Methods.")
         else:
             self.save_btn.setToolTip(
                 "Pick a specific market day above before adding "
-                "an FMNP entry.  'All Market Days' is a browse-"
+                "an entry.  'All Market Days' is a browse-"
                 "only filter for searching existing entries.")
         # Show the inline hint label only when the button is
         # disabled.  The tooltip stays as a fallback for
@@ -497,9 +665,11 @@ class FMNPScreen(QWidget):
             self.pick_md_hint_label.setVisible(not md_selected)
 
     def _load_entries(self):
-        # Refresh FMNP settings (denomination + photo requirement) in case
-        # they were changed in Settings since the screen was created.
-        self._configure_fmnp_denomination()
+        # Refresh method settings (denomination + photo requirement)
+        # in case they were changed in Settings since the screen was
+        # created.
+        self._load_methods()
+        self._configure_selected_method()
 
         # v2.0.7+: when md_id is None the "All Market Days"
         # sentinel is selected; pass through to the model layer
@@ -542,13 +712,32 @@ class FMNPScreen(QWidget):
             md_label = ' '.join(p for p in md_label_parts if p)
             self.table.setItem(
                 i, 1, make_item(md_label, e.get('market_day_date', '')))
-            self.table.setItem(i, 2, make_item(e['vendor_name']))
+            # v2.1.0: Method column — the entry's name SNAPSHOT, so
+            # a later method rename never re-labels history.
+            self.table.setItem(
+                i, 2, make_item(e.get('method_name_snapshot') or 'FMNP'))
+            self.table.setItem(i, 3, make_item(e['vendor_name']))
             amount_dollars = cents_to_dollars(e['amount'])
-            self.table.setItem(i, 3, make_item(f"${amount_dollars:.2f}", amount_dollars))
-            self.table.setItem(i, 4, make_item(str(e.get('check_count') or ''),
+            self.table.setItem(i, 4, make_item(f"${amount_dollars:.2f}", amount_dollars))
+
+            # v2.1.0: FAM Owes — derived from the entry's OWN
+            # config snapshots (EP1: payout is never stored, and
+            # never read from current settings).
+            from fam.utils.external_payout import (
+                compute_external_payout_cents)
+            match_snap = e.get('match_percent_snapshot')
+            payout_cents = compute_external_payout_cents(
+                e['amount'],
+                match_snap if match_snap is not None else 100.0,
+                bool(e.get('vendor_cashes_original_snapshot', 1)))
+            payout_dollars = cents_to_dollars(payout_cents)
+            self.table.setItem(
+                i, 5, make_item(f"${payout_dollars:.2f}", payout_dollars))
+
+            self.table.setItem(i, 6, make_item(str(e.get('check_count') or ''),
                                                 e.get('check_count') or 0))
-            self.table.setItem(i, 5, make_item(e['entered_by']))
-            self.table.setItem(i, 6, make_item(e.get('notes') or ''))
+            self.table.setItem(i, 7, make_item(e['entered_by']))
+            self.table.setItem(i, 8, make_item(e.get('notes') or ''))
 
             # Photo indicator column — show count when multiple
             if photo_count > 1:
@@ -557,13 +746,13 @@ class FMNPScreen(QWidget):
                 photo_text = "📷"
             else:
                 photo_text = "—"
-            self.table.setItem(i, 7, make_item(photo_text))
+            self.table.setItem(i, 9, make_item(photo_text))
 
-            self.table.setItem(i, 8, make_item(e.get('status', 'Active')))
+            self.table.setItem(i, 10, make_item(e.get('status', 'Active')))
 
             # Grey out all cells for deleted entries
             if is_deleted:
-                for col in range(9):
+                for col in range(11):
                     item = self.table.item(i, col)
                     if item:
                         item.setForeground(grey)
@@ -590,7 +779,7 @@ class FMNPScreen(QWidget):
                 del_btn.clicked.connect(lambda checked, eid=entry_id: self._delete_entry(eid))
                 action_layout.addWidget(del_btn)
 
-            self.table.setCellWidget(i, 9, action_widget)
+            self.table.setCellWidget(i, 11, action_widget)
             self.table.setRowHeight(i, 42)
 
         self.table.setSortingEnabled(True)
@@ -630,15 +819,16 @@ class FMNPScreen(QWidget):
         # Surface a friendly warning when the amount would have
         # produced more rows than the cap allows.  The warning
         # explains the cap and recommends splitting the entry.
+        self._update_payout_preview()
         if hasattr(self, 'photo_cap_warning'):
             if uncapped > MAX_PHOTO_SLOTS:
                 self.photo_cap_warning.setText(
-                    f"⚠  This amount represents {uncapped} checks, but "
+                    f"⚠  This amount represents {uncapped} items, but "
                     f"only {MAX_PHOTO_SLOTS} photo upload rows will be "
                     f"shown to keep the screen responsive.  If you "
-                    f"need photos for every check, split this into "
-                    f"multiple smaller FMNP entries.  The saved "
-                    f"check_count will still record the full "
+                    f"need photos for every item, split this into "
+                    f"multiple smaller entries.  The saved "
+                    f"count will still record the full "
                     f"{uncapped}."
                 )
                 self.photo_cap_warning.setVisible(True)
@@ -673,7 +863,9 @@ class FMNPScreen(QWidget):
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(6)
 
-            label_text = f"Check {i + 1}:" if count > 1 else "Photo:"
+            method = self._selected_method()
+            unit = "Check" if (method or {}).get('name', 'FMNP') == 'FMNP' else "Item"
+            label_text = f"{unit} {i + 1}:" if count > 1 else "Photo:"
             label = QLabel(label_text)
             label.setMinimumWidth(60)
             label.setStyleSheet(f"font-size: 12px; color: {SUBTITLE_GRAY};")
@@ -736,7 +928,7 @@ class FMNPScreen(QWidget):
     def _select_photo_at(self, index):
         """Open file dialog for a specific photo slot."""
         filepath, _ = QFileDialog.getOpenFileName(
-            self, f"Select Check Photo {index + 1}", "",
+            self, f"Select Photo {index + 1}", "",
             "Image Files (*.jpg *.jpeg *.png *.bmp *.gif);;All Files (*)"
         )
         if not filepath:
@@ -878,10 +1070,16 @@ class FMNPScreen(QWidget):
             # programmatically clicked.
             self._show_error(
                 "Please pick a specific market day above before "
-                "adding an FMNP entry.  'All Market Days' is a "
+                "adding an entry.  'All Market Days' is a "
                 "browse-only filter for searching existing "
                 "entries — you can't attribute a new entry to "
                 "all markets.")
+            return
+        method = self._selected_method()
+        if not method:
+            self._show_error(
+                "No payment method is enabled for external matching "
+                "— enable one in Settings → Payment Methods first.")
             return
         if not vendor_id:
             self._show_error("Please select a vendor.")
@@ -893,13 +1091,17 @@ class FMNPScreen(QWidget):
             self._show_error("Amount must be greater than $0.00.")
             return
 
-        # Validate denomination constraint (both in cents for exact integer math)
+        # G2: validate denomination constraint (both in cents for
+        # exact integer math).  While editing, the denomination is
+        # the ENTRY's own snapshot when it has one (see
+        # _configure_selected_method).
         amount_cents = dollars_to_cents(amount)
         if self._fmnp_denomination and self._fmnp_denomination > 0:
             denom = self._fmnp_denomination  # already in cents
             if amount_cents % denom != 0:
                 self._show_error(
-                    f"Amount must be a multiple of {format_dollars(denom)} (FMNP denomination). "
+                    f"Amount must be a multiple of {format_dollars(denom)} "
+                    f"({method['name']} denomination). "
                     f"e.g. {format_dollars(denom)}, {format_dollars(denom * 2)}, {format_dollars(denom * 3)}"
                 )
                 return
@@ -916,6 +1118,83 @@ class FMNPScreen(QWidget):
                     f"Photo receipt is required. {missing} {label} still needed "
                     f"({filled}/{expected} attached).")
                 return
+
+        # ── G3 double-count review (new entries only) ─────────
+        # The same physical scrip can only have come in through ONE
+        # channel: if this (vendor, method, market day) already has
+        # booth transactions, an external entry for it needs an
+        # explicit review.  Warn, don't block — mixed-flow markets
+        # can legitimately see both channels in one day; the prompt
+        # leaves an audit-aware human decision either way.  (When
+        # RX/Bucks booth acceptance arrives in a future season,
+        # this prompt is the load-bearing guard.)
+        if not self._editing_id:
+            booth = self._booth_activity(
+                md_id, vendor_id, self.method_combo.currentData())
+            if booth:
+                booth_total_cents, booth_txns = booth
+                answer = QMessageBox.question(
+                    self, "Review — Booth Activity Exists",
+                    f"{self.vendor_combo.currentText()} already has "
+                    f"{booth_txns} booth transaction(s) totalling "
+                    f"{format_dollars(booth_total_cents)} of "
+                    f"{method['name']} on this market day.\n\n"
+                    f"A token paid at the booth AND turned in by the "
+                    f"vendor as an external entry would be reimbursed "
+                    f"TWICE.  Only continue if this batch is separate "
+                    f"scrip the vendor accepted directly.\n\n"
+                    f"Record the external entry anyway?",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+
+        # ── G1 payout confirmation (+ G5 large-amount emphasis) ──
+        # The manager confirms the MONEY, not just the count.  For
+        # an EDIT, the payout is derived from the entry's snapshot
+        # config (method/config are immutable; only face value can
+        # change), which _selected_method reflects because the
+        # dropdown is locked to the entry's method.
+        from fam.utils.external_payout import (
+            compute_external_payout_cents, reimbursement_basis)
+        if self._editing_id and self._editing_snapshots:
+            snap_match, snap_cashes = self._editing_snapshots
+        else:
+            snap_match = method['match_percent']
+            snap_cashes = bool(method.get('vendor_cashes_original'))
+        payout_cents = compute_external_payout_cents(
+            amount_cents, snap_match, snap_cashes)
+        basis = reimbursement_basis(
+            amount_cents, snap_match, snap_cashes)
+        vendor_name = self.vendor_combo.currentText()
+        confirm_lines = [
+            f"FAM will owe {vendor_name} "
+            f"{format_dollars(payout_cents)} for this entry.",
+            "",
+            f"Method: {method['name']}",
+            f"Face value: {format_dollars(amount_cents)}",
+            f"Basis: {basis}",
+        ]
+        # G5: reuse the existing large-receipt threshold on the
+        # computed payout (same guard as Receipt Intake + Admin).
+        from fam.utils.app_settings import get_large_receipt_threshold
+        if cents_to_dollars(payout_cents) > get_large_receipt_threshold():
+            confirm_lines += [
+                "",
+                "⚠ LARGE AMOUNT — this payout exceeds the large-"
+                "receipt threshold. Double-check the face value "
+                "before confirming."]
+        confirm_lines += ["", "Record this entry?"]
+        answer = QMessageBox.question(
+            self, "Confirm Entry — FAM Owes "
+            + format_dollars(payout_cents),
+            "\n".join(confirm_lines),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
 
         try:
             from fam.utils.photo_storage import store_photo
@@ -956,9 +1235,14 @@ class FMNPScreen(QWidget):
                                       changed_by=entered_by)
                 self._cancel_edit()
             else:
-                # create_fmnp_entry auto-logs an INSERT audit row
-                entry_id = create_fmnp_entry(md_id, vendor_id, amount_cents,
-                                              entered_by, check_count, notes)
+                # create_fmnp_entry auto-logs an INSERT audit row and
+                # snapshots the selected method's config at insert
+                # time (single enforcement point for the snapshot
+                # discipline — see fam/models/fmnp.py).
+                entry_id = create_fmnp_entry(
+                    md_id, vendor_id, amount_cents,
+                    entered_by, check_count, notes,
+                    payment_method_id=self.method_combo.currentData())
 
                 # Store all photos after create (need entry_id for filenames)
                 photo_paths = []
@@ -994,6 +1278,34 @@ class FMNPScreen(QWidget):
         if not entry:
             return
         self._editing_id = entry_id
+
+        # v2.1.0 (ENH-002): the entry's method and config snapshots
+        # are IMMUTABLE (DB trigger enforces; corrections are
+        # void + re-enter).  Lock the dropdown to the entry's
+        # method; validation + payout derive from the entry's OWN
+        # snapshots so a later settings change can't re-value or
+        # re-validate history.  If the method is no longer
+        # external-enabled, temporarily add it so the edit shows
+        # truthfully.
+        self._editing_snapshots = (
+            (entry['match_percent_snapshot'],
+             bool(entry['vendor_cashes_original_snapshot']))
+            if entry.get('match_percent_snapshot') is not None
+            else None)
+        self._editing_denom_snapshot = entry.get('denomination_snapshot')
+        target_pm = entry.get('payment_method_id')
+        idx = self.method_combo.findData(target_pm)
+        if idx < 0 and target_pm is not None:
+            self.method_combo.addItem(
+                entry.get('method_name_snapshot') or 'Unknown',
+                userData=target_pm)
+            idx = self.method_combo.count() - 1
+            self._temp_method_item = True
+        if idx >= 0:
+            self.method_combo.setCurrentIndex(idx)
+        self.method_combo.setEnabled(False)
+        self._configure_selected_method()
+
         self.amount_spin.setValue(cents_to_dollars(entry['amount']))
         self.check_count_spin.setValue(entry.get('check_count') or 0)
         self.notes_input.setText(entry.get('notes') or '')
@@ -1016,19 +1328,37 @@ class FMNPScreen(QWidget):
             self._photo_slots.append({'source_path': None, 'stored_path': stored})
         self._rebuild_photo_slots(count)
 
-        self.save_btn.setText("Update FMNP Entry")
+        self.save_btn.setText("Update Entry")
         self.cancel_edit_btn.setVisible(True)
 
     def _cancel_edit(self):
         self._editing_id = None
-        self.save_btn.setText("Add FMNP Entry")
+        self._editing_snapshots = None
+        self._editing_denom_snapshot = None
+        if getattr(self, '_temp_method_item', False):
+            # Drop the dropdown item that existed only to display a
+            # no-longer-external method during the edit.
+            self.method_combo.blockSignals(True)
+            try:
+                self.method_combo.removeItem(
+                    self.method_combo.count() - 1)
+            finally:
+                self.method_combo.blockSignals(False)
+            self._temp_method_item = False
+        if hasattr(self, 'method_combo'):
+            self.method_combo.setEnabled(True)
+            self._configure_selected_method()
+        self.save_btn.setText("Add Entry")
         self.cancel_edit_btn.setVisible(False)
         self._clear_all_photos()
 
     def _delete_entry(self, entry_id):
         result = QMessageBox.question(
-            self, "Delete FMNP Entry",
-            "Are you sure you want to delete this FMNP entry?",
+            self, "Delete Entry",
+            "Are you sure you want to delete this entry?\n\n"
+            "Deleting (voiding) is the supported correction for an "
+            "entry recorded under the wrong method or settings — "
+            "delete it, fix Settings if needed, then re-enter.",
             QMessageBox.Yes | QMessageBox.No
         )
         if result == QMessageBox.Yes:
@@ -1051,6 +1381,34 @@ class FMNPScreen(QWidget):
             except Exception as e:
                 logger.exception("Failed to delete FMNP entry %s", entry_id)
                 self._show_error(f"Error deleting entry: {e}")
+
+    def _booth_activity(self, md_id, vendor_id, payment_method_id):
+        """(physical-instrument total cents, txn count) of ACTIVE
+        booth activity for (vendor, method, market day), or None.
+
+        G3 input: the total is denomination-true (customer_charged
+        + forfeit — same semantics as the Vendor Reimbursement
+        per-method columns), i.e. the scrip the booth already saw.
+        Status filtering via ACTIVE_TX_STATUSES (never ad-hoc
+        literals — CLAUDE.md rule 6)."""
+        from fam.database.connection import get_connection
+        from fam.models.transaction import active_tx_status_clause
+        conn = get_connection()
+        row = conn.execute(f"""
+            SELECT COALESCE(SUM(pl.customer_charged
+                                + pl.customer_forfeit_cents), 0)
+                       AS total,
+                   COUNT(DISTINCT t.id) AS txns
+            FROM payment_line_items pl
+            JOIN transactions t ON pl.transaction_id = t.id
+            WHERE t.market_day_id = ?
+              AND t.vendor_id = ?
+              AND pl.payment_method_id = ?
+              AND {active_tx_status_clause('t')}
+        """, (md_id, vendor_id, payment_method_id)).fetchone()
+        if row and row['txns']:
+            return (row['total'], row['txns'])
+        return None
 
     def _show_error(self, msg):
         self.error_label.setText(msg)

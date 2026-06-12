@@ -64,6 +64,10 @@ def db(tmp_path):
         "INSERT INTO payment_methods (id, name, match_percent, "
         "denomination, sort_order, is_active) VALUES "
         "(11, 'Cash', 0.0, NULL, 5, 1)")
+    # v38: fmnp_entries inserts require a method id + config snapshots
+    conn.execute(
+        "INSERT INTO payment_methods (id, name, match_percent, "
+        "is_active, sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
     conn.execute(
         "INSERT INTO market_payment_methods (market_id, "
         "payment_method_id) VALUES (1, 10), (1, 11)")
@@ -536,8 +540,12 @@ class TestFMNPDataFlow:
         ``Total Due to Vendor``."""
         db.execute(
             "INSERT INTO fmnp_entries (market_day_id, vendor_id, "
-            "amount, status, entered_by, created_at) VALUES "
-            "(1, 1, 1500, 'Active', 'Tester', '2026-05-01 10:00:00')")
+            "amount, status, entered_by, created_at, "
+            "payment_method_id, method_name_snapshot, "
+            "match_percent_snapshot, vendor_cashes_original_snapshot) "
+            "VALUES "
+            "(1, 1, 1500, 'Active', 'Tester', '2026-05-01 10:00:00', "
+            "90, 'FMNP', 100.0, 1)")
         db.commit()
         from fam.sync.data_collector import _collect_vendor_reimbursement
         rows = _collect_vendor_reimbursement(db, [1])
@@ -547,20 +555,29 @@ class TestFMNPDataFlow:
         assert v['Total Due to Vendor'] == 15.00
 
     def test_fmnp_entries_collector_emits_row(self, db):
+        # R1 (2026-06-11): the 'FMNP Entries' tab is deprecated —
+        # its collector returns [] to drain the sheet.  The
+        # replication arrow this test guards (external FMNP entry →
+        # cloud sync) now lands on the External Payment Entries
+        # collector: one row per entry, all external methods.
         db.execute(
             "INSERT INTO fmnp_entries (market_day_id, vendor_id, "
-            "amount, status, entered_by, created_at, notes) VALUES "
+            "amount, status, entered_by, created_at, notes, "
+            "payment_method_id, method_name_snapshot, "
+            "match_percent_snapshot, vendor_cashes_original_snapshot) "
+            "VALUES "
             "(1, 1, 2500, 'Active', 'Tester', '2026-05-01 10:00:00',"
-            "'check #123, #124')")
+            "'check #123, #124', 90, 'FMNP', 100.0, 1)")
         db.commit()
-        from fam.sync.data_collector import _collect_fmnp_entries
-        rows = _collect_fmnp_entries(db, md_id=1)
-        assert len(rows) >= 1
-        # FMNP-Entry-screen rows carry Source='FMNP Entry'; rows
-        # collected from a payment line item carry 'Payment'.  We
-        # only inserted via the external FMNP table here.
-        ext = [r for r in rows if r.get('Source') == 'FMNP Entry']
-        assert len(ext) >= 1
+        from fam.sync.data_collector import (
+            _collect_external_payment_entries,
+        )
+        rows = _collect_external_payment_entries(db, md_id=1)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row['Payment Method'] == 'FMNP'
+        assert row['Face Value'] == 25.00
+        assert row['Status'] == 'Active'
 
 
 # ════════════════════════════════════════════════════════════════════

@@ -596,12 +596,14 @@ class Stage3Scene(WalkthroughScene):
         return group
 
 
-# ── Stage 4: End-of-market FMNP returns ─────────────────────────
+# ── Stage 4: End-of-market external payments collection ─────────
 
 class Stage4Scene(WalkthroughScene):
-    """Vendor hands FMNP checks to the manager, who logs them.  The
-    important callout: log only, FAM does NOT add a match, vendor
-    cashes the check themselves."""
+    """Vendor hands collected scrip (FMNP checks, Food RX, Food
+    Bucks) to the manager, who logs it on the External Payments
+    Entry screen.  The important callout: what FAM owes depends on
+    the method — FMNP is match-only (vendor cashes the check
+    themselves), Food RX is face + match, Food Bucks is face only."""
 
     def _build(self):
         # Vendor card on the left
@@ -610,9 +612,9 @@ class Stage4Scene(WalkthroughScene):
             card_width=90, card_height=90, parent=self)
         self._vendor_card.move(40, 25)
 
-        # Check stack appearing between vendor and manager
+        # Scrip stack appearing between vendor and manager
         self._checks_card = SceneCard(
-            CheckIcon(size=40), caption='FMNP checks',
+            CheckIcon(size=40), caption='Collected scrip',
             card_width=100, card_height=90, parent=self)
         self._checks_card.move(155, 25)
         _make_opacity_effect(self._checks_card, initial=0.0)
@@ -633,9 +635,9 @@ class Stage4Scene(WalkthroughScene):
         self._arrow_2.move(440, 50)
         _make_opacity_effect(self._arrow_2, initial=0.0)
 
-        # FMNP entry page (clipboard)
+        # External Payments Entry page (clipboard)
         self._clipboard_card = SceneCard(
-            ClipboardIcon(size=40), caption='FMNP Entry page',
+            ClipboardIcon(size=40), caption='External Payments page',
             sub_caption='log → reimburse',
             card_width=120, card_height=110, parent=self)
         self._clipboard_card.move(485, 15)
@@ -643,10 +645,14 @@ class Stage4Scene(WalkthroughScene):
 
         # Important callout — the key clarification
         self._callout = QLabel(
-            "  ✱  <b>FAM reimburses the face value of FMNP checks</b> "
-            "(no match percent added). The vendor already applied their "
-            "match at the booth and cashes the check separately — so "
-            "they're made whole on the matched value they gave the customer.",
+            "  ✱  <b>What FAM owes depends on the method.</b> FMNP: the "
+            "vendor cashes the check with the program, so FAM owes the "
+            "match only (numerically the face value at 100% match). "
+            "Food RX: FAM collects the paper and owes face + match. "
+            "Food Bucks: face only — reward scrip is never matched "
+            "again. The entry screen previews the exact payout, and "
+            "every saved entry remembers the settings it was recorded "
+            "under (the 'Reimbursement Basis' on the synced sheet).",
             parent=self)
         self._callout.setStyleSheet(
             f"background:{WHITE};color:{TEXT_COLOR};"
@@ -849,27 +855,35 @@ STAGES: tuple[StageDef, ...] = (
     ),
     StageDef(
         number=4,
-        title='End-of-Day FMNP Logging',
+        title='End-of-Day External Payments Logging',
         role_label='Market Manager · Usually Not Volunteers',
         key_takeaway=(
-            "FAM reimburses the face value of FMNP checks at end-of-month "
-            "— no extra match added. The vendor already applied 2× at the "
-            "booth and cashes the check separately."
+            "Scrip vendors accepted directly is logged on the External "
+            "Payments Entry page. What FAM owes depends on the method: "
+            "FMNP = the match only (vendor cashes the check), Food RX = "
+            "face + match, Food Bucks = face only."
         ),
         narrative=(
             "After the market closes, the manager (this part isn't "
-            "usually a volunteer's job) collects any FMNP checks the "
-            "vendors took that day and logs them on the FMNP Entry page. "
-            "<b>Here's the math:</b> a participating-FAM vendor treats "
-            "an FMNP check at double its face value at the booth — a $5 "
-            "check counts as $10 of food. The vendor cashes the check "
-            "directly with the program for the original $5, and FAM "
-            "<b>reimburses the same $5 face value</b> at end-of-month so "
-            "the vendor ends up whole on the match they applied. We do "
-            "<b>not</b> add a match percent on top — the vendor already "
-            "did. The check amounts show up under 'FMNP (External)' in "
-            "the Vendor Reimbursement report and are included in the "
-            "total reimbursement check we cut to the vendor."
+            "usually a volunteer's job) collects the scrip vendors "
+            "accepted directly that day — FMNP checks, Food RX, Food "
+            "Bucks — and logs it on the External Payments Entry page, "
+            "one entry per method. <b>Here's the math for FMNP:</b> a "
+            "participating-FAM vendor treats an FMNP check at double "
+            "its face value at the booth — a $5 check counts as $10 of "
+            "food. The vendor cashes the check directly with the "
+            "program for the original $5, and FAM <b>owes the $5 match</b> "
+            "at end-of-month so the vendor ends up whole — we do "
+            "<b>not</b> add a match percent on top of that; the vendor "
+            "already applied it at the booth. For <b>Food "
+            "Trust, so FAM owes the vendor face PLUS match ($20 on a "
+            "$10 check). For <b>Food Bucks</b>, FAM owes face only — "
+            "reward scrip was already matched when it was earned. The "
+            "screen previews the exact payout before you save, and the "
+            "amounts show up under 'FMNP (External)' and the per-method "
+            "'(External)' columns in the Vendor Reimbursement report, "
+            "included in the total reimbursement check we cut to the "
+            "vendor."
         ),
         scene_factory=Stage4Scene,
     ),

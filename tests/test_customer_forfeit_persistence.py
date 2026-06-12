@@ -483,11 +483,17 @@ class TestDetailedLedgerColumn:
             "INSERT INTO market_days (id, market_id, date, "
             "status, opened_by) VALUES "
             "(1, 1, '2099-05-01', 'Open', 'T')")
+        # v38: fmnp_entries inserts require a method id + config snapshots
+        fresh_db.execute(
+            "INSERT INTO payment_methods (id, name, match_percent, "
+            "is_active, sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
         fresh_db.execute(
             "INSERT INTO fmnp_entries (id, market_day_id, "
-            "vendor_id, amount, status, entered_by, created_at) "
+            "vendor_id, amount, status, entered_by, created_at, "
+            "payment_method_id, method_name_snapshot, "
+            "match_percent_snapshot, vendor_cashes_original_snapshot) "
             "VALUES (1, 1, 1, 1500, 'Active', 'T', "
-            "'2099-05-01 10:00:00')")
+            "'2099-05-01 10:00:00', 90, 'FMNP', 100.0, 1)")
         fresh_db.commit()
 
         rows = _collect_detailed_ledger(fresh_db, 1)

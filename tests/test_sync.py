@@ -179,14 +179,14 @@ class TestDataCollector:
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
-        # v1.9.10: 10 tabs (added 'Generated Rewards' for the
-        # customer-facing rewards add-on; required by default).
-        assert len(data) == 10
+        # v1.9.10: +'Generated Rewards'.  v2.1.0 (ENH-002):
+        # +'External Payment Entries' (11 tabs).
+        assert len(data) == 11
         expected_tabs = {
             'Vendor Reimbursement', 'FAM Match Report', 'Detailed Ledger',
             'Transaction Log', 'Activity Log', 'Geolocation',
             'FMNP Entries', 'Market Day Summary', 'Error Log',
-            'Generated Rewards',
+            'Generated Rewards', 'External Payment Entries',
         }
         assert set(data.keys()) == expected_tabs
 
@@ -284,7 +284,7 @@ class TestDataCollector:
 
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
-        assert len(data) == 10  # v1.9.10: +Generated Rewards
+        assert len(data) == 11  # v1.9.10 +Generated Rewards; v2.1.0 +External Payment Entries
         assert data['Vendor Reimbursement'] == []
         assert data['Detailed Ledger'] == []
         assert len(data['Market Day Summary']) == 1  # Summary always has 1 row
@@ -335,7 +335,7 @@ class TestSyncTabToggles:
         md_id, _ = _create_market_day_with_transactions()
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(md_id)
-        assert len(data) == 10  # v1.9.10: +Generated Rewards
+        assert len(data) == 11  # v1.9.10 +Generated Rewards; v2.1.0 +External Payment Entries
 
     def test_required_tabs_always_enabled(self):
         """Required tabs cannot be disabled via is_sync_tab_enabled."""
@@ -416,9 +416,9 @@ class TestSyncManager:
         data = collect_sync_data(md_id)
         results = manager.sync_all(data)
 
-        assert len(results) == 11  # v1.9.10: 10 data tabs + Agent Tracker
+        assert len(results) == 12  # 11 data tabs + Agent Tracker (v2.1.0 +External Payment Entries)
         assert all(r.success for r in results.values())
-        assert len(backend.upsert_calls) == 11  # v1.9.10: 10 + Agent Tracker
+        assert len(backend.upsert_calls) == 12  # 11 + Agent Tracker (v2.1.0)
 
     def test_sync_all_records_last_sync_at(self):
         md_id, _ = _create_market_day_with_transactions()
@@ -472,8 +472,8 @@ class TestSyncManager:
         manager = SyncManager(backend, throttle_writes=False)
         results = manager.clear_market_data()
 
-        assert len(results) == 11  # v1.9.10: 10 data tabs + Agent Tracker
-        assert len(backend.delete_calls) == 11
+        assert len(results) == 12  # 11 data tabs + Agent Tracker (v2.1.0 +External Payment Entries)
+        assert len(backend.delete_calls) == 12
         for call in backend.delete_calls:
             assert call[1] == 'CLR'
             assert call[2] == 'dev-clr'
@@ -647,10 +647,11 @@ class TestMultiDeviceIsolation:
         data_b = collect_sync_data(md2)
         results_b = manager.sync_all(data_b)
 
-        # v1.9.10: each sync produces 11 upsert calls
-        # (10 data tabs incl. Generated Rewards + Agent Tracker)
-        assert calls_a == 11
-        assert len(backend.upsert_calls) == 22  # 11 + 11
+        # Each sync produces 12 upsert calls (11 data tabs incl.
+        # Generated Rewards + External Payment Entries (v2.1.0) +
+        # Agent Tracker).
+        assert calls_a == 12
+        assert len(backend.upsert_calls) == 24  # 12 + 12
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1243,7 +1244,7 @@ class TestEdgeCases:
         expected_mc = derive_market_code(market['name'])
 
         data = collect_sync_data(md_id)
-        assert len(data) == 10  # v1.9.10: +Generated Rewards
+        assert len(data) == 11  # v1.9.10 +Generated Rewards; v2.1.0 +External Payment Entries
         for tab, rows in data.items():
             for row in rows:
                 if tab != 'Error Log':
@@ -1328,9 +1329,10 @@ class TestEdgeCases:
         manager = SyncManager(ExplodingBackend(), throttle_writes=False)
         results = manager.sync_all(data)
 
-        # All 10 data tabs + Agent Tracker should have failed
-        # gracefully (v1.9.10: +Generated Rewards).
-        assert len(results) == 11
+        # All 11 data tabs + Agent Tracker should have failed
+        # gracefully (v1.9.10 +Generated Rewards; v2.1.0
+        # +External Payment Entries).
+        assert len(results) == 12
         for r in results.values():
             assert r.success is False
             assert "Network unreachable" in r.error
@@ -1831,7 +1833,8 @@ class TestSheetKeysErrorLog:
         required by default).  Test name preserved for blame
         continuity; the assertion floor is what matters."""
         from fam.sync.manager import SyncManager
-        assert len(SyncManager.SHEET_KEYS) == 11
+        # v2.1.0 (ENH-002): +External Payment Entries.
+        assert len(SyncManager.SHEET_KEYS) == 12
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1992,11 +1995,10 @@ class TestAgentTracker:
         assert 'Tracker network error' in results['Agent Tracker'].error
 
     def test_agent_tracker_sheets_synced_count(self):
-        """Sheets Synced should show correct counts (e.g. '10/10').
+        """Sheets Synced should show correct counts (e.g. '11/11').
 
-        v1.9.10 bumped this from 9/9 to 10/10 with the addition of
-        the 'Generated Rewards' tab (customer-facing rewards add-on,
-        required by default).
+        v1.9.10 bumped this from 9/9 to 10/10 (+Generated Rewards);
+        v2.1.0 (ENH-002) to 11/11 (+External Payment Entries).
         """
         _enable_all_optional_tabs()
         md_id, _ = _create_market_day_with_transactions()
@@ -2010,7 +2012,7 @@ class TestAgentTracker:
 
         tracker_row = [c for c in backend.upsert_calls
                        if c[0] == 'Agent Tracker'][0][1][0]
-        assert tracker_row['Sheets Synced'] == '10/10'
+        assert tracker_row['Sheets Synced'] == '11/11'
 
 
 
@@ -2325,9 +2327,14 @@ class TestEnhancedVendorReimbursement:
         vendor = conn.execute("SELECT id FROM vendors LIMIT 1").fetchone()
 
         # Add an external FMNP entry
+        # v38: fmnp_entries inserts require a method id + config snapshots
         conn.execute(
-            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by)"
-            " VALUES (?, ?, 1000, 'Test')",
+            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by,"
+            "  payment_method_id, method_name_snapshot, match_percent_snapshot,"
+            "  vendor_cashes_original_snapshot)"
+            " VALUES (?, ?, 1000, 'Test',"
+            "  (SELECT id FROM payment_methods WHERE name='FMNP'),"
+            "  'FMNP', 100.0, 1)",
             (md_id, vendor['id']))
         conn.commit()
 
@@ -2355,9 +2362,14 @@ class TestEnhancedVendorReimbursement:
         md_id = create_market_day(market['id'], '2026-07-01', opened_by='Test')
 
         # Add FMNP entry only (no transactions for this vendor)
+        # v38: fmnp_entries inserts require a method id + config snapshots
         conn.execute(
-            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by)"
-            " VALUES (?, 999, 2000, 'Test')", (md_id,))
+            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, entered_by,"
+            "  payment_method_id, method_name_snapshot, match_percent_snapshot,"
+            "  vendor_cashes_original_snapshot)"
+            " VALUES (?, 999, 2000, 'Test',"
+            "  (SELECT id FROM payment_methods WHERE name='FMNP'),"
+            "  'FMNP', 100.0, 1)", (md_id,))
         conn.commit()
 
         from fam.sync.data_collector import collect_sync_data

@@ -858,6 +858,12 @@ class TestDataIntegrity:
     def test_fmnp_entry_soft_delete_preserves_row(self, fresh_db):
         """Verify FMNP soft-delete keeps the row with status='Deleted'."""
         _seed_full(fresh_db)
+        # v38: fmnp_entries inserts require a method id + config snapshots
+        fresh_db.execute(
+            "INSERT INTO payment_methods (id, name, match_percent, is_active, sort_order)"
+            " VALUES (90, 'FMNP', 100.0, 0, 90)"
+        )
+        fresh_db.commit()
         from fam.models.fmnp import create_fmnp_entry, delete_fmnp_entry, get_fmnp_entries
         eid = create_fmnp_entry(1, 1, 4000, 'Admin')
         delete_fmnp_entry(eid)
@@ -872,6 +878,12 @@ class TestDataIntegrity:
 
     def test_fmnp_active_only_false_returns_deleted(self, fresh_db):
         _seed_full(fresh_db)
+        # v38: fmnp_entries inserts require a method id + config snapshots
+        fresh_db.execute(
+            "INSERT INTO payment_methods (id, name, match_percent, is_active, sort_order)"
+            " VALUES (90, 'FMNP', 100.0, 0, 90)"
+        )
+        fresh_db.commit()
         from fam.models.fmnp import create_fmnp_entry, delete_fmnp_entry, get_fmnp_entries
         eid = create_fmnp_entry(1, 1, 4000, 'Admin')
         delete_fmnp_entry(eid)
@@ -1166,13 +1178,26 @@ class TestProductionReadiness:
         assert ledger[0]['Timestamp'] != ''
 
     def test_fmnp_entries_has_timestamp(self, fresh_db):
-        """FMNP Entries sync data includes Timestamp and new per-check columns."""
+        """External payment entry sync rows include Timestamp.
+
+        R1 (2026-06-11): the 'FMNP Entries' tab is deprecated — its
+        collector returns [] to drain the device's rows from the
+        shared sheet — so the Timestamp guarantee for FMNP entries
+        now lives on the 'External Payment Entries' tab (one row
+        per entry, R1 row shape).
+        """
         from fam.utils.app_settings import set_setting
         from fam.models.market_day import create_market_day
         from fam.models.fmnp import create_fmnp_entry
         from fam.sync.data_collector import collect_sync_data
 
         _seed_full(fresh_db)
+        # v38: fmnp_entries inserts require a method id + config snapshots
+        fresh_db.execute(
+            "INSERT INTO payment_methods (id, name, match_percent, is_active, sort_order)"
+            " VALUES (90, 'FMNP', 100.0, 0, 90)"
+        )
+        fresh_db.commit()
         set_setting('market_code', 'TST')
         set_setting('device_id', 'dev-ts')
         set_setting('sync_tab_fam_match_report', '1')
@@ -1182,17 +1207,18 @@ class TestProductionReadiness:
         create_fmnp_entry(md_id, vendor['id'], 2000, entered_by='Test')
 
         data = collect_sync_data(md_id)
-        fmnp = data['FMNP Entries']
-        assert len(fmnp) >= 1
-        row = fmnp[0]
+        # R1: deprecated tab still collected, deliberately empty (the
+        # empty upsert drains this device's rows on the next sync).
+        assert data['FMNP Entries'] == []
+        entries = data['External Payment Entries']
+        assert len(entries) >= 1
+        row = entries[0]
         assert 'Timestamp' in row
         assert row['Timestamp'] != ''
         assert 'Entry ID' in row
-        assert 'Transaction ID' in row
-        assert 'Source' in row
-        assert 'Check' in row
-        assert 'Check Amount' in row
-        assert 'Total Amount' in row
+        assert row['Payment Method'] == 'FMNP'
+        assert 'Face Value' in row
+        assert 'FAM Owes Vendor' in row
 
 
 # ══════════════════════════════════════════════════════════════════

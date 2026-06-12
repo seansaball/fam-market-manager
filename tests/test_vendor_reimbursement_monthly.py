@@ -412,15 +412,24 @@ class TestFmnpOnlyMultiMonth:
         md_apr = _open_md(market['id'], '2026-04-08')
         md_may = _open_md(market['id'], '2026-05-08')
 
+        # v38: fmnp_entries inserts require a method id + config snapshots
         conn.execute(
             "INSERT INTO fmnp_entries "
-            "(market_day_id, vendor_id, amount, entered_by) "
-            "VALUES (?, ?, 1500, 'Tester')",
+            "(market_day_id, vendor_id, amount, entered_by, "
+            " payment_method_id, method_name_snapshot, "
+            " match_percent_snapshot, vendor_cashes_original_snapshot) "
+            "VALUES (?, ?, 1500, 'Tester', "
+            " (SELECT id FROM payment_methods WHERE name='FMNP'), "
+            " 'FMNP', 100.0, 1)",
             (md_apr, flower_vendor_id))
         conn.execute(
             "INSERT INTO fmnp_entries "
-            "(market_day_id, vendor_id, amount, entered_by) "
-            "VALUES (?, ?, 2500, 'Tester')",
+            "(market_day_id, vendor_id, amount, entered_by, "
+            " payment_method_id, method_name_snapshot, "
+            " match_percent_snapshot, vendor_cashes_original_snapshot) "
+            "VALUES (?, ?, 2500, 'Tester', "
+            " (SELECT id FROM payment_methods WHERE name='FMNP'), "
+            " 'FMNP', 100.0, 1)",
             (md_may, flower_vendor_id))
         conn.commit()
 
@@ -453,10 +462,15 @@ class TestSameMonthFmnpTxnMerge:
                  fam_tid='FAM-TST-20260610-0001')
 
         conn = get_connection()
+        # v38: fmnp_entries inserts require a method id + config snapshots
         conn.execute(
             "INSERT INTO fmnp_entries "
-            "(market_day_id, vendor_id, amount, entered_by) "
-            "VALUES (?, ?, 1000, 'Tester')",
+            "(market_day_id, vendor_id, amount, entered_by, "
+            " payment_method_id, method_name_snapshot, "
+            " match_percent_snapshot, vendor_cashes_original_snapshot) "
+            "VALUES (?, ?, 1000, 'Tester', "
+            " (SELECT id FROM payment_methods WHERE name='FMNP'), "
+            " 'FMNP', 100.0, 1)",
             (md, vendor['id']))
         conn.commit()
 

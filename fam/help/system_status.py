@@ -363,8 +363,18 @@ def collect_status() -> dict[str, Any]:
     voided_txns = _safe_count(
         "SELECT COUNT(*) FROM transactions WHERE status = 'Voided'"
     )
+    # v2.1.0 (ENH-002): fmnp_entries holds ALL external methods —
+    # count FMNP-method rows and non-FMNP external rows separately
+    # (routing by method id, same rule as the sheet tabs).
     fmnp_entries = _safe_count(
-        "SELECT COUNT(*) FROM fmnp_entries WHERE status = 'Active'"
+        "SELECT COUNT(*) FROM fmnp_entries fe"
+        " JOIN payment_methods pm ON fe.payment_method_id = pm.id"
+        " WHERE fe.status = 'Active' AND pm.name = 'FMNP'"
+    )
+    external_entries = _safe_count(
+        "SELECT COUNT(*) FROM fmnp_entries fe"
+        " JOIN payment_methods pm ON fe.payment_method_id = pm.id"
+        " WHERE fe.status = 'Active' AND pm.name != 'FMNP'"
     )
     market_days = _safe_count("SELECT COUNT(*) FROM market_days")
     audit_rows = _safe_count("SELECT COUNT(*) FROM audit_log")
@@ -410,6 +420,7 @@ def collect_status() -> dict[str, Any]:
         'confirmed_transactions': confirmed_txns,
         'voided_transactions': voided_txns,
         'fmnp_entries_active': fmnp_entries,
+        'external_entries_active': external_entries,
         'market_days_total': market_days,
         'audit_log_rows': audit_rows,
 
@@ -575,6 +586,8 @@ def format_status_for_clipboard(status: dict[str, Any]) -> str:
         f"Confirmed txns    : {_fmt_count(status['confirmed_transactions'])}",
         f"Voided txns       : {_fmt_count(status['voided_transactions'])}",
         f"Active FMNP rows  : {_fmt_count(status['fmnp_entries_active'])}",
+        f"Active ext. rows  : "
+        f"{_fmt_count(status.get('external_entries_active', 0))}",
         f"Market days total : {_fmt_count(status['market_days_total'])}",
         f"Audit log rows    : {_fmt_count(status['audit_log_rows'])}",
         "",

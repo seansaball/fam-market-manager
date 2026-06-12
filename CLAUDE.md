@@ -129,8 +129,10 @@ changing anything, map the blast radius:
   `_compute_per_vendor_state`). A method without a denomination set
   behaves completely differently from one with it.
 - **Reward-type scrip (Food Bucks) must not be matched again** — the
-  match was applied when the scrip was earned. Seed data currently
-  defaults JH Food Bucks to 100% match (ENH-001, known wrong).
+  match was applied when the scrip was earned. Fresh installs seed
+  JH Food Bucks at 0% match (ENH-001, fixed in v2.1.0); EXISTING
+  markets are not auto-changed and must verify the setting. One
+  match % drives both booth AND external math by design.
 - **Adjustments are deliberately gated, not unified.** AdjustmentDialog
   shares the engine but not the UI with PaymentScreen; denominated
   transactions route to Void-Instead by design. Keep engine parity
@@ -138,8 +140,31 @@ changing anything, map the blast radius:
 - **`device_id` and `market_code` are identity columns on every synced
   row.** Empty or duplicated device IDs corrupt cross-device sync; the
   app hard-fails launch on missing MachineGuid for this reason.
-- **Closed market days accept FMNP entries and admin adjust/void, but
-  never new transactions.** That asymmetry is intentional.
+- **Closed market days accept external payment entries (FMNP, Food
+  RX, Food Bucks — the External Payments Entry screen) and admin
+  adjust/void, but never new transactions.** That asymmetry is
+  intentional.
+- **External payout = the entry's SNAPSHOT config, never current
+  settings — and never stored.** Always derive via
+  `fam/utils/external_payout.py` from `match_percent_snapshot` +
+  `vendor_cashes_original_snapshot` (EP1, docs/SYSTEM_INVARIANTS.md
+  Layer 10). A DB trigger makes the snapshots immutable; wrong-config
+  entries are fixed by void + re-enter, never by editing.
+- **External matching adds ZERO new money fields.** Match % and
+  denomination are properties of the payment method and drive both
+  the booth and external channels; the only external-specific
+  settings are the two toggles (`external_matching_accepted`,
+  `vendor_cashes_original`). Display is by name snapshot, never a
+  live join.
+- **The `FMNP Entries` sheet tab is deprecated and DRAINING (R1,
+  2026-06-11)** — its collector returns `[]` on purpose so the empty
+  upsert removes this device's rows; ALL entries (FMNP included)
+  live on `External Payment Entries`. Do NOT "fix" the empty
+  collector, and do NOT unregister the tab from SHEET_KEYS /
+  REQUIRED_SYNC_TABS until the fleet is uniform and the coordinator
+  has deleted the tab — unregistering early stops the drain and
+  strands stale rows. The Vendor Reimbursement `FMNP (External)`
+  column is NOT part of this deprecation; its feed is unchanged.
 
 ## Deep references (read when relevant)
 

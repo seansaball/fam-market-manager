@@ -5,7 +5,8 @@ Covers:
   - photo_storage.py: store_photo with prefix, photo_exists
   - fmnp.py: get_pending_photo_uploads (multi-photo awareness)
   - drive.py: upload_pending_photos (multi-photo upload flow)
-  - data_collector.py: _collect_fmnp_entries (multi-photo URL display)
+  - data_collector.py: _collect_external_payment_entries
+    (multi-photo URL display in the single 'Photos' cell)
   - payment_screen integration: photo_source_paths in get_data/storage
 """
 
@@ -609,40 +610,53 @@ class TestDriveUploadMultiPhoto:
 
 
 # ══════════════════════════════════════════════════════════════════
-# data_collector.py — FMNP entries multi-photo URL display
+# data_collector.py — External Payment Entries multi-photo display
 # ══════════════════════════════════════════════════════════════════
 class TestDataCollectorMultiPhoto:
-    """Tests for _collect_fmnp_entries per-check row expansion."""
+    """Photo visibility on the 'External Payment Entries' tab.
+
+    R1 (2026-06-11): the 'FMNP Entries' tab is deprecated (its
+    collector always returns []) and per-check row expansion is
+    retired with it.  The new tab emits ONE row per entry; every
+    Drive URL rides in that row's single 'Photos' cell (' | '
+    -joined).  The guarantee these tests keep alive: every uploaded
+    photo URL is visible on the sheet, exactly once.
+    """
 
     def test_no_photo_url(self, fresh_db):
-        """Entry with no photo → 1 row with empty Photo field."""
+        """Entry with no photo → 1 row with empty Photos field."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry
         create_fmnp_entry(1, 1, 2500, 'Alice')
 
-        from fam.sync.data_collector import _collect_fmnp_entries
-        result = _collect_fmnp_entries(fresh_db, 1)
+        from fam.sync.data_collector import _collect_external_payment_entries
+        result = _collect_external_payment_entries(fresh_db, 1)
         assert len(result) == 1
-        assert result[0]['Photo'] == ''
-        assert result[0]['Source'] == 'FMNP Entry'
-        assert result[0]['Check'] == '1 of 1'
+        assert result[0]['Photos'] == ''
+        assert result[0]['Payment Method'] == 'FMNP'
+        assert result[0]['Status'] == 'Active'
         assert 'Entry ID' in result[0]
+        assert result[0]['Entry ID'].startswith('FE-')
 
     def test_single_photo_url(self, fresh_db):
-        """Single photo → 1 row with that URL."""
+        """Single photo → 1 row with that URL in Photos."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url
         entry_id = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(entry_id, 'https://drive.google.com/file/d/1/view')
 
-        from fam.sync.data_collector import _collect_fmnp_entries
-        result = _collect_fmnp_entries(fresh_db, 1)
+        from fam.sync.data_collector import _collect_external_payment_entries
+        result = _collect_external_payment_entries(fresh_db, 1)
         assert len(result) == 1
-        assert result[0]['Photo'] == 'https://drive.google.com/file/d/1/view'
-        assert result[0]['Check'] == '1 of 1'
+        assert result[0]['Photos'] == 'https://drive.google.com/file/d/1/view'
 
-    def test_multi_photo_urls_expand_to_rows(self, fresh_db):
-        """Multiple photos → one row per photo with individual URLs."""
+    def test_multi_photo_urls_joined_in_single_row(self, fresh_db):
+        """Multiple photos → ONE row with all URLs ' | '-joined.
+
+        R1 (2026-06-11): replaces the retired per-check expansion
+        pin (one row per photo with 'Photo'/'Check'/'Check Amount'/
+        'Total Amount' columns).  The entry's full amount lives in
+        'Face Value'; all URLs in 'Photos'."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url
         paths = encode_photo_paths(['photos/a.jpg', 'photos/b.jpg'])
@@ -653,27 +667,23 @@ class TestDataCollectorMultiPhoto:
         ])
         update_fmnp_photo_drive_url(entry_id, urls)
 
-        from fam.sync.data_collector import _collect_fmnp_entries
-        result = _collect_fmnp_entries(fresh_db, 1)
-        assert len(result) == 2
-        assert result[0]['Photo'] == 'https://drive/1'
-        assert result[0]['Check'] == '1 of 2'
-        assert result[0]['Check Amount'] == 25.0
-        assert result[0]['Total Amount'] == 50.0
-        assert result[1]['Photo'] == 'https://drive/2'
-        assert result[1]['Check'] == '2 of 2'
+        from fam.sync.data_collector import _collect_external_payment_entries
+        result = _collect_external_payment_entries(fresh_db, 1)
+        assert len(result) == 1
+        assert result[0]['Photos'] == 'https://drive/1 | https://drive/2'
+        assert result[0]['Face Value'] == 50.0
 
     def test_legacy_url_string(self, fresh_db):
-        """Legacy single URL string (non-JSON) → 1 row."""
+        """Legacy single URL string (non-JSON) → Photos == that URL."""
         _seed_fmnp(fresh_db)
         from fam.models.fmnp import create_fmnp_entry, update_fmnp_photo_drive_url
         entry_id = create_fmnp_entry(1, 1, 2500, 'Alice', photo_path='photos/a.jpg')
         update_fmnp_photo_drive_url(entry_id, 'https://drive.google.com/file/d/old/view')
 
-        from fam.sync.data_collector import _collect_fmnp_entries
-        result = _collect_fmnp_entries(fresh_db, 1)
+        from fam.sync.data_collector import _collect_external_payment_entries
+        result = _collect_external_payment_entries(fresh_db, 1)
         assert len(result) == 1
-        assert result[0]['Photo'] == 'https://drive.google.com/file/d/old/view'
+        assert result[0]['Photos'] == 'https://drive.google.com/file/d/old/view'
 
 
 # ══════════════════════════════════════════════════════════════════

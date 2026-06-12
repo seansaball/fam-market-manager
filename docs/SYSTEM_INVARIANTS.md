@@ -153,6 +153,28 @@ This is the financial promise to vendors. Penny drift here is
 | **W4** | Disabling the rewards feature does NOT delete or hide existing rows. |
 | **W5** | Editing/deleting a `reward_rules` row does NOT modify any `generated_rewards` row. |
 
+## Layer 10 — External payments (EP-series, v2.1.0 / ENH-002)
+
+External payment entries (`fmnp_entries`, generalized to all
+external-enabled methods) snapshot their method's config at entry
+time and DERIVE the payout everywhere — it is never stored, so
+there is no second copy to drift.  Series named **EP** (External
+Payments) because E1–E7 is taken by Layer 1 engine purity.
+Checked by `tests/_coherence.py::audit_external_entries` and
+pinned by `tests/test_external_invariants.py`.
+
+| ID | Invariant |
+|---|---|
+| **EP1** | Every reported external payout — entry-screen FAM Owes, External Payment Entries tab, `<Method> (External)` VR columns, FAM Match external rows, Detailed Ledger EXT rows, ledger backup — equals `compute_external_payout_cents(amount, match_percent_snapshot, vendor_cashes_original_snapshot)` exactly (integer cents; single half-away rounding step in the match component). Never derived from the method's CURRENT settings. |
+| **EP2** | `amount` is a whole multiple of `denomination_snapshot`. Rows with NULL snapshot (pre-v38 backfills; legacy no-denomination FMNP configs) are exempt. |
+| **EP3** | Vendor Reimbursement row identity v2 holds per row: `Σ(method-cols) + FAM Match − Customer Forfeit + FMNP (External) + Σ <Method> (External) = Total Due to Vendor` (±1¢). |
+| **EP4** | External entries never consume customer match cap and never generate rewards — structural: `get_customer_prior_match` joins transactions only, and `generated_rewards` references `customer_order_id`; external entries have neither. Pinned by structural tests, not a runtime check. |
+
+Supporting write-time enforcement (schema v38): `chk_fmnp_entry_method_insert`
+(method id + config snapshots NOT NULL on insert; `denomination_snapshot`
+exempt) and `chk_fmnp_entry_snapshot_immutable` (snapshots can never be
+changed or cleared once set — corrections are void + re-enter).
+
 ---
 
 ## How to use this document

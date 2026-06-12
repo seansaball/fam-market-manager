@@ -239,6 +239,12 @@ class TestSheetKeysAreStable:
                 'market_code', 'device_id', 'Zip Code', 'Date'],
             'FMNP Entries': [
                 'market_code', 'device_id', 'Entry ID'],
+            # v2.1.0 (ENH-002): per-entry audit tab for non-FMNP
+            # external methods.  Intentional, design-reviewed
+            # addition (ENH-002_TECHNICAL_PLAN.md); same key shape
+            # as FMNP Entries.  Existing tabs' keys are unchanged.
+            'External Payment Entries': [
+                'market_code', 'device_id', 'Entry ID'],
             'Market Day Summary': [
                 'market_code', 'device_id', 'Date'],
             'Error Log': [

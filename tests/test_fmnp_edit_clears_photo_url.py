@@ -62,6 +62,11 @@ def _seed_minimal(conn):
         "INSERT INTO market_days "
         "(id, market_id, date, status, opened_by) "
         "VALUES (1, 1, '2026-05-06', 'Open', 'T')")
+    # v38: fmnp_entries inserts require a method id + config snapshots
+    conn.execute(
+        "INSERT INTO payment_methods "
+        "(id, name, match_percent, is_active, sort_order) "
+        "VALUES (90, 'FMNP', 100.0, 0, 90)")
     conn.commit()
 
 
@@ -70,9 +75,12 @@ def _create_fmnp(conn, entry_id: int, photo_path: str | None,
     conn.execute(
         "INSERT INTO fmnp_entries "
         "(id, market_day_id, vendor_id, amount, status, "
-        " entered_by, created_at, photo_path, photo_drive_url) "
+        " entered_by, created_at, photo_path, photo_drive_url, "
+        " payment_method_id, method_name_snapshot, "
+        " match_percent_snapshot, vendor_cashes_original_snapshot) "
         "VALUES (?, 1, 1, 500, 'Active', 'T', "
-        "        '2026-05-06 12:00:00', ?, ?)",
+        "        '2026-05-06 12:00:00', ?, ?, "
+        "        90, 'FMNP', 100.0, 1)",
         (entry_id, photo_path, photo_drive_url))
     conn.commit()
 

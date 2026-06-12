@@ -84,8 +84,9 @@ def seed_sample_data():
 
     # Payment Methods.  FMNP defaults to is_active=0 so it does NOT appear
     # in Receipt Intake / Payment Screen on a fresh "Load Defaults" run.
-    # The dedicated FMNP Entry screen continues to work regardless of
-    # is_active (it looks up the payment method by name without filtering).
+    # The dedicated External Payments Entry screen continues to work
+    # regardless of is_active (it looks up external-enabled methods
+    # without filtering on is_active).
     # Coordinators who want FMNP available as a payment-row option simply
     # toggle it on from Settings → Payment Methods.
     # Denominations (integer cents):
@@ -94,17 +95,31 @@ def seed_sample_data():
     #   JH Food Bucks = $2 (200c)  — physical tokens
     # Non-denominated methods (SNAP, JH Tokens, Cash) pass NULL so
     # the volunteer can enter any cents amount.
+    #
+    # JH Food Bucks match is 0% (ENH-001, 2026-06): reward-type scrip
+    # must NOT be matched again — the match was already applied when
+    # the scrip was earned ($5 SNAP → 1 × $2 Food Bucks via the
+    # default rewards rule).  Matching at spend time double-dips.
+    # This drives both booth math AND external-payout math ("Face
+    # only") — one setting, both channels, by design.
+    #
+    # External-matching channel toggles (schema v38, ENH-002):
+    # seeded ON for FMNP only — vendors accept FMNP checks directly,
+    # cash them with the program, and FAM owes the match component.
+    # Other methods are opted in per market from Settings.
     payment_methods = [
-        ("SNAP", 100.0, 1, 1, None, None),
-        ("FMNP", 100.0, 0, 2, 500, 'Optional'),
-        ("Food RX", 100.0, 1, 3, 1000, None),
-        ("JH Food Bucks", 100.0, 1, 4, 200, None),
-        ("JH Tokens", 100.0, 1, 5, None, None),
-        ("Cash", 0.0, 1, 6, None, None),
+        # (name, match%, active, sort, denom, photo, external, cashes_orig)
+        ("SNAP", 100.0, 1, 1, None, None, 0, 0),
+        ("FMNP", 100.0, 0, 2, 500, 'Optional', 1, 1),
+        ("Food RX", 100.0, 1, 3, 1000, None, 0, 0),
+        ("JH Food Bucks", 0.0, 1, 4, 200, None, 0, 0),
+        ("JH Tokens", 100.0, 1, 5, None, None, 0, 0),
+        ("Cash", 0.0, 1, 6, None, None, 0, 0),
     ]
     cursor.executemany(
         "INSERT INTO payment_methods (name, match_percent, is_active, sort_order,"
-        " denomination, photo_required) VALUES (?, ?, ?, ?, ?, ?)",
+        " denomination, photo_required, external_matching_accepted,"
+        " vendor_cashes_original) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         payment_methods
     )
 

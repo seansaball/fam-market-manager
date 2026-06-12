@@ -48,6 +48,13 @@ def _setup_market_with_closed_and_open_days(conn):
     conn.execute(
         "INSERT INTO vendors (id, name, is_active) "
         " VALUES (20, '1.11 Juice Bar', 1)")
+    # v38: fmnp_entries inserts require a method id + config
+    # snapshots.  R1 (2026-06-11): denomination left NULL — with no
+    # check_count and no denomination snapshot the new collector
+    # emits Instruments='' (per-check splitting is retired).
+    conn.execute(
+        "INSERT INTO payment_methods (id, name, match_percent, "
+        " is_active, sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
     conn.execute(
         "INSERT INTO market_days "
         " (id, market_id, date, status, opened_by, closed_by, "
@@ -68,31 +75,40 @@ class TestFmnpCollectorIncludesClosedDayEntries:
 
     def test_collector_returns_active_entry_on_closed_market_day(self):
         """Direct test of the collector — no market_day-status
-        filter, only the entry's own Active/Deleted status."""
-        from fam.sync.data_collector import _collect_fmnp_entries
+        filter.  R1 (2026-06-11): the 'FMNP Entries' tab is
+        deprecated (its collector drains the sheet by returning []),
+        so the closed-day guarantee now lives on the External
+        Payment Entries collector, which carries ALL external
+        methods including FMNP, one row per entry."""
+        from fam.sync.data_collector import (
+            _collect_external_payment_entries,
+        )
         conn = get_connection()
         _setup_market_with_closed_and_open_days(conn)
 
         # Add an FMNP entry to the CLOSED market day (40)
+        # v38: fmnp_entries inserts require a method id + config snapshots
         conn.execute(
             "INSERT INTO fmnp_entries "
             " (id, market_day_id, vendor_id, amount, status, "
-            "  entered_by, created_at) "
+            "  entered_by, created_at, payment_method_id, "
+            "  method_name_snapshot, match_percent_snapshot, "
+            "  vendor_cashes_original_snapshot) "
             " VALUES (100, 40, 20, 500, 'Active', 'Coordinator', "
-            "  '2026-05-06 09:00:00')")
+            "  '2026-05-06 09:00:00', 90, 'FMNP', 100.0, 1)")
         conn.commit()
 
-        rows = _collect_fmnp_entries(conn, md_id=40)
-        assert len(rows) >= 1, (
-            "FMNP collector must return entries on closed market "
-            "days.  The 'fe.status = Active' filter is the entry's "
-            "own state (not the market_day's), so closed-market "
-            "entries belong in the cloud sheet just like open-"
-            "market ones.")
-        # Confirm the entry's amount made it through
-        assert any(
-            r['Total Amount'] == 5.0
-            for r in rows if r['Source'] == 'FMNP Entry')
+        rows = _collect_external_payment_entries(conn, md_id=40)
+        assert len(rows) == 1, (
+            "External Payment Entries collector must return entries "
+            "on closed market days — there is no market_day-status "
+            "filter, so closed-market entries belong in the cloud "
+            "sheet just like open-market ones.")
+        # Confirm the entry's amount + method made it through
+        # (R1 row shape: 'Face Value' in dollars, 'Payment Method'
+        # from the entry's name snapshot).
+        assert rows[0]['Face Value'] == 5.0
+        assert rows[0]['Payment Method'] == 'FMNP'
 
 
 # ─── _on_fmnp_entry_saved scopes the sync correctly ──────────────
@@ -285,12 +301,16 @@ class TestFmnpDropdownDefaultSelection:
         conn = get_connection()
         _setup_market_with_closed_and_open_days(conn)
         # FMNP method must be seeded so the screen's denomination
-        # configurator doesn't error out.
+        # configurator doesn't error out.  The fixture already
+        # seeds the v38 FMNP method row (id 90, name is UNIQUE) —
+        # promote it to the active/denominated config this test
+        # needs instead of inserting a duplicate.
         conn.execute(
-            "INSERT INTO payment_methods "
-            " (name, match_percent, is_active, sort_order, "
-            "  denomination, photo_required) "
-            " VALUES ('FMNP', 100.0, 1, 2, 500, 'Optional')")
+            "UPDATE payment_methods "
+            " SET match_percent = 100.0, is_active = 1, "
+            "     sort_order = 2, denomination = 500, "
+            "     photo_required = 'Optional' "
+            " WHERE name = 'FMNP'")
         conn.execute(
             "INSERT INTO market_vendors (market_id, vendor_id) "
             " VALUES (10, 20)")

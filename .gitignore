@@ -74,3 +74,7 @@ photos/
 
 # Local bug backlog — personal session tracking, not for the public repo
 BUGS_BACKLOG.md
+
+# Local working docs (not for the public repo)
+COORDINATOR_EMAIL_*.md
+ENH-*_TECHNICAL_PLAN.md

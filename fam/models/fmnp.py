@@ -1,7 +1,15 @@
-"""FMNP entry CRUD operations.
+"""External payment entry CRUD operations (FMNP, Food RX, Food Bucks, …).
+
+Historically FMNP-only; generalized in v2.1.0 (ENH-002) to any
+payment method with ``external_matching_accepted`` ON.  The module
+and table keep their ``fmnp`` names deliberately — 20+ references,
+DB triggers, and sheet plumbing point here, and renaming is all risk
+for no value.  Each entry snapshots its method's config at entry
+time (see ``create_fmnp_entry``); payout is always DERIVED from the
+snapshots via ``fam.utils.external_payout``, never stored.
 
 All mutations (create, update, delete) emit audit log entries so that
-FMNP reimbursement history is fully reconstructible after the fact.
+reimbursement history is fully reconstructible after the fact.
 UPDATE emits one audit row per changed field so the forensic trail
 captures exactly what was changed and what the previous value was.
 """
@@ -22,8 +30,9 @@ _AUDITED_FIELDS = ('amount', 'vendor_id', 'check_count', 'notes', 'photo_path')
 
 
 def get_fmnp_entries(market_day_id=None, active_only=True,
-                     date_from=None, date_to=None):
-    """Fetch FMNP entries with optional filters.
+                     date_from=None, date_to=None,
+                     payment_method_id=None):
+    """Fetch external payment entries with optional filters.
 
     Args:
         market_day_id: when set, restrict to that single market day.
@@ -34,6 +43,11 @@ def get_fmnp_entries(market_day_id=None, active_only=True,
             date.  Inclusive.  ``None`` means no lower bound.
         date_to: ISO ``yyyy-MM-dd`` upper bound on the market day's
             date.  Inclusive.  ``None`` means no upper bound.
+        payment_method_id: when set, restrict to entries recorded
+            against that method (v2.1.0/ENH-002 — collectors route
+            FMNP-method entries to the frozen ``FMNP Entries`` sheet
+            tab and everything else to ``External Payment Entries``).
+            ``None`` returns entries for ALL methods.
 
     The date filter targets ``market_days.date`` (the calendar date of
     the market the entry was assigned to), NOT ``fmnp_entries.created_at``
@@ -55,6 +69,9 @@ def get_fmnp_entries(market_day_id=None, active_only=True,
     if date_to:
         where_parts.append("md.date <= ?")
         params.append(date_to)
+    if payment_method_id:
+        where_parts.append("f.payment_method_id = ?")
+        params.append(payment_method_id)
     where_clause = (
         "WHERE " + " AND ".join(where_parts)
         if where_parts else "")
@@ -84,29 +101,79 @@ def get_fmnp_entry_by_id(entry_id):
 
 def create_fmnp_entry(market_day_id, vendor_id, amount, entered_by,
                       check_count=None, notes=None, photo_path=None,
-                      commit=True):
-    """Create a new FMNP entry and log the action to the audit trail.
+                      commit=True, payment_method_id=None):
+    """Create a new external payment entry and log it to the audit trail.
 
     The audit row's ``changed_by`` reflects *entered_by*, matching the
-    human-readable person who submitted the FMNP check.  The insert and
+    human-readable person who submitted the instrument.  The insert and
     audit-log write happen in a single transaction when *commit* is True.
+
+    v2.1.0 (ENH-002): *payment_method_id* selects the external
+    method; ``None`` resolves to FMNP (back-compat — every pre-v2.1.0
+    caller gets exactly the historical behavior).  The method's
+    config (name, match %, vendor-cashes-original, denomination) is
+    SNAPSHOTTED here, inside the same transaction, from the live
+    payment_methods row — this function is the single enforcement
+    point for the snapshot discipline; callers never pass snapshot
+    values.  A later settings change must not re-value this entry
+    (the chk_fmnp_entry_snapshot_immutable trigger backs that at
+    write time); wrong-config entries are fixed by void + re-enter.
     """
     conn = get_connection()
+
+    # Resolve the method row whose config gets snapshotted.
+    if payment_method_id is None:
+        method_row = conn.execute(
+            "SELECT * FROM payment_methods WHERE name = 'FMNP'"
+        ).fetchone()
+    else:
+        method_row = conn.execute(
+            "SELECT * FROM payment_methods WHERE id = ?",
+            (payment_method_id,)
+        ).fetchone()
+    if method_row is None:
+        raise ValueError(
+            f"Cannot create external entry: payment method "
+            f"{'FMNP' if payment_method_id is None else payment_method_id} "
+            f"not found")
+    method = dict(method_row)
+
     try:
         cursor = conn.execute(
             """INSERT INTO fmnp_entries
-               (market_day_id, vendor_id, amount, check_count, notes, entered_by, photo_path, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (market_day_id, vendor_id, amount, check_count, notes, entered_by, photo_path,
-             eastern_timestamp())
+               (market_day_id, vendor_id, amount, check_count, notes,
+                entered_by, photo_path, created_at,
+                payment_method_id, method_name_snapshot,
+                match_percent_snapshot, vendor_cashes_original_snapshot,
+                denomination_snapshot)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (market_day_id, vendor_id, amount, check_count, notes,
+             entered_by, photo_path, eastern_timestamp(),
+             method['id'], method['name'],
+             method['match_percent'],
+             int(bool(method.get('vendor_cashes_original'))),
+             method.get('denomination'))
         )
         entry_id = cursor.lastrowid
         note_parts = [f"vendor_id={vendor_id}",
                       f"amount=${amount/100:.2f}"]
         if check_count is not None:
             note_parts.append(f"check_count={check_count}")
+        if method['name'] == 'FMNP':
+            # Byte-identical to the pre-v2.1.0 audit text — FMNP's
+            # audit trail keeps its historical shape.
+            audit_note = "FMNP entry created: " + ", ".join(note_parts)
+        else:
+            from fam.utils.external_payout import (
+                compute_external_payout_cents)
+            payout = compute_external_payout_cents(
+                amount, method['match_percent'],
+                bool(method.get('vendor_cashes_original')))
+            note_parts.append(f"FAM owes=${payout/100:.2f}")
+            audit_note = (f"External entry created ({method['name']}): "
+                          + ", ".join(note_parts))
         log_action('fmnp_entries', entry_id, 'INSERT', entered_by,
-                   notes="FMNP entry created: " + ", ".join(note_parts),
+                   notes=audit_note,
                    commit=False)
         if commit:
             conn.commit()
@@ -114,8 +181,10 @@ def create_fmnp_entry(market_day_id, vendor_id, amount, entered_by,
         if commit:
             conn.rollback()
         raise
-    logger.info("FMNP entry created: id=%s vendor_id=%s amount=%sc by=%s",
-                entry_id, vendor_id, amount, entered_by)
+    logger.info(
+        "External entry created: id=%s method=%s vendor_id=%s "
+        "amount=%sc by=%s",
+        entry_id, method['name'], vendor_id, amount, entered_by)
     return entry_id
 
 

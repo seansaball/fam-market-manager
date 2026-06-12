@@ -61,6 +61,10 @@ def db(tmp_path):
         "INSERT INTO payment_methods (id, name, match_percent, "
         "denomination, sort_order, is_active) VALUES "
         "(2, 'Food RX', 100.0, 1000, 2, 1)")
+    # v38: fmnp_entries inserts require a method id + config snapshots
+    conn.execute(
+        "INSERT INTO payment_methods (id, name, match_percent, "
+        "is_active, sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
     conn.execute(
         "INSERT INTO market_payment_methods (market_id, "
         "payment_method_id) VALUES (1, 1), (1, 2)")
@@ -255,8 +259,12 @@ class TestVendorReimbursementCentsAccumulation:
         confirm_transaction(txn_id, confirmed_by='Tester')
         db.execute(
             "INSERT INTO fmnp_entries (market_day_id, vendor_id, "
-            "amount, status, entered_by, created_at) VALUES "
-            "(1, 1, 20, 'Active', 'Tester', '2026-05-01 10:00:00')")
+            "amount, status, entered_by, created_at, "
+            "payment_method_id, method_name_snapshot, "
+            "match_percent_snapshot, vendor_cashes_original_snapshot) "
+            "VALUES "
+            "(1, 1, 20, 'Active', 'Tester', '2026-05-01 10:00:00', "
+            "90, 'FMNP', 100.0, 1)")
         db.commit()
 
         rows = _collect_vendor_reimbursement(db, [1])

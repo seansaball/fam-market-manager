@@ -1,6 +1,5 @@
 """Regression: every monetary input field across the app should
-behave identically — overtype + cents-builder ladder, $-prefix,
-2-decimal precision.
+behave identically — standard typing, $-prefix, 2-decimal precision.
 
 User-reported (2026-04-30):
 
@@ -9,15 +8,22 @@ User-reported (2026-04-30):
      page and settings page.  If I'm typing in a money value it
      should be the same across the entire app."
 
+📌 Re-pinned 2026-06-12 (ENH-007): the consistency requirement
+stands, but the shared typing MODEL flipped from the cents-builder
+ladder (typing ``12`` → $1.20) to STANDARD calculator-style typing
+(typing ``12`` → $12) after field evidence from Bryan's market —
+volunteers typing "85" got $8.50 ("a random extra 0 at the end")
+and the manually-typed decimal key was silently swallowed.  See
+tests/test_money_typing_standard.py for the full typing contract.
+
 Pinned guarantees on every currency field, regardless of screen:
 
-  1. Widget class is ``NoScrollDoubleSpinBox`` (gets overtype +
-     cents-builder + scroll-safe focus).
+  1. Widget class is ``NoScrollDoubleSpinBox`` (standard native
+     typing + scroll-safe focus + select-all-on-focus).
   2. ``decimals == 2`` (currency precision).
   3. ``prefix == "$ "`` (with the trailing space — visual padding).
-  4. Typing ``1`` then ``2`` produces $1.20 (NOT $10.02 from the
-     Receipt Total bug, NOT $1.0 from leftover plain-Qt insert).
-  5. Typing ``1234`` produces $12.34 (full ladder).
+  4. Typing ``1`` then ``2`` produces $12 (what was typed).
+  5. Typing ``1234`` produces $1,234 (what was typed).
 
 Non-currency fields (percent, count) are intentionally exempt and
 listed in ``_NON_CURRENCY_FIELDS`` for documentation purposes.
@@ -98,7 +104,7 @@ class TestCurrencyPrefixConsistency:
 
 class TestCurrencyFieldsAllUseNoScrollDouble:
     """Every currency field must use NoScrollDoubleSpinBox so it gets
-    the overtype + cents-builder + scroll-safe focus treatment."""
+    the standard-typing + scroll-safe focus treatment."""
 
     @staticmethod
     def _read(rel_path):
@@ -176,20 +182,20 @@ class TestCurrencyInputBehaviorParity:
         ("threshold_spin (min=$1.00)",
          dict(range_min=1.00)),
     ])
-    def test_typing_12_yields_one_twenty(self, qtbot, config):
+    def test_typing_12_yields_twelve(self, qtbot, config):
         """Across every currency-field configuration, typing 1 then 2
-        should produce $1.20."""
+        should produce $12 — exactly what was typed (📌 re-pinned
+        from the ladder's $1.20, ENH-007)."""
         label, kwargs = config
         spin = self._make_currency_spin(qtbot, **kwargs)
         spin.setFocus()
         QTest.qWait(50)  # let select-all fire
         QTest.keyClick(spin, Qt.Key_1)
         QTest.keyClick(spin, Qt.Key_2)
-        # Allow $0.01 / $1.00 floor cases to clamp to their min.
-        # All non-clamped configs land on $1.20.
-        if spin.minimum() <= 1.20:
-            assert spin.value() == 1.20, (
-                f"[{label}] typing '12' → expected $1.20, got "
+        spin.interpretText()   # commit, as Tab/Enter/focus-out would
+        if spin.minimum() <= 12.00:
+            assert spin.value() == 12.00, (
+                f"[{label}] typing '12' → expected $12.00, got "
                 f"${spin.value():.2f}")
 
     @pytest.mark.parametrize("config", [
@@ -197,17 +203,19 @@ class TestCurrencyInputBehaviorParity:
         ("receipt_total_spin", dict(special_value_text="$ 0.00")),
         ("threshold_spin (min=$1.00)", dict(range_min=1.00)),
     ])
-    def test_typing_1234_yields_twelve_thirty_four(
+    def test_typing_1234_yields_twelve_thirty_four_dollars(
             self, qtbot, config):
-        """Full 4-keystroke ladder must land on $12.34."""
+        """Typing 1234 lands on $1,234 — what was typed (📌
+        re-pinned from the ladder's $12.34, ENH-007)."""
         label, kwargs = config
         spin = self._make_currency_spin(qtbot, **kwargs)
         spin.setFocus()
         QTest.qWait(50)
         for k in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4):
             QTest.keyClick(spin, k)
-        assert spin.value() == 12.34, (
-            f"[{label}] typing '1234' → expected $12.34, got "
+        spin.interpretText()   # commit, as Tab/Enter/focus-out would
+        assert spin.value() == 1234.00, (
+            f"[{label}] typing '1234' → expected $1234.00, got "
             f"${spin.value():.2f}")
 
 
@@ -220,7 +228,7 @@ class TestCurrencyInputBehaviorParity:
 class TestPaymentRowCountFieldConsistency:
     """The denomination-stepper count field used to be a raw
     ``QSpinBox`` — it now uses ``NoScrollSpinBox`` so typing in it
-    matches every other field (overtype + shift-left)."""
+    matches every other field (standard typing + scroll-safety)."""
 
     def test_count_spin_is_noscroll(self):
         """Source-level guard: payment_row.py constructs
@@ -231,8 +239,8 @@ class TestPaymentRowCountFieldConsistency:
                ).read_text(encoding='utf-8')
         assert 'self._count_spin = NoScrollSpinBox()' in src, (
             "payment_row._count_spin must be NoScrollSpinBox so it "
-            "gets the same overtype + cents-builder typing UX as "
-            "every other numeric input in the app")
+            "gets the same standard typing UX as every other "
+            "numeric input in the app")
         assert 'self._count_spin = QSpinBox()' not in src, (
             "Found legacy raw QSpinBox in payment_row — must be "
             "NoScrollSpinBox")

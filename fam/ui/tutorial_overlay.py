@@ -309,20 +309,23 @@ TUTORIAL_STEPS = [
         ],
     ),
     TutorialStep(
-        title="FMNP Check Tracking",
+        title="External Payments Entry",
         description=(
-            "Use this screen to record FMNP (Farmers Market "
-            "Nutrition Program) checks that vendors took at the "
-            "booth.\n\n"
-            "These are recorded separately from regular "
-            "transactions because the vendor applied the match "
-            "themselves at the booth (treating a $5 FMNP check "
-            "as $10 worth of food). FAM reimburses the face "
-            "value at end-of-month so the vendor is made whole "
-            "on the match they gave away.\n\n"
+            "Use this screen to record scrip that vendors "
+            "accepted directly — FMNP checks, Food RX, Food "
+            "Bucks — collected from vendors at end of market "
+            "day.\n\n"
+            "Pick the payment method from the dropdown (FMNP is "
+            "the default). The method's settings drive "
+            "everything: how much FAM owes the vendor depends "
+            "on its match % and whether the vendor cashes the "
+            "original instrument (FMNP) or FAM collects it "
+            "(Food RX / Food Bucks). A live preview shows the "
+            "payout, and saving asks you to confirm the exact "
+            "amount FAM will owe.\n\n"
             "The market-day dropdown defaults to 'All Market "
-            "Days' for browsing the full FMNP history; pick a "
-            "specific day to add a new entry."
+            "Days' for browsing history; pick a specific day to "
+            "add a new entry."
         ),
         widget_path="fmnp_screen",
         position="right",
@@ -332,12 +335,16 @@ TUTORIAL_STEPS = [
         top_offset=350,
         hints=[
             TutorialHint(
-                "FMNP Entry Form",
-                "Select the market day and vendor, enter the "
-                "dollar amount (must be a multiple of $5 — the "
-                "FMNP denomination), optionally the check count "
-                "and notes, attach a photo per check, and click "
-                "Add FMNP Entry.\n\n"
+                "Entry Form",
+                "Select the market day, payment method, and "
+                "vendor, enter the dollar amount (must be a "
+                "whole multiple of the method's denomination — "
+                "e.g. $5 FMNP checks, $10 Food RX), optionally "
+                "the count and notes, attach photos if the "
+                "method requires them, and click Add Entry. The "
+                "'FAM will owe…' preview updates live; a "
+                "confirmation dialog restates the money before "
+                "anything is saved.\n\n"
                 "When 'All Market Days' is selected, the Save "
                 "button greys out and an inline hint appears "
                 "next to it: '← Pick a specific market day above "
@@ -347,15 +354,20 @@ TUTORIAL_STEPS = [
                 "fmnp_screen.form_frame",
             ),
             TutorialHint(
-                "FMNP Entries Table",
-                "FMNP entries with a Market Day column so rows "
-                "from different days are distinguishable. With "
-                "'All Market Days' selected (the default), the "
-                "table mixes entries across the full history; "
-                "use the date-range filter to narrow down. Edit "
-                "or delete entries via the buttons in the "
-                "Actions column — all changes are written to "
-                "the audit log with old + new values.",
+                "Entries Table",
+                "Entries with Market Day, Method, and FAM Owes "
+                "columns so rows from different days and "
+                "methods are distinguishable. FAM Owes is "
+                "computed from the settings each entry was "
+                "saved under — changing Settings later never "
+                "re-values old entries (fix a wrong entry by "
+                "deleting and re-entering it). With 'All Market "
+                "Days' selected (the default), the table mixes "
+                "entries across the full history; use the "
+                "date-range filter to narrow down. Edit or "
+                "delete entries via the Actions column — all "
+                "changes are written to the audit log with "
+                "old + new values.",
                 "fmnp_screen.table",
             ),
         ],
@@ -381,16 +393,27 @@ TUTORIAL_STEPS = [
             TutorialHint(
                 "Report Filters",
                 "Narrow results by date range, market, vendor, "
-                "or payment type. Filters apply across all tabs. "
-                "Voided transactions are excluded from money "
-                "totals automatically; the Detailed Ledger keeps "
-                "voided rows visible as an audit trail.",
+                "or payment type — or pick one day in the Market "
+                "Day dropdown to snap every report to exactly "
+                "that market day. Market Day and the date range "
+                "are alternatives — whichever you touched last "
+                "wins, and the other resets. Filters apply "
+                "across all tabs (the "
+                "order-level SNAP Settlement and Generated "
+                "Rewards tabs honor Date/Market Day + Market "
+                "only — vendor and type sub-filters don't apply "
+                "to whole-order rows). Voided transactions are "
+                "excluded from money totals automatically; the "
+                "Detailed Ledger keeps voided rows visible as an "
+                "audit trail.",
                 "reports_screen.filter_frame",
             ),
             TutorialHint(
                 "Summary Cards",
                 "Key totals at a glance: Total Receipts, Customer "
-                "Paid, FAM Match, FMNP Checks, FAM Absorbed (the "
+                "Paid, FAM Match, FMNP Checks, External Payments "
+                "(FAM-owed payouts for Food RX / Food Bucks "
+                "collected from vendors), FAM Absorbed (the "
                 "Unallocated Funds total — money FAM ate via the "
                 "customer-gone adjustment path), and Customer "
                 "Forfeit (over-tendered token value when a "
@@ -408,8 +431,21 @@ TUTORIAL_STEPS = [
                 "  • Vendor Reimbursement — per-vendor totals + "
                 "per-method columns (denomination-true: tokens × "
                 "face value) + Customer Forfeit + FMNP "
-                "(External). Identity: Σ(method) + FAM Match − "
-                "Customer Forfeit + FMNP_External = Total Due.\n"
+                "(External) + a column per external method "
+                "(e.g. Food RX (External) — the FAM-owed "
+                "payout). Identity: Σ(method) + FAM Match − "
+                "Customer Forfeit + FMNP_External + "
+                "Σ(External cols) = Total Due. A Verified "
+                "checkbox per vendor supports the end-of-market "
+                "vendor walk — saved on this laptop; each day, "
+                "month, or range scope keeps its own independent "
+                "tick; no effect on reimbursement.\n"
+                "  • SNAP Settlement — one row per customer "
+                "order (= one EBT terminal swipe) with the "
+                "order-level SNAP total, for matching the "
+                "terminal's paper receipts; tick the Verified "
+                "box as you match each one (saved on this "
+                "laptop); local-only (no Sheets tab).\n"
                 "  • FAM Match Report — per-method match totals "
                 "with FAM Absorbed (Unallocated Funds) called "
                 "out separately.\n"
@@ -477,11 +513,17 @@ TUTORIAL_STEPS = [
                 "configure match percentages, denomination "
                 "values (e.g. $2 Food Bucks, $5 FMNP, $10 Food "
                 "RX), display order, and photo-receipt "
-                "requirements. Activating FMNP for the Payment "
-                "screen surfaces a confirmation dialog "
-                "explaining the typical FMNP workflow goes "
-                "through the dedicated FMNP Entry screen, not "
-                "the Payment screen.\n\n"
+                "requirements. The Edit dialog's External "
+                "section has two checkboxes — 'Accept external "
+                "matching' (method appears on the External "
+                "Payments Entry screen) and 'Vendor cashes the "
+                "original instrument' (FAM owes the match only, "
+                "the FMNP model) — with a live preview of what "
+                "FAM will owe per instrument. Activating FMNP "
+                "for the Payment screen surfaces a confirmation "
+                "dialog explaining the typical FMNP workflow "
+                "goes through the dedicated External Payments "
+                "Entry screen, not the Payment screen.\n\n"
                 "Rewards: configure rules of the form 'For every "
                 "$X spent on [source method], hand out N units "
                 "of [reward method] worth $Y each.' The default "
@@ -548,10 +590,12 @@ TUTORIAL_STEPS = [
             "volunteers; loops in place so you can watch each "
             "step at your own pace.\n\n"
             "\u2022 Browse \u2014 75+ articles grouped by topic "
-            "(during the market, FMNP, corrections, reports, "
-            "sync, and more) with key v2.0.8 articles like "
-            "\u201cauto-distribute-toggle\u201d, \u201ccustomer-"
-            "forfeit\u201d, and \u201cfmnp-all-market-days\u201d. "
+            "(during the market, FMNP / external payments, "
+            "corrections, reports, sync, and more) with key "
+            "articles like \u201cexternal-payments-overview\u201d, "
+            "\u201cexternal-payout-math\u201d, \u201cauto-"
+            "distribute-toggle\u201d, and \u201ccustomer-"
+            "forfeit\u201d. "
             "Type any keyword in the search box to filter live.\n\n"
             "\u2022 Troubleshooting \u2014 Symptom-based guides "
             "(\u201csync is red\u201d, \u201cphoto isn\u2019t "

@@ -128,7 +128,9 @@ class MainWindow(QMainWindow):
             ("Receipt Intake", 1),
             ("Payment", 2),
             ("Adjustments", 3),
-            ("FMNP Entry", 4),
+            # v2.1.0 (ENH-002): FMNP Entry generalized to all
+            # external-enabled methods.
+            ("External Payments", 4),
             ("Reports", 5),
             ("Settings", 6),
             ("Help", 7),

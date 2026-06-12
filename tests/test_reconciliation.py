@@ -174,19 +174,17 @@ def _get_sync_totals(market_day_id=1):
     total_customer = dollars_to_cents(summary.get('Total Customer Paid', 0))
     total_match = dollars_to_cents(summary.get('Total FAM Match', 0))
 
-    # FMNP total from FMNP Entries tab
-    fmnp_entries = data.get('FMNP Entries', [])
-    # Sum 'Total Amount' but each entry may appear multiple times (one per
-    # check). Group by Entry ID prefix to avoid double-counting.
-    seen_entries = set()
+    # R1 (2026-06-11): the 'FMNP Entries' tab is deprecated (always
+    # []); external entries now live on 'External Payment Entries',
+    # ONE row per entry, face value in 'Face Value'.  Sum Active
+    # rows only — Voided rows stay on the tab as audit trail but
+    # must not count toward money totals (mirrors the DB helper's
+    # status = 'Active' filter).  No per-check de-dup needed.
+    ext_entries = data.get('External Payment Entries', [])
     fmnp_total_cents = 0
-    for entry in fmnp_entries:
-        entry_id = entry.get('Entry ID', '')
-        # FE-{id}-1, FE-{id}-2 → base is FE-{id}
-        base = '-'.join(entry_id.split('-')[:2])
-        if base and base not in seen_entries:
-            seen_entries.add(base)
-            fmnp_total_cents += dollars_to_cents(entry.get('Total Amount', 0))
+    for entry in ext_entries:
+        if entry.get('Status') == 'Active':
+            fmnp_total_cents += dollars_to_cents(entry.get('Face Value', 0))
 
     return {
         'receipt_cents': total_receipts,
@@ -389,11 +387,31 @@ class TestFMNPReconciliation:
         assert ledger['receipt_cents'] == 2500 + 1500
         assert ledger['match_cents'] == 0 + 1500  # Cash has no match; FMNP = full match
 
-        # Sync FMNP
+        # Sync FMNP — R1 (2026-06-11): sourced from the Active rows
+        # of the 'External Payment Entries' tab (sum of 'Face Value');
+        # the deprecated 'FMNP Entries' tab is always empty.  The
+        # sheet leg must still tie out with the DB exactly.
         assert sync['fmnp_cents'] == 1500
+        assert sync['fmnp_cents'] == db['fmnp_cents']
 
-    def test_fmnp_uneven_check_split_sums_exactly(self, fresh_db, tmp_path):
-        """1000 cents across 3 checks — check amounts must sum to total."""
+        # Money tabs are unchanged by R1: the Vendor Reimbursement
+        # 'FMNP (External)' column carries the same $15.00.
+        from fam.sync.data_collector import collect_sync_data
+        vr_rows = collect_sync_data(1).get('Vendor Reimbursement', [])
+        vr_fmnp_cents = sum(
+            dollars_to_cents(r.get('FMNP (External)', 0)) for r in vr_rows)
+        assert vr_fmnp_cents == db['fmnp_cents']
+
+    def test_fmnp_odd_amount_face_value_exact(self, fresh_db, tmp_path):
+        """1000 cents, 3 checks — sheet 'Face Value' equals DB exactly.
+
+        R1 (2026-06-11): replaces test_fmnp_uneven_check_split_sums_
+        exactly.  Per-check row splitting (FE-id-1… rows whose 'Check
+        Amount's had to re-sum to the total) is retired; the new tab
+        emits ONE row per entry, so penny-split drift is impossible
+        by construction.  The surviving guarantee: for an amount that
+        does NOT divide evenly by the instrument count, the single
+        row's 'Face Value' equals the DB amount to the cent."""
         from fam.sync.data_collector import collect_sync_data
 
         create_fmnp_entry(
@@ -402,17 +420,17 @@ class TestFMNPReconciliation:
 
         _enable_all_sync_tabs()
         data = collect_sync_data(1)
-        fmnp_entries = data.get('FMNP Entries', [])
 
-        # Should produce 3 check rows
-        fe_rows = [e for e in fmnp_entries if e['Source'] == 'FMNP Entry']
-        assert len(fe_rows) == 3
+        # Deprecated tab drains: present but always empty (R1).
+        assert data.get('FMNP Entries') == []
 
-        # Sum of check amounts must equal total amount
-        check_sum_cents = sum(
-            dollars_to_cents(e['Check Amount']) for e in fe_rows)
-        assert check_sum_cents == 1000, (
-            f"Check amounts sum to {check_sum_cents}, expected 1000")
+        active_rows = [e for e in data.get('External Payment Entries', [])
+                       if e['Status'] == 'Active']
+        assert len(active_rows) == 1
+        assert dollars_to_cents(active_rows[0]['Face Value']) == 1000, (
+            f"Face Value {active_rows[0]['Face Value']} != $10.00 exactly")
+        assert active_rows[0]['Instruments'] == 3
+        assert active_rows[0]['Payment Method'] == 'FMNP'
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -740,7 +758,10 @@ class TestThreeWayReconciliation:
         assert sync['customer_cents'] == db['customer_cents']
         assert sync['match_cents'] == db['match_cents']
 
-        # FMNP totals match
+        # FMNP totals match — R1 (2026-06-11): the sheet leg of this
+        # three-way check now reads the Active rows of the 'External
+        # Payment Entries' tab (sum of 'Face Value'); the deprecated
+        # 'FMNP Entries' tab is always empty.
         assert sync['fmnp_cents'] == db['fmnp_cents']
         assert sync['fmnp_cents'] == 1000
 

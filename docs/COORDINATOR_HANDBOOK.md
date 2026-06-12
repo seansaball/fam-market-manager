@@ -5,7 +5,7 @@
 > If you've inherited responsibility from the project owner, this is
 > what you need to know.
 >
-> Last updated for v2.0.7 — May 2026.
+> Last updated for v2.1.0 — June 2026.
 
 ---
 
@@ -338,21 +338,161 @@ and the volunteer's diagnostic info.
 
 ---
 
+## End-of-market external payments collection (v2.1.0+)
+
+At the end of each market day, vendors hand the market manager the
+physical scrip they accepted directly at their booths — FMNP checks,
+Food RX vouchers, Food Bucks tokens. The workflow:
+
+1. **Collect the scrip per vendor.** Keep each vendor's pile
+   separate — entries are per (vendor, method).
+2. **Count it per method.** Within a vendor's pile, sort by payment
+   method and total each method's face value.
+3. **Enter one entry per method** on the **External Payments**
+   screen: pick the market day (a closed day is fine — this is the
+   normal end-of-day flow), the method, the vendor, and the face
+   total. The live preview and the save confirmation both name the
+   exact amount FAM will owe the vendor.
+
+The money math per entry: **FAM owes vendor = match on the face
+value, plus the face value itself unless the vendor cashes the
+original with the issuing program.** For a $10 handful of scrip:
+FMNP (100% match, vendor cashes the check) → **$10, the match**;
+Food RX (100% match, FAM collects the paper) → **$20, face + match**;
+Food Bucks (0% match, FAM collects) → **$10, face only**. The match %
+and denomination come from the method's existing settings — the only
+external-specific settings are the two toggles in Settings → Payment
+Methods → Edit ("Accept external matching", "Vendor cashes the
+original instrument").
+
+**Correcting a mistake: void + re-enter.** Entries snapshot the
+method's configuration at save time, and the snapshots are immutable
+— a settings change never re-values recorded entries, and an Edit
+can change only the face value. If an entry was made under the wrong
+settings (or against the wrong vendor/method), **delete (void) the
+wrong entry, fix Settings if needed, and re-enter**. Both the voided
+row and the replacement stay visible (the External Payment Entries
+tab flags voided rows), so the audit trail is complete. The
+**Reimbursement Basis** column shows which configuration each entry
+was valued under.
+
+**Food Trust mailing / reimbursement bookkeeping.** For methods
+where FAM collects the paper (Food RX, Food Bucks — "Vendor cashes
+the original" OFF), FAM mails the collected instruments to the Food
+Trust, which reimburses **face value**. To know how much paper to
+mail and how much reimbursement to expect, pivot the **External
+Payment Entries** sheet tab by method and sum the **face value**
+column (not FAM Owes Vendor — that includes the match, which is
+FAM's own cost). The Reimbursement Basis column confirms which
+entries are face-collected.
+
+**Reward-type scrip is 0% match (ENH-001).** Scrip that customers
+*earned* as a reward (JH Food Bucks) must be configured at **0%
+match** — the match was already applied when the scrip was earned;
+matching it again at redemption would double-pay. Fresh installs now
+seed JH Food Bucks at 0%. **Existing markets should verify Settings
+→ Payment Methods → JH Food Bucks** shows 0% before recording
+external Food Bucks entries.
+
+**If RX/Bucks are ever accepted at the FAM booth in a future
+season:** enabling that is just a Settings flip (activate the method
+for the Payment screen), and the External Payments screen's
+booth-activity review prompt is the guard against the same physical
+token being reimbursed twice.
+
+---
+
+## End-of-market EBT settlement (v2.1.0+)
+
+The EBT terminal prints **one paper receipt per customer swipe**,
+but a customer's order can span several vendors — so the Detailed
+Ledger splits a single swipe across several rows. The **SNAP
+Settlement** tab (Reports) folds them back: one row per customer
+order with the order-level SNAP total — the exact figure on the
+paper receipt — plus how many vendor receipts the order spanned.
+
+Suggested routine:
+
+1. After close, collect the terminal's receipt stack (or batch
+   report).
+2. Reports → pick the day in the **Market Day** dropdown (it
+   narrows every report to exactly that day and resets the date
+   range — the two are last-touched-wins alternatives) →
+   **SNAP Settlement** tab. The Vendor and Payment Type filters
+   are ignored on this tab on purpose — a vendor sub-total would
+   never match the paper.
+3. Tick the **Verified** checkbox on each row as you match its
+   paper receipt — both run in time order, and verified rows turn
+   green so the remaining work stands out. Ticks are saved on this
+   laptop (they survive restarts), so the exercise can be paused
+   and resumed. Verification is a working note, not a financial
+   record — it never syncs and never changes any report total.
+4. **Paper receipt with no row** = a swipe that was never confirmed
+   in the app. Resolve same-day if possible (see the *SNAP
+   Settlement* in-app help article for recovery options).
+5. **Row with no paper receipt** = confirmed in the app but never
+   run on the terminal. Charge the card if the customer is still
+   present; otherwise void or adjust the transaction so the books
+   match what was actually collected.
+6. Export CSV if you keep daily settlement files.
+
+This report is **local to each laptop** (no Google Sheets tab — by
+design; every dollar in it already syncs via Detailed Ledger). On
+multi-laptop markets, run the settlement on each laptop: a laptop
+only shows the orders it processed, which usually matches "one
+terminal per table" setups one-to-one.
+
+---
+
+## End-of-market vendor verification (v2.1.0+)
+
+The companion to the EBT settlement: confirming each vendor's
+receipt total with them in person before they pack up. With the
+day selected in **Market Day**, the **Vendor Reimbursement** tab
+shows a **Verified** checkbox per vendor:
+
+1. Same starting point — Reports → pick the day in **Market Day**.
+2. Walk the vendors; for each one, read them their row's totals
+   and tick **Verified** when you agree. The row turns green so
+   the remaining vendors stand out.
+3. Ticks are saved per **vendor per market day** on this laptop —
+   pause the walk, come back, they're still there. A date-range or
+   month view has its **own independent checkbox** per vendor:
+   ticking "June 2026" records that you reconciled the vendor's
+   June total, without touching the per-day ticks inside it (and
+   unchecking the month never unchecks the days). The date popup
+   has a **whole-month quick pick** for the month-end
+   check-cutting pass. (With no time scope at all — All Dates +
+   All Market Days — the column shows an inert dash: there is no
+   scope to attach a mark to.)
+
+**The marks are purely a place-keeping aid.** Checked or
+unchecked, they have zero effect on what FAM reimburses anyone —
+they never sync, never hit the audit log, and no money math reads
+them. If a vendor disputes a number, that conversation goes
+through the normal adjustment workflow; the checkbox just tracks
+that the conversation happened.
+
+---
+
 ## Monthly reconciliation
 
 ### Pull these reports
 
 From the shared Google Sheet (best — merged across all laptops):
 
-1. **Vendor Reimbursement** — v2.0.9+ emits **one row per vendor per calendar month** (separate columns: human-readable **Month** like "April 2026" and sortable **Year-Month** like "2026-04"). Sort or filter on Year-Month to compare month-over-month per vendor.
-2. **FAM Match Report** filtered by month → total match dollars by payment method
-3. **FMNP Entries** filtered by month → FMNP checks taken to vendors
-4. **Generated Rewards** filtered by month → tokens given to customers (if your market does rewards)
+1. **Vendor Reimbursement** — v2.0.9+ emits **one row per vendor per calendar month** (separate columns: human-readable **Month** like "April 2026" and sortable **Year-Month** like "2026-04"). Sort or filter on Year-Month to compare month-over-month per vendor. v2.1.0+ adds a **"<Method> (External)"** column per external method (e.g. "Food RX (External)") next to the existing **FMNP (External)** column — all of them add into **Total Due to Vendor**. On a spreadsheet that pre-dates v2.1.0, new columns physically append at the **end** of the header row; reordering them by hand is safe because the app writes by header name, not position.
+2. **FAM Match Report** filtered by month → total match dollars by payment method, including **"<Method> (External)"** rows for external entries
+3. **External Payment Entries** (v2.1.0+) filtered by month → the per-entry audit layer for ALL external scrip — FMNP checks, Food RX, Food Bucks: face value, config snapshots, derived **FAM Owes Vendor**, **Reimbursement Basis**, with voided rows flagged. This is the tab to pivot when reconciling external payouts entry-by-entry or computing Food Trust mailing totals (see the collection workflow above).
+4. **FMNP Entries** — DEPRECATED as of v2.1.0. During the transition it only carries markets that haven't upgraded yet: an upgraded market's full FMNP history moves to External Payment Entries automatically, and its rows are removed from this old tab on the next full sync. Until every market is upgraded, read FMNP from BOTH tabs (each market's records live on exactly one of them — never sum a market across both). Once the tab is empty, delete it.
+5. **Generated Rewards** filtered by month → tokens given to customers (if your market does rewards)
 
 ### Reconcile against
 
 - Physical vendor payment records (your bookkeeping)
 - FMNP check inventory before/after
+- Food RX / Food Bucks scrip collected and mailed to the Food Trust
+  (face totals pivoted from the External Payment Entries tab)
 - Reward token inventory before/after
 - Bank deposits / cash counts
 
@@ -364,6 +504,7 @@ From the shared Google Sheet (best — merged across all laptops):
 | FMNP count off by exact amount of one entry | A FMNP entry was voided after coordinator reviewed |
 | Reward inventory short by a few tokens | A voided order with rewards — reward row stays as historical record by design |
 | Match dollars exceed cap | Cap was raised mid-day. Check Settings → Markets audit log |
+| An external entry's payout looks wrong | Check its **Reimbursement Basis** on the External Payment Entries tab — it names the config snapshot the entry was valued under. Settings changes never re-value recorded entries; the correction is void + re-enter under the fixed settings |
 
 The audit log (Reports → Activity Log) records every change with
 timestamp and operator. Use it as the authoritative history when
@@ -401,7 +542,7 @@ When a laptop is being retired:
 Day-of:
 
 1. Show them the laptop case with the printed Emergency Runbook
-2. Show them the sidebar — what each section does (Market, Receipt Intake, Payment, Adjustments, FMNP Entry, Reports, Settings, Help)
+2. Show them the sidebar — what each section does (Market, Receipt Intake, Payment, Adjustments, External Payments, Reports, Settings, Help)
 3. Walk through opening a market day, entering one fake transaction, confirming it, voiding it
 4. Show them the sync indicator and what colors mean
 5. Show them Help → Browse and how to search for a topic
@@ -430,11 +571,17 @@ Day-of:
   row to Locked. If a volunteer says "Auto-Distribute did nothing,"
   check whether the row they expected to fill is grey — they need to
   click ⚡ to release it, or add another row to absorb the remainder.
-- **FMNP Check Tracking "All Market Days" filter (v2.0.7+).** The
+- **External Payments Entry "All Market Days" filter (v2.0.7+).** The
   market-day dropdown defaults to "All Market Days" for browsing the
-  full FMNP history. The Save button greys out (with a visible inline
-  hint) because new entries need a specific market day. Volunteers
-  pick a date from the dropdown to enable Save.
+  full entry history. The Add Entry button greys out (with a visible
+  inline hint) because new entries need a specific market day.
+  Volunteers pick a date from the dropdown to enable it.
+- **External Payments Entry money is snapshot-valued (v2.1.0+).**
+  Every entry snapshots the method's match % / cashes-original /
+  denomination at save time; the FAM-owed payout is always derived
+  from the entry's own snapshots, never from current Settings. If a
+  volunteer asks why two entries for the same method show different
+  payouts, the Reimbursement Basis column is the answer.
 - **Customer Forfeit (v2.0.7+).** When a customer hands a $10 token
   for a $1.45 receipt, the $8.55 over-tender shows in the Customer
   Forfeit summary card and report column. Vendor still gets the full
@@ -472,8 +619,9 @@ Day-of:
 
 ## Versioning notes
 
-This handbook is for **v2.0.9**. Major changes recently:
+This handbook is for **v2.1.0**. Major changes recently:
 
+- **v2.1.0**: **External Payments Entry** (ENH-002). The FMNP Entry screen is rebranded "External Payments Entry" (sidebar: "External Payments") and generalized to record physical scrip for **any** payment method with "Accept external matching" ON (Settings → Payment Methods → Edit); FMNP is enabled by default and stays the dropdown default. FAM owes vendor = match on the face value + the face value itself unless "Vendor cashes the original instrument" is ON ($10 worked examples: FMNP 100%/cashes → $10 the match; Food RX 100%/collected → $20 face+match; Food Bucks 0%/collected → $10 face only). Zero new money fields — match % and denomination are inherited from the method's existing settings. Entries snapshot the config at save; settings changes never re-value history; corrections are void + re-enter. Guards: live payout preview, save confirmation naming the FAM-owed amount, denomination whole-multiple validation, large-amount warning, booth double-count review prompt. Sheets: Vendor Reimbursement gains "<Method> (External)" columns adding into Total Due (FMNP (External) unchanged forever; on existing spreadsheets new columns append at the END of the header row — manual reorder is safe, writes are by header name); new required **External Payment Entries** audit tab; FAM Match Report "<Method> (External)" rows; Detailed Ledger EXT- rows; ledger backup external section + grand total. Schema v37 → **v38**; app versions ≤v2.0.9 refuse to open the upgraded database until they update — mixed fleets need no coordinated upgrade (each laptop's sheet rows are device-scoped); upgrade pace only gates which markets can USE the feature. Also ships **ENH-001**: JH Food Bucks now seeds **0% match** (reward-type scrip is never matched again — the match was applied when the scrip was earned); existing markets verify Settings → Payment Methods → JH Food Bucks.
 - **v2.0.9**: Vendor Reimbursement shared-sheet rows now split by calendar month — one row per (market × vendor × month) instead of one ever-growing all-time cumulative row.  New **Month** column is human-readable ("April 2026") and a new **Year-Month** column carries the sortable form ("2026-04"). The math identity (Σ method-cols + FAM Match − Customer Forfeit + FMNP_External = Total Due) holds within each monthly row. Upgrade behavior: each laptop's old all-time row is **replaced automatically** on its first v2.0.9 sync (the stale-row cleanup removes it as the new monthly rows are written). On a multi-laptop fleet the old rows disappear one device at a time as each laptop upgrades — a mix of old and new rows during the rollout window is normal, not data loss. Manual deletion is only needed for rows belonging to a retired laptop that will never sync again (identifiable by a blank Year-Month cell). No schema migration; on-screen reports and other tabs unchanged.
 - **v2.0.7**: Hotfix release covering post-v2.0.6 onsite findings.  Schema v34 → v35 (one forward migration that backfills SNAP and Cash for every vendor; idempotent).  **Universal SNAP / Cash binding policy** — both methods are now ticked, locked, and labelled "universal" in Settings → Vendors → Eligible Payment Methods; you cannot accidentally configure a vendor as SNAP-ineligible.  Other methods (Food Bucks, Food RX, FMNP) remain per-vendor configurable.  **Denomination preservation through adjustments** (engine snap-back + save-layer guard).  **Adjustment safety gate** for denominated transactions — Adjust on a txn that includes Food Bucks / Food RX / FMNP now opens a Void-Instead / Adjust-Anyway / Cancel dialog.  **Single-vendor multi-receipt allocation** corrected so split receipts at one vendor reconcile cleanly.  **Vendor Reimbursement after voids** — surviving receipts on a partially-voided multi-receipt order roll up correctly now.  **Photo dedup cache cleanup** on void / FMNP delete / FMNP photo replace (a re-attached photo no longer reads as a duplicate of its now-orphaned hash).  **Cap-bound split-order recommendation** — when a returning customer's daily FAM cap is too low to absorb a particular combination of denominated + non-denominated payments, the Payment screen no longer hard-blocks with a generic "row mismatch"; it surfaces a dialog naming the cap as the cause and recommending the volunteer break the customer's receipts into separate orders one method at a time.  Documented in the new in-app help article `split-orders-when-stuck` and troubleshooting flow `ts-payment-screen-hard-block`.  3,504 tests.
 - **v2.0.6**: Production season release.  Per-vendor payment-method eligibility (Settings → Vendors), configurable rewards engine (Settings → Rewards), redesigned Payment Confirmation Dialog.  Multi-workstation cloud sync hardened end-to-end — settings changes propagate to the shared sheet, closed-day mutations sync correctly, Vendor Reimbursement cleanup is multi-market-aware, reset preserves other devices' rows, market renames protected against code-shift orphaning.  Photo dedup cache cleaned on void/delete/replace.  Schema v33 → v34 (additive).  3,387 tests.

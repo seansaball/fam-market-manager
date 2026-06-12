@@ -936,7 +936,21 @@ class TestReceiptIntakeValidation:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestFMNPLifecycle:
-    """FMNP create/edit/delete cycle with sync output verification."""
+    """FMNP create/edit/delete cycle with sync output verification.
+
+    R1 (2026-06-11): FMNP entries sync on the 'External Payment
+    Entries' tab (one row per entry, dollars in 'Face Value'); the
+    deprecated 'FMNP Entries' tab is always empty.  Deletes no longer
+    disappear from the sheet — they remain as Status='Voided'
+    audit-trail rows excluded from money totals.
+    """
+
+    @staticmethod
+    def _active_face_value_total(data):
+        """Sum 'Face Value' across Active External Payment Entries."""
+        rows = data.get('External Payment Entries', [])
+        return sum(float(r.get('Face Value', 0)) for r in rows
+                   if r.get('Status') == 'Active')
 
     def test_create_fmnp_appears_in_sync(self, qtbot, market_db):
         """Creating FMNP entries shows them in sync data."""
@@ -951,9 +965,8 @@ class TestFMNPLifecycle:
             entered_by='Alice', check_count=2)
 
         data = collect_sync_data(1)
-        fmnp_rows = data.get('FMNP Entries', [])
-        total = sum(float(r.get('Check Amount', 0)) for r in fmnp_rows)
-        assert abs(total - 35.00) < 0.01
+        assert data.get('FMNP Entries') == []  # deprecated tab drains
+        assert abs(self._active_face_value_total(data) - 35.00) < 0.01
 
     def test_edit_fmnp_updates_sync(self, qtbot, market_db):
         """Editing FMNP amount updates sync output."""
@@ -967,12 +980,15 @@ class TestFMNPLifecycle:
         update_fmnp_entry(eid, amount=3000, check_count=6)
 
         data = collect_sync_data(1)
-        fmnp_rows = data.get('FMNP Entries', [])
-        total = sum(float(r.get('Check Amount', 0)) for r in fmnp_rows)
-        assert abs(total - 30.00) < 0.01
+        assert abs(self._active_face_value_total(data) - 30.00) < 0.01
 
-    def test_delete_fmnp_removes_from_sync(self, qtbot, market_db):
-        """Deleting FMNP entry removes it from sync output."""
+    def test_delete_fmnp_voids_in_sync(self, qtbot, market_db):
+        """Deleting FMNP entry voids it in sync output.
+
+        R1 (2026-06-11): replaces test_delete_fmnp_removes_from_sync.
+        The deleted entry STAYS on the tab as a Status='Voided' row
+        (audit-trail design) but drops out of the Active money total.
+        """
         from fam.models.fmnp import create_fmnp_entry, delete_fmnp_entry
         from fam.sync.data_collector import collect_sync_data
 
@@ -986,9 +1002,16 @@ class TestFMNPLifecycle:
         delete_fmnp_entry(e1)
 
         data = collect_sync_data(1)
-        fmnp_rows = data.get('FMNP Entries', [])
-        total = sum(float(r.get('Check Amount', 0)) for r in fmnp_rows)
-        assert abs(total - 15.00) < 0.01
+        # Only the surviving entry counts toward the Active total
+        assert abs(self._active_face_value_total(data) - 15.00) < 0.01
+
+        # The deleted entry is still PRESENT — as a Voided audit row,
+        # never as an Active one.
+        rows = data.get('External Payment Entries', [])
+        e1_rows = [r for r in rows if r.get('Entry ID') == f'FE-{e1}']
+        assert len(e1_rows) == 1
+        assert e1_rows[0]['Status'] == 'Voided'
+        assert not [r for r in e1_rows if r['Status'] == 'Active']
 
     def test_fmnp_no_match_applied_externally(self, qtbot, market_db):
         """FMNP entries from the dedicated page have no match applied in DB."""

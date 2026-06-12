@@ -183,10 +183,16 @@ class TestClearDeadUrlsPreservesOnUnknown:
         conn.execute("INSERT INTO market_days (id, market_id, date, status) "
                      "VALUES (1, 1, '2026-04-24', 'Open')")
         conn.execute("INSERT INTO vendors (id, name, is_active) VALUES (1, 'V', 1)")
+        # v38: fmnp_entries inserts require a method id + config snapshots
+        conn.execute(
+            "INSERT INTO payment_methods (id, name, match_percent, is_active, "
+            "sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
         conn.execute(
             "INSERT INTO fmnp_entries (id, market_day_id, vendor_id, amount, "
-            "entered_by, photo_drive_url) "
-            "VALUES (1, 1, 1, 500, 'Admin', ?)", (url,))
+            "entered_by, photo_drive_url, payment_method_id, "
+            "method_name_snapshot, match_percent_snapshot, "
+            "vendor_cashes_original_snapshot) "
+            "VALUES (1, 1, 1, 500, 'Admin', ?, 90, 'FMNP', 100.0, 1)", (url,))
         conn.commit()
         return url
 
@@ -261,9 +267,16 @@ class TestClearDeadUrlsPreservesOnUnknown:
         fresh_db.execute("INSERT INTO market_days (id, market_id, date, status) "
                          "VALUES (1, 1, '2026-04-24', 'Open')")
         fresh_db.execute("INSERT INTO vendors (id, name, is_active) VALUES (1, 'V', 1)")
+        # v38: fmnp_entries inserts require a method id + config snapshots
+        fresh_db.execute(
+            "INSERT INTO payment_methods (id, name, match_percent, is_active, "
+            "sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
         fresh_db.execute(
             "INSERT INTO fmnp_entries (id, market_day_id, vendor_id, amount, "
-            "entered_by, photo_drive_url) VALUES (1, 1, 1, 500, 'Admin', ?)",
+            "entered_by, photo_drive_url, payment_method_id, "
+            "method_name_snapshot, match_percent_snapshot, "
+            "vendor_cashes_original_snapshot) "
+            "VALUES (1, 1, 1, 500, 'Admin', ?, 90, 'FMNP', 100.0, 1)",
             (combined,))
         fresh_db.commit()
 

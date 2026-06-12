@@ -470,7 +470,8 @@ The sync writes multiple sheets to the target spreadsheet:
 | Transaction Log | Audit trail of transaction-level actions with app version |
 | Activity Log | Full audit log scoped by market day date range |
 | Geolocation | Customer zip code distribution per market day |
-| FMNP Entries | Per-check FMNP rows from both fmnp_entries and payment flow, with individual photo links |
+| FMNP Entries | DEPRECATED (v2.1.0 R1) — collector returns []; the empty upsert drains this device's rows. Old-version devices keep writing it until they upgrade |
+| External Payment Entries | One audit row per external entry, ALL methods incl. FMNP: face, config snapshots, derived FAM Owes Vendor, Reimbursement Basis, photo links joined |
 | Market Day Summary | Aggregate totals per market day (transactions, receipts, customer paid, FAM match) |
 | Error Log | Application errors and warnings parsed from the log file |
 | Agent Tracker | One row per device with metadata (app version, hostname, OS, sync status, row counts) |
@@ -815,7 +816,7 @@ FMNP data intentionally appears differently depending on the layer. This is by d
 |-------|-----------------|-----|
 | **DB (`transactions` + `payment_line_items`)** | Regular transactions only; FMNP entries tracked separately in `fmnp_entries` table | Clean separation of payment-flow transactions from vendor-reported FMNP checks |
 | **Sync — Market Day Summary** | Transactions only (`receipt_cents`, `customer_paid_cents`, `fam_match_cents`) | Matches DB scope; FMNP tracked via separate `fmnp_cents` field |
-| **Sync — FMNP Entries tab** | Per-check rows from both `fmnp_entries` and FMNP `payment_line_items` | Full FMNP picture from both data sources |
+| **Sync — External Payment Entries tab** | One row per `fmnp_entries` row, ALL methods incl. FMNP (v2.1.0 R1; the deprecated FMNP Entries tab drains to empty; booth-FMNP per-check rows retired — booth FMNP stays in Detailed Ledger) | Self-explanatory per-entry audit layer with config snapshots |
 | **Ledger (`fam_ledger_backup.txt`)** | Combines regular transactions + FMNP in the FAM Match total | Human-readable "everything in one place" for paper audit |
 | **Reports Screen** | Separate cards: FAM Match card (transactions only) + FMNP Match card (FMNP only) | Clear visual separation for coordinators |
 

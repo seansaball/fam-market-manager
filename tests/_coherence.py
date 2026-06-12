@@ -748,13 +748,20 @@ def audit_post_confirm(conn, market_day_id):
         # Account for FMNP external add-on.
         fmnp_ext_cents = int(round(
             (vrow.get('FMNP (External)') or 0) * 100))
-        expected = db_total + fmnp_ext_cents
+        # v2.1.0 (ENH-002): non-FMNP external payout columns
+        # (``<Method> (External)``) also add into Total Due.
+        ext_cols_cents = sum(
+            int(round(v * 100))
+            for k, v in vrow.items()
+            if k.endswith(' (External)') and k != 'FMNP (External)'
+            and isinstance(v, (int, float)))
+        expected = db_total + fmnp_ext_cents + ext_cols_cents
         if abs(report_total_cents - expected) > 1:
             report.add(
                 'R1', "Vendor reimbursement Total Due != DB receipt sum",
                 expected=expected, actual=report_total_cents,
                 context=f"vendor={vrow['Vendor']}")
-        # R5 — math identity
+        # R5 — math identity (v2 incl. external columns = EP3)
         method_cols_total = sum(
             int(round(v * 100))
             for k, v in vrow.items()
@@ -764,13 +771,114 @@ def audit_post_confirm(conn, market_day_id):
                 'FMNP (External)', 'Customer Forfeit',
                 'Check Payable To', 'Address',
                 'market_code', 'device_id')
+            and not k.endswith(' (External)')
             and isinstance(v, (int, float))
         )
         fam_match_cents = int(round((vrow.get('FAM Match') or 0) * 100))
-        identity_lhs = method_cols_total + fam_match_cents + fmnp_ext_cents
+        identity_lhs = (method_cols_total + fam_match_cents
+                        + fmnp_ext_cents + ext_cols_cents)
         if abs(identity_lhs - report_total_cents) > 1:
             report.add(
-                'R5', "Σ per-method + FAM Match + FMNP_External != Total Due",
+                'R5', "Σ per-method + FAM Match + FMNP_External "
+                      "+ Σ <Method>_External != Total Due",
                 expected=report_total_cents, actual=identity_lhs,
                 context=f"vendor={vrow['Vendor']}")
+    return report
+
+
+# ──────────────────────────────────────────────────────────────────
+# External payments auditor — EP layer (v2.1.0 / ENH-002)
+# ──────────────────────────────────────────────────────────────────
+
+
+def audit_external_entries(conn, market_day_id):
+    """Run the EP-series invariants (SYSTEM_INVARIANTS.md Layer 10)
+    against the current DB state + collector outputs.
+
+    EP1 — every reported payout equals the formula over the row's
+          SNAPSHOTS exactly (cents).  Verified against the External
+          Payment Entries tab and the Vendor Reimbursement external
+          columns (the two money-bearing sheet surfaces).
+    EP2 — amount is a whole multiple of denomination_snapshot
+          (NULL snapshots exempt).
+    EP3 — VR row identity v2 — delegated to audit_post_confirm's
+          R1/R5 (call both for full coverage).
+    """
+    from fam.sync.data_collector import (
+        _collect_external_payment_entries,
+        _collect_vendor_reimbursement,
+    )
+    from fam.utils.external_payout import (
+        compute_external_payout_cents)
+
+    report = AuditReport()
+
+    entries = conn.execute("""
+        SELECT fe.id, fe.amount, fe.status,
+               fe.method_name_snapshot, fe.match_percent_snapshot,
+               fe.vendor_cashes_original_snapshot,
+               fe.denomination_snapshot, v.name AS vendor
+        FROM fmnp_entries fe
+        JOIN vendors v ON fe.vendor_id = v.id
+        WHERE fe.market_day_id = ?
+    """, (market_day_id,)).fetchall()
+
+    derived: dict[int, int] = {}
+    for e in entries:
+        match_pct = (e['match_percent_snapshot']
+                     if e['match_percent_snapshot'] is not None
+                     else 100.0)
+        cashes = bool(
+            e['vendor_cashes_original_snapshot']
+            if e['vendor_cashes_original_snapshot'] is not None
+            else 1)
+        derived[e['id']] = compute_external_payout_cents(
+            e['amount'], match_pct, cashes)
+
+        # EP2 — whole multiple of the entry's OWN denomination.
+        denom = e['denomination_snapshot']
+        if denom and e['amount'] % denom != 0:
+            report.add(
+                'EP2',
+                "external face value not a whole multiple of its "
+                "denomination snapshot",
+                expected=f"multiple of {denom}", actual=e['amount'],
+                context=f"entry {e['id']} ({e['method_name_snapshot']})")
+
+    # EP1 — External Payment Entries tab payouts == derivation.
+    for row in _collect_external_payment_entries(conn, market_day_id):
+        entry_id = int(row['Entry ID'].split('-')[1])
+        reported_cents = int(round(row['FAM Owes Vendor'] * 100))
+        if reported_cents != derived.get(entry_id):
+            report.add(
+                'EP1',
+                "External Payment Entries payout != snapshot formula",
+                expected=derived.get(entry_id), actual=reported_cents,
+                context=f"entry {entry_id}")
+
+    # EP1 — VR external columns == Σ derived payouts per
+    # (vendor, method) for ACTIVE entries.
+    expected_vr: dict[tuple, int] = {}
+    for e in entries:
+        if e['status'] != 'Active':
+            continue
+        if e['method_name_snapshot'] == 'FMNP':
+            continue
+        key = (e['vendor'],
+               f"{e['method_name_snapshot']} (External)")
+        expected_vr[key] = expected_vr.get(key, 0) + derived[e['id']]
+    vr_rows = _collect_vendor_reimbursement(conn, [market_day_id])
+    for vrow in vr_rows:
+        for col, val in vrow.items():
+            if (not col.endswith(' (External)')
+                    or col == 'FMNP (External)'):
+                continue
+            reported = int(round(val * 100))
+            expected = expected_vr.get((vrow['Vendor'], col), 0)
+            if reported != expected:
+                report.add(
+                    'EP1',
+                    "VR external column != Σ snapshot-derived payouts",
+                    expected=expected, actual=reported,
+                    context=f"vendor={vrow['Vendor']} col={col}")
     return report

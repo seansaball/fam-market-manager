@@ -139,6 +139,18 @@ def export_generated_rewards(data: list[dict], filepath: str) -> str:
     return export_dataframe_to_csv(df, filepath)
 
 
+def export_snap_settlement(data: list[dict], filepath: str) -> str:
+    """Export the SNAP Settlement report (v2.1.0, ENH-003) to CSV.
+
+    One row per customer order (= one EBT terminal swipe) with the
+    order-level SNAP total — the figure to match against the paper
+    EBT-device receipt.  Local-only report: no Sheets tab mirrors
+    it; the underlying line items already sync via Detailed Ledger.
+    """
+    df = pd.DataFrame(data)
+    return export_dataframe_to_csv(df, filepath)
+
+
 # ── Automatic ledger backup ──────────────────────────────────────
 
 _last_backup_time: float = 0.0
@@ -268,9 +280,21 @@ def _write_ledger_backup_inner():
         ORDER BY t.fam_transaction_id
     """).fetchall()
 
+    # v2.1.0 (ENH-002): fmnp_entries now holds ALL external methods.
+    # FMNP-method rows render in the byte-identical legacy section;
+    # non-FMNP rows render in their own section with snapshot-derived
+    # payouts.  Routing by payment_method_id, display by snapshot.
+    fmnp_pm_row = conn.execute(
+        "SELECT id FROM payment_methods WHERE name = 'FMNP'"
+    ).fetchone()
+    fmnp_pm_id = fmnp_pm_row['id'] if fmnp_pm_row else -1
+
     all_fmnp = conn.execute("""
         SELECT fe.market_day_id, fe.id, v.name AS vendor,
-               fe.amount, fe.check_count, fe.notes, fe.created_at
+               fe.amount, fe.check_count, fe.notes, fe.created_at,
+               fe.payment_method_id, fe.method_name_snapshot,
+               fe.match_percent_snapshot,
+               fe.vendor_cashes_original_snapshot
         FROM fmnp_entries fe
         JOIN vendors v ON fe.vendor_id = v.id
         WHERE fe.status = 'Active'
@@ -283,8 +307,12 @@ def _write_ledger_backup_inner():
         txn_by_md.setdefault(r['market_day_id'], []).append(r)
 
     fmnp_by_md: dict[int, list] = {}
+    ext_by_md: dict[int, list] = {}
     for r in all_fmnp:
-        fmnp_by_md.setdefault(r['market_day_id'], []).append(r)
+        if r['payment_method_id'] == fmnp_pm_id:
+            fmnp_by_md.setdefault(r['market_day_id'], []).append(r)
+        else:
+            ext_by_md.setdefault(r['market_day_id'], []).append(r)
 
     # Count drafts per market day for the "not shown" note
     draft_counts = {}
@@ -299,7 +327,8 @@ def _write_ledger_backup_inner():
     total_market_days = len(market_days)
     market_names = set(md['market_name'] for md in market_days)
     total_txns = len(all_txns)
-    total_fmnp = len(all_fmnp)
+    total_fmnp = sum(len(v) for v in fmnp_by_md.values())
+    total_external = sum(len(v) for v in ext_by_md.values())
 
     # ── Build the text ────────────────────────────────────────────
     W = 135  # line width
@@ -316,10 +345,15 @@ def _write_ledger_backup_inner():
     lines.append(f"  Market Code:  {_code}")
     lines.append(f"  Device ID:    {_device}")
     lines.append(f"  Backup at:    {eastern_now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # v2.1.0: the External Entries figure appears only when non-FMNP
+    # external entries exist, keeping the header byte-identical for
+    # FMNP-only databases.
+    _ext_note = (f"    External Entries: {total_external}"
+                 if total_external else "")
     lines.append(f"  Markets: {len(market_names)}    "
                  f"Market Days: {total_market_days}    "
                  f"Transactions: {total_txns}    "
-                 f"FMNP Entries: {total_fmnp}")
+                 f"FMNP Entries: {total_fmnp}{_ext_note}")
     lines.append("")
 
     # ── Grand totals accumulators (integer cents to avoid float drift) ──
@@ -329,6 +363,7 @@ def _write_ledger_backup_inner():
     grand_count = 0
     grand_voided = 0
     grand_fmnp_cents = 0
+    grand_external_cents = 0
 
     # ── Iterate by market → date ──────────────────────────────────
     current_market = None
@@ -352,9 +387,10 @@ def _write_ledger_backup_inner():
 
         txn_rows = txn_by_md.get(md_id, [])
         fmnp_rows = fmnp_by_md.get(md_id, [])
+        ext_rows = ext_by_md.get(md_id, [])
         draft_n = draft_counts.get(md_id, 0)
 
-        if not txn_rows and not fmnp_rows:
+        if not txn_rows and not fmnp_rows and not ext_rows:
             lines.append("  No transactions recorded.")
             if draft_n:
                 lines.append(f"  ({draft_n} draft transaction(s) not shown)")
@@ -423,6 +459,49 @@ def _write_ledger_backup_inner():
                 )
                 grand_fmnp_cents += amt_cents
 
+        # v2.1.0 (ENH-002): non-FMNP external entries — payout
+        # derived from the entry's OWN config snapshots (EP1).
+        # Receipt column = FAM-owed payout; FAM Match column =
+        # match component.
+        if ext_rows:
+            from fam.utils.external_payout import (
+                compute_external_payout_cents, match_component_cents,
+                reimbursement_basis)
+            lines.append("")
+            lines.append("  --- External Payment Entries ---")
+            for r in ext_rows:
+                day_count += 1
+                match_pct = (r['match_percent_snapshot']
+                             if r['match_percent_snapshot'] is not None
+                             else 100.0)
+                cashes = bool(
+                    r['vendor_cashes_original_snapshot']
+                    if r['vendor_cashes_original_snapshot'] is not None
+                    else 1)
+                payout_cents = compute_external_payout_cents(
+                    r['amount'], match_pct, cashes)
+                match_cents = match_component_cents(
+                    r['amount'], match_pct)
+                basis = reimbursement_basis(
+                    r['amount'], match_pct, cashes)
+                day_receipt_cents += payout_cents
+                day_match_cents += match_cents
+                name = r['method_name_snapshot'] or 'Unknown'
+                info = (f"{name} (External) - "
+                        f"{r['check_count']} items - {basis}"
+                        if r['check_count']
+                        else f"{name} (External) - {basis}")
+                vendor = _fmt_vendor(r['vendor'])
+                ext_ts = _fmt_timestamp(r['created_at'])
+                lines.append(
+                    f"  {day_count:<4} {'EXT-' + str(r['id']):<22} "
+                    f"{ext_ts:<20} {'':<12} {vendor:<24} "
+                    f"${payout_cents / 100.0:>9.2f} ${'0.00':>9} "
+                    f"${match_cents / 100.0:>9.2f}  {'External':<12} "
+                    f"{info}"
+                )
+                grand_external_cents += payout_cents
+
         # Draft note
         if draft_n:
             lines.append(f"  ({draft_n} draft transaction(s) not shown)")
@@ -455,6 +534,11 @@ def _write_ledger_backup_inner():
     lines.append(f"  Total Customer Paid:   ${grand_customer_cents / 100:,.2f}")
     lines.append(f"  Total FAM Match:       ${grand_match_cents / 100:,.2f}")
     lines.append(f"  Total FMNP (External): ${grand_fmnp_cents / 100:,.2f}")
+    # v2.1.0: printed only when non-FMNP external entries exist —
+    # FMNP-only databases keep a byte-identical grand-totals block.
+    if grand_external_cents or total_external:
+        lines.append(f"  Total External Payments (FAM owed): "
+                     f"${grand_external_cents / 100:,.2f}")
     lines.append(f"  Transaction Count:     {grand_count}")
     if grand_voided:
         lines.append(f"  Voided (excluded):     {grand_voided}")

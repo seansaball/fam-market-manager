@@ -325,18 +325,13 @@ class TestPriorSilentHandlersNowLog:
         # And specifically not debug-only for the BEGIN/COMMIT path.
         # (Other debug calls elsewhere in the function are fine.)
 
-    def test_data_collector_fmnp_lookup_warns(self):
-        import inspect
-        from fam.sync import data_collector
-        src = inspect.getsource(data_collector)
-        # The FMNP method-lookup handler must surface failures.
-        # Source-pin: a logger.warning call mentioning FMNP.  The
-        # actual log string is split across multiple source lines,
-        # so we look for a contiguous fragment that appears within
-        # one source line.
-        assert "could not resolve FMNP method" in src, (
-            "FMNP method denomination lookup must warn on failure "
-            "so multi-check splits don't silently mis-allocate")
+    # R1 (2026-06-11): test_data_collector_fmnp_lookup_warns retired.
+    # It pinned the "could not resolve FMNP method" warning inside the
+    # old _collect_fmnp_entries per-check splitting code.  That code
+    # path is gone by design: the 'FMNP Entries' tab is deprecated
+    # (the collector returns [] to drain the sheet) and the External
+    # Payment Entries collector reads each entry's own denomination
+    # snapshot — there is no live method lookup left to warn about.
 
     def test_schema_retention_sweep_warns(self):
         import inspect

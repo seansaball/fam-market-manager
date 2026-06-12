@@ -32,7 +32,18 @@ class SyncManager:
         'Activity Log':         ['market_code', 'device_id', 'Timestamp',
                                  'Record ID', 'Action'],
         'Geolocation':          ['market_code', 'device_id', 'Zip Code', 'Date'],
+        # DEPRECATED (R1, 2026-06-11) but kept registered ON
+        # PURPOSE: the collector returns [] so the empty upsert
+        # drains this device's rows from the shared sheet.  Old app
+        # versions keep writing it until they upgrade; delete the
+        # tab once the fleet is uniform.  Do NOT remove this entry
+        # before then — removing it stops the drain.
         'FMNP Entries':         ['market_code', 'device_id', 'Entry ID'],
+        # v2.1.0 (ENH-002, revised R1): per-entry audit layer for
+        # ALL external methods, FMNP included.  Entry ID
+        # (``FE-<id>``) is the row identity.
+        'External Payment Entries': ['market_code', 'device_id',
+                                     'Entry ID'],
         'Market Day Summary':   ['market_code', 'device_id', 'Date'],
         # v2.0.5: Error Log key drops Message because Message now
         # contains the FULL multi-line traceback (was just the first

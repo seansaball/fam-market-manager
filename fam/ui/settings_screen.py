@@ -230,8 +230,54 @@ class EditPaymentMethodDialog(QDialog):
         self.photo_required_combo.setVisible(False)
         layout.addRow(self._photo_required_label, self.photo_required_combo)
 
+        # ── External Matching (v2.1.0 / ENH-002) ──────────────────
+        # Two channel toggles + a live payout preview.  Match % and
+        # denomination are NOT duplicated — external math inherits
+        # the fields above (zero-new-money-fields principle), which
+        # is why the preview reacts to the match/denom inputs too.
+        self.external_check = QCheckBox("Accept external matching")
+        self.external_check.setToolTip(
+            "ON: this method appears in the External Payments Entry "
+            "portal — the market manager collects the physical scrip "
+            "from vendors at end of market day and enters it there.")
+        self.external_check.setStyleSheet(self.denom_check.styleSheet())
+        layout.addRow("External:", self.external_check)
+
+        self.cashes_check = QCheckBox(
+            "Vendor cashes the original instrument")
+        self.cashes_check.setToolTip(
+            "ON: the vendor keeps the paper instrument and cashes it "
+            "with the issuing program (the FMNP model), so FAM owes "
+            "the vendor only the MATCH component.\n"
+            "OFF: FAM collects the instrument and owes the vendor "
+            "face value plus the match.")
+        self.cashes_check.setStyleSheet(self.denom_check.styleSheet())
+        self.cashes_check.setEnabled(False)
+        layout.addRow("", self.cashes_check)
+
+        # Live preview — the cheapest overpay guard there is.
+        self.external_preview = QLabel("")
+        self.external_preview.setWordWrap(True)
+        self.external_preview.setStyleSheet(
+            f"color: {PRIMARY_GREEN}; font-weight: bold; "
+            f"font-size: 12px; padding: 2px;")
+        self.external_preview.setVisible(False)
+        layout.addRow("", self.external_preview)
+
+        # Initialize from existing data + wire preview updates.
+        self.external_check.setChecked(
+            bool(method.get('external_matching_accepted')))
+        self.cashes_check.setChecked(
+            bool(method.get('vendor_cashes_original')))
+        self.external_check.toggled.connect(self._on_external_toggled)
+        self.cashes_check.toggled.connect(self._update_external_preview)
+        self.match_spin.valueChanged.connect(self._update_external_preview)
+        self.denom_check.toggled.connect(self._update_external_preview)
+        self.denom_spin.valueChanged.connect(self._update_external_preview)
+        self._on_external_toggled(self.external_check.isChecked())
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -243,6 +289,84 @@ class EditPaymentMethodDialog(QDialog):
         if self.denom_check.isChecked():
             return dollars_to_cents(self.denom_spin.value())
         return None
+
+    # ── External Matching helpers (v2.1.0 / ENH-002) ──────────────
+
+    def get_external_matching(self):
+        return self.external_check.isChecked()
+
+    def get_vendor_cashes_original(self):
+        return self.cashes_check.isChecked()
+
+    def _on_external_toggled(self, checked):
+        """The cashes-original toggle and preview only make sense
+        once external matching is ON; photo requirements become
+        configurable for any external-enabled method (the manager
+        may want photo audit on collected scrip, like FMNP checks)."""
+        self.cashes_check.setEnabled(checked)
+        if checked:
+            self.show_photo_required()
+        self._update_external_preview()
+
+    def _proposed_state(self):
+        """The payment-method row as it WOULD be saved — what the
+        G4 linter and the preview both evaluate."""
+        return {
+            'name': self.name_input.text().strip() or self.method['name'],
+            'match_percent': self.match_spin.value(),
+            'denomination': self.get_denomination(),
+            'external_matching_accepted': int(self.external_check.isChecked()),
+            'vendor_cashes_original': int(self.cashes_check.isChecked()),
+        }
+
+    def _update_external_preview(self, *_args):
+        """Live payout preview from the dialog's CURRENT values —
+        exactly what would be snapshotted on the next entry."""
+        if not self.external_check.isChecked():
+            self.external_preview.setVisible(False)
+            return
+        from fam.utils.external_payout import (
+            compute_external_payout_cents, reimbursement_basis)
+        state = self._proposed_state()
+        # Example face: one denomination unit when set (always a
+        # valid G2 amount), else the $10.00 worked example from the
+        # design record.
+        face = state['denomination'] if state['denomination'] else 1000
+        payout = compute_external_payout_cents(
+            face, state['match_percent'],
+            bool(state['vendor_cashes_original']))
+        basis = reimbursement_basis(
+            face, state['match_percent'],
+            bool(state['vendor_cashes_original']))
+        self.external_preview.setText(
+            f"For a {format_dollars(face)} instrument FAM will owe "
+            f"the vendor: {format_dollars(payout)} — {basis}")
+        self.external_preview.setVisible(True)
+
+    def _validate_and_accept(self):
+        """G4 config linter at the dialog gate: HARD findings block
+        the save; SOFT findings need an explicit confirm.  The model
+        layer re-checks the HARD rule (defense in depth)."""
+        from fam.utils.external_payout import (
+            HARD, lint_external_config)
+        findings = lint_external_config(self._proposed_state())
+        hard = [msg for sev, msg in findings if sev == HARD]
+        soft = [msg for sev, msg in findings if sev != HARD]
+        if hard:
+            QMessageBox.warning(
+                self, "External Matching — Fix Configuration",
+                "\n\n".join(hard))
+            return
+        if soft:
+            answer = QMessageBox.question(
+                self, "External Matching — Are You Sure?",
+                "\n\n".join(soft) + "\n\nSave anyway?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.accept()
 
     def show_photo_required(self):
         """Show the Photo Receipt dropdown and set its value from the method data."""
@@ -1126,11 +1250,12 @@ class SettingsScreen(QWidget):
         layout.addWidget(form)
 
         self.pm_table = QTableWidget()
-        self.pm_table.setColumnCount(6)
+        self.pm_table.setColumnCount(7)
         self.pm_table.setHorizontalHeaderLabels(
-            ["ID", "Name", "Match %", "Denom.", "Active", "Actions"]
+            ["ID", "Name", "Match %", "Denom.", "External", "Active",
+             "Actions"]
         )
-        configure_table(self.pm_table, actions_col=5, actions_width=200)
+        configure_table(self.pm_table, actions_col=6, actions_width=200)
         layout.addWidget(self.pm_table)
 
         return tab
@@ -3246,9 +3371,40 @@ class SettingsScreen(QWidget):
                 denom_text = "Any"
             self.pm_table.setItem(i, 3, make_item(denom_text, denom_dollars))
 
+            # v2.1.0 (ENH-002): External column — shows the channel
+            # state and the reimbursement shape at a glance.
+            if m.get('external_matching_accepted'):
+                if m.get('vendor_cashes_original'):
+                    ext_text = "✓ match only"
+                elif m.get('match_percent'):
+                    ext_text = "✓ face + match"
+                else:
+                    ext_text = "✓ face only"
+                ext_item = make_item(ext_text)
+                ext_item.setForeground(QBrush(QColor(ACCENT_GREEN)))
+                # G3 soft config warning: booth-active AND
+                # external-enabled means the same physical scrip
+                # could be recorded through either channel.
+                if m['is_active']:
+                    ext_item.setText("⚠ " + ext_text)
+                    ext_item.setForeground(
+                        QBrush(QColor(HARVEST_GOLD)))
+                    ext_item.setToolTip(
+                        "This method is BOTH active at the booth "
+                        "(Payment screen) AND enabled for external "
+                        "matching.  The same physical scrip can only "
+                        "come in through one channel — the External "
+                        "Payments Entry screen will prompt for "
+                        "review if a vendor/day has activity in "
+                        "both.")
+            else:
+                ext_item = make_item("—")
+                ext_item.setForeground(QBrush(QColor(SUBTITLE_GRAY)))
+            self.pm_table.setItem(i, 4, ext_item)
+
             active_item = make_item("Yes" if m['is_active'] else "No")
             active_item.setForeground(QBrush(QColor(ACCENT_GREEN if m['is_active'] else ERROR_COLOR)))
-            self.pm_table.setItem(i, 4, active_item)
+            self.pm_table.setItem(i, 5, active_item)
 
             action_widget = QWidget()
             al = QHBoxLayout(action_widget)
@@ -3311,7 +3467,7 @@ class SettingsScreen(QWidget):
                 toggle_btn.setToolTip(system_tooltip)
             al.addWidget(toggle_btn)
 
-            self.pm_table.setCellWidget(i, 5, action_widget)
+            self.pm_table.setCellWidget(i, 6, action_widget)
             self.pm_table.setRowHeight(i, 42)
         self.pm_table.setSortingEnabled(True)
 
@@ -3999,6 +4155,11 @@ class SettingsScreen(QWidget):
             dialog.name_input.setEnabled(False)
             dialog.name_input.setToolTip("FMNP is a system payment method and cannot be renamed")
             dialog.show_photo_required()
+        # v2.1.0 (ENH-002): photo requirements are configurable for
+        # any external-enabled method, not just FMNP — collected
+        # scrip has the same audit rationale as FMNP checks.
+        if method.get('external_matching_accepted'):
+            dialog.show_photo_required()
         if dialog.exec() == QDialog.Accepted:
             new_name = dialog.name_input.text().strip()
             new_match_pct = dialog.match_spin.value()
@@ -4009,9 +4170,18 @@ class SettingsScreen(QWidget):
                 QMessageBox.warning(self, "Error", "Payment method name is required.")
                 return
             photo_req = dialog.get_photo_required()
-            update_payment_method(pm_id, name=new_name, match_percent=new_match_pct,
-                                  denomination=new_denom_val,
-                                  photo_required=photo_req)
+            try:
+                update_payment_method(
+                    pm_id, name=new_name, match_percent=new_match_pct,
+                    denomination=new_denom_val,
+                    photo_required=photo_req,
+                    external_matching_accepted=dialog.get_external_matching(),
+                    vendor_cashes_original=dialog.get_vendor_cashes_original())
+            except ValueError as e:
+                # Model-layer G4 guard (defense in depth behind the
+                # dialog's own lint gate).
+                QMessageBox.warning(self, "Error", str(e))
+                return
             self._load_payment_methods()
             # Vendors tab carries one column per active, non-system
             # payment method.  Re-render so the column set tracks

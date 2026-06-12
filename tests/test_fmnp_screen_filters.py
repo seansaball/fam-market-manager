@@ -60,6 +60,15 @@ def fmnp_db_three_market_days(tmp_path):
         "(10, 1, '2099-04-01', 'Closed', 'Tester'), "
         "(11, 1, '2099-04-15', 'Closed', 'Tester'), "
         "(12, 1, '2099-05-01', 'Open', 'Tester')")
+    # v38: fmnp_entries inserts require a method id + config
+    # snapshots.  external/cashes toggles mirror the migration
+    # backfill (1, 1) — the screen's method dropdown only lists
+    # external-enabled methods, and a migrated DB always has FMNP
+    # enabled.
+    conn.execute(
+        "INSERT INTO payment_methods (id, name, match_percent, "
+        "is_active, sort_order, external_matching_accepted, "
+        "vendor_cashes_original) VALUES (90, 'FMNP', 100.0, 0, 90, 1, 1)")
     conn.commit()
     create_fmnp_entry(market_day_id=10, vendor_id=1, amount=500,
                       entered_by='T1')

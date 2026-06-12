@@ -379,7 +379,15 @@ REQUIRED_SYNC_TABS: frozenset[str] = frozenset({
     'Error Log',
     'Agent Tracker',
     'Geolocation',
+    # DEPRECATED tab (R1, 2026-06-11) kept REQUIRED on purpose: its
+    # collector returns [] and the empty upsert drains this
+    # device's rows from the shared sheet.  If it were optional, a
+    # disabled toggle would strand stale rows forever.
     'FMNP Entries',
+    # v2.1.0 (ENH-002, revised R1): the per-entry audit layer for
+    # ALL external methods (FMNP included) must always reach the
+    # sheet.
+    'External Payment Entries',
     # Generated Rewards (v1.9.10) — required by default per the
     # 2026-04-30 spec.  Coordinators can suppress upload through
     # the Settings → Cloud Sync tab if they want to keep it local.

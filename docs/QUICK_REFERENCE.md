@@ -12,7 +12,7 @@
 | **Receipt Intake** | Enter customer purchases |
 | **Payment** | Process payment + FAM match |
 | **Adjustments** | Fix mistakes after Confirm |
-| **FMNP Entry** | Record FMNP checks (paper, vendor side) |
+| **External Payments** | Record scrip collected from vendors (FMNP checks, Food RX, Food Bucks) |
 | **Reports** | Daily totals + exports |
 | **Settings** | Markets / Vendors / Methods / Rewards / Sync |
 | **Help** | Articles, troubleshooting, system status |
@@ -25,7 +25,7 @@
 2. **Receipt Intake** → enter receipts → "Add to Order"
 3. **Payment** → enter amounts per method → ⚡ Auto-Distribute → Confirm
 4. (repeat 2 & 3 for each customer)
-5. **Reports** → check totals → Print or Export
+5. **Reports** → check totals → pick the day in **Market Day** → match the EBT terminal's paper receipts on **SNAP Settlement** (one row per swipe — tick **Verified** as you go) → Print or Export
 6. **Market** → Close Market Day
 
 ---
@@ -40,6 +40,23 @@
 | **Void** | Cancels the entire transaction. There is no un-void |
 | **Adjust** | Edit a confirmed transaction (changes payment lines, not the receipt total) |
 | **Discard** | Throw away an in-progress order before confirming |
+
+---
+
+## External Payments — what FAM owes the vendor ($10 of scrip)
+
+> FAM owes = match on the face value, **plus the face value unless
+> the vendor cashes the original with the program.**
+
+| Method | Match % | Vendor cashes original? | FAM owes | Basis shown |
+|---|---|---|---|---|
+| FMNP | 100% | Yes | **$10** — the MATCH | "Match only ($10.00 × 100%)" |
+| Food RX | 100% | No | **$20** — face + match | "Face + match ($10.00 × 2.0)" |
+| Food Bucks | 0% | No | **$10** — face only | "Face only" |
+
+The save popup names the exact FAM-owed amount — read it before
+clicking Yes. Wrong entry? **Delete (void) it and re-enter** —
+never fix by editing Settings.
 
 ---
 
@@ -66,7 +83,7 @@
 | "Stale market day was auto-closed" | Normal safety. Open today's day fresh |
 | "Payment row mismatch" / hard block on Payment that ⚡ Auto-Distribute won't fix | **Split the receipts into separate orders, one payment method per order.** Cancel → Discard → re-create as a returning-customer order with only the receipts one method covers → Confirm → repeat for the next method. Cap accounting carries through the same customer label. See in-app Help article `split-orders-when-stuck`. |
 | Auto-Distribute "did nothing" | Check the row's ⚡ icon — if grey (Locked), the value is pinned. Click the grey ⚡ to release it, or add another payment-method row to absorb the remainder. v2.0.7+ |
-| FMNP "Add Entry" button greyed out | "All Market Days" is selected (a browse-only filter). Pick a specific market day from the dropdown to enable the button. v2.0.7+ |
+| External Payments "Add Entry" button greyed out | "All Market Days" is selected (a browse-only filter). Pick a specific market day from the dropdown to enable the button. v2.0.7+ |
 
 ---
 
@@ -133,4 +150,4 @@ Wi-Fi and click Sync to Cloud.
 ---
 
 > Repo: `github.com/seansaball/fam-market-manager`
-> Version: 2.0.7
+> Version: 2.1.0

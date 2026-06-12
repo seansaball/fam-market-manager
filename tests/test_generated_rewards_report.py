@@ -358,3 +358,77 @@ class TestNoFinancialPipelineImpact:
         for forbidden in ('reward_amount', 'reward_method_id',
                            'reward_units', 'rewards'):
             assert forbidden not in cols
+
+
+class TestReportLevelFilters:
+    """v2.1.0 (ENH-003 bundle): the Generated Rewards tab respects
+    the report-level Date + Market filters.
+
+    The v1 full extract confused Bryan (Bellevue) — he used the tab
+    as an EBT-matching workaround and it showed every market and
+    every date regardless of the filters.  The proper EBT view is
+    now the SNAP Settlement tab (test_snap_settlement_report.py);
+    this fix makes the rewards tab filter like the other tabs.
+    Vendor / Payment Type filters deliberately do NOT apply —
+    rewards rows belong to a customer order, not a vendor.
+    """
+
+    def _seed_two_days_two_markets(self, conn):
+        conn.execute(
+            "INSERT INTO markets (id, name, daily_match_limit, "
+            " match_limit_active) VALUES (2, 'Market 2', 100000, 1)")
+        conn.execute(
+            "INSERT INTO market_days (id, market_id, date, status, "
+            " opened_by) VALUES "
+            " (2, 1, '2026-05-07', 'Open', 'T'), "
+            " (3, 2, '2026-04-30', 'Open', 'T')")
+        for order_id, md in [(10, 1), (20, 2), (30, 3)]:
+            conn.execute(
+                "INSERT INTO customer_orders (id, market_day_id, "
+                " customer_label, status) "
+                "VALUES (?, ?, ?, 'Confirmed')",
+                (order_id, md, f'C-MD{md}'))
+            _seed_reward_row(conn, order_id=order_id,
+                             market_day_id=md)
+        conn.commit()
+
+    @staticmethod
+    def _customers(screen):
+        return {screen.rewards_table.item(r, 2).text()
+                for r in range(screen.rewards_table.rowCount())}
+
+    def test_date_filter_narrows_rows(self, qtbot, gen_rewards_db):
+        from fam.ui.reports_screen import ReportsScreen
+        self._seed_two_days_two_markets(gen_rewards_db)
+        screen = ReportsScreen()
+        qtbot.addWidget(screen)
+        screen.date_range.get_date_range = (
+            lambda: ('2026-04-30', '2026-04-30'))
+        screen._generate_reports()
+        assert self._customers(screen) == {'C-MD1', 'C-MD3'}
+
+    def test_market_filter_narrows_rows(self, qtbot, gen_rewards_db):
+        from fam.ui.reports_screen import ReportsScreen
+        self._seed_two_days_two_markets(gen_rewards_db)
+        screen = ReportsScreen()
+        qtbot.addWidget(screen)
+        screen.market_combo.checked_data = lambda: [2]
+        screen._generate_reports()
+        assert self._customers(screen) == {'C-MD3'}
+
+    def test_no_filters_shows_everything(self, qtbot, gen_rewards_db):
+        from fam.ui.reports_screen import ReportsScreen
+        self._seed_two_days_two_markets(gen_rewards_db)
+        screen = ReportsScreen()
+        qtbot.addWidget(screen)
+        screen._generate_reports()
+        assert self._customers(screen) == {'C-MD1', 'C-MD2', 'C-MD3'}
+
+    def test_vendor_filter_does_not_apply(self, qtbot, gen_rewards_db):
+        from fam.ui.reports_screen import ReportsScreen
+        self._seed_two_days_two_markets(gen_rewards_db)
+        screen = ReportsScreen()
+        qtbot.addWidget(screen)
+        screen.vendor_combo.checked_data = lambda: [1]
+        screen._generate_reports()
+        assert self._customers(screen) == {'C-MD1', 'C-MD2', 'C-MD3'}

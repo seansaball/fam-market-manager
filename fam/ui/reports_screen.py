@@ -24,8 +24,8 @@ from PySide6.QtWidgets import (
     QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
     QFileDialog, QMessageBox, QScrollArea, QTextEdit, QCheckBox, QSplitter
 )
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QBrush, QFont
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+from PySide6.QtGui import QColor, QBrush, QFont, QPainter, QPen
 
 from fam.database.connection import get_connection
 from fam.models.market_day import get_all_market_days, get_all_markets
@@ -34,9 +34,11 @@ from fam.models.payment_method import get_all_payment_methods
 from fam.utils.export import (
     export_vendor_reimbursement, export_fam_match_report, export_detailed_ledger,
     export_activity_log, export_geolocation_report, export_transaction_log,
-    export_error_log, export_generated_rewards, generate_export_filename
+    export_error_log, export_generated_rewards, export_snap_settlement,
+    generate_export_filename
 )
 from fam.models.audit import get_transaction_log, ACTION_LABELS
+from fam.models.transaction import active_tx_status_clause
 from fam.utils.log_reader import parse_log_file
 from fam.utils.logging_config import get_log_path
 from fam.ui.styles import (
@@ -54,6 +56,84 @@ logger = logging.getLogger('fam.ui.reports_screen')
 from fam.utils.money import cents_to_dollars
 
 
+class _VerifiedBox(QWidget):
+    """Custom-painted Verified checkbox for the report working
+    pages (v2.1.0): SNAP Settlement rows (ENH-003) and Vendor
+    Reimbursement end-of-market vendor verification (ENH-006).
+
+    NOT a QCheckBox on purpose: a text-less QCheckBox positions its
+    stylesheet-styled indicator against the font line box rather
+    than the widget rect, and three rounds of field-reported edge
+    clipping (2026-06-12) proved no combination of fixed sizes,
+    size policies, and layout alignment renders it reliably inside
+    a table cell.  This widget paints the 16px box itself, centered
+    in whatever rect the cell provides — clipping is geometrically
+    impossible while the cell is at least box-tall.  Same QPainter
+    house pattern as fam/ui/help_icons.py; same look as the
+    settings-screen checkboxes (white box, grey border, green fill
+    with a white check when ticked).
+
+    API mirrors the QCheckBox subset the screen and tests use:
+    ``isChecked()`` / ``setChecked()`` / ``toggled(bool)`` (emitted
+    on programmatic setChecked too, like QCheckBox).
+    """
+
+    toggled = Signal(bool)
+
+    BOX = 16          # indicator side, px — settings-screen size
+    BORDER = 2.0      # border width, px
+
+    def __init__(self, checked=False, parent=None):
+        super().__init__(parent)
+        self._checked = bool(checked)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumSize(self.BOX + 6, self.BOX + 6)
+
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, checked):
+        checked = bool(checked)
+        if checked != self._checked:
+            self._checked = checked
+            self.update()
+            self.toggled.emit(checked)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.setChecked(not self._checked)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        x = (self.width() - self.BOX) / 2.0
+        y = (self.height() - self.BOX) / 2.0
+        box = QRectF(x + self.BORDER / 2.0, y + self.BORDER / 2.0,
+                     self.BOX - self.BORDER, self.BOX - self.BORDER)
+        if self._checked:
+            p.setPen(QPen(QColor(PRIMARY_GREEN), self.BORDER))
+            p.setBrush(QBrush(QColor(ACCENT_GREEN)))
+        else:
+            p.setPen(QPen(QColor('#AAAAAA'), self.BORDER))
+            p.setBrush(QBrush(QColor(WHITE)))
+        p.drawRoundedRect(box, 3, 3)
+        if self._checked:
+            pen = QPen(QColor('#FFFFFF'), 2.0)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawPolyline([
+                QPointF(x + 4.0, y + 8.5),
+                QPointF(x + 6.8, y + 11.2),
+                QPointF(x + 12.0, y + 5.0),
+            ])
+        p.end()
+
+
 class ReportsScreen(QWidget):
     """Reports and Exports screen."""
 
@@ -67,6 +147,8 @@ class ReportsScreen(QWidget):
         self._txn_log_data = []
         self._error_log_data = []
         self._rewards_data = []
+        self._settlement_data = []
+        self._settlement_loading = False
         self._error_log_loaded = False
         self._chart_pie_data = []
         self._chart_trend_data = []
@@ -118,8 +200,26 @@ class ReportsScreen(QWidget):
         filter_layout.addWidget(_flbl("Date"))
         self.date_range = DateRangeWidget()
         self.date_range.setStyleSheet(_filter_combo_ss)
-        self.date_range.range_changed.connect(self._on_filter_changed)
+        self.date_range.range_changed.connect(
+            self._on_date_range_changed)
         filter_layout.addWidget(self.date_range, 1)
+
+        # Market Day shortcut filter (v2.1.0, ENH-005 — Bryan).
+        # Coordinators reconcile per market day ("show me last
+        # Tuesday"); pinning both ends of the date range to one day
+        # was clumsy and ambiguous when two markets ran on the same
+        # date.  Picking a specific day OVERRIDES the date range
+        # (the range widget greys out) and constrains every report
+        # to exactly that day's market.  "All Market Days" restores
+        # the date-range behavior — same UX as the FMNP/External
+        # screen's day dropdown.
+        filter_layout.addWidget(_flbl("Market Day"))
+        self.market_day_combo = NoScrollComboBox()
+        self.market_day_combo.setStyleSheet(
+            "font-size: 11px; min-height: 0px; padding: 4px 8px;")
+        self.market_day_combo.currentIndexChanged.connect(
+            self._on_market_day_changed)
+        filter_layout.addWidget(self.market_day_combo, 1)
 
         # Market filter
         filter_layout.addWidget(_flbl("Market"))
@@ -150,6 +250,11 @@ class ReportsScreen(QWidget):
         self.summary_row.add_card("customer_paid", "Customer Paid")
         self.summary_row.add_card("fam_match", "FAM Match", highlight=True)
         self.summary_row.add_card("fmnp_total", "FMNP Checks", highlight=True)
+        # v2.1.0 (ENH-002): FAM-owed payouts for non-FMNP external
+        # methods (Food RX / Food Bucks collected from vendors and
+        # entered on the External Payments Entry screen).
+        self.summary_row.add_card("external_total",
+                                  "External Payments", highlight=True)
         # FAM Absorbed (Unallocated Funds, schema v25+) — losses FAM
         # eats when an adjustment finds a customer was undercharged
         # but the customer has already left the market.  Shown as a
@@ -239,6 +344,76 @@ class ReportsScreen(QWidget):
         export_btn3.clicked.connect(lambda: self._export("detailed_ledger"))
         ll.addWidget(export_btn3)
         self.tabs.addTab(ledger_tab, "Detailed Ledger")
+
+        # SNAP Settlement tab (v2.1.0, ENH-003).
+        # One row per customer ORDER — i.e. one row per EBT terminal
+        # swipe — so the coordinator can match the paper EBT-device
+        # receipts against the system without re-assembling N
+        # per-vendor Detailed Ledger rows by hand.  Local-only by
+        # confirmed requirement: on-screen + CSV, no Sheets tab.
+        settlement_tab = QWidget()
+        settle_outer = QVBoxLayout(settlement_tab)
+        settle_banner = QLabel(
+            "<i>One row per customer order — the <b>SNAP Total</b> "
+            "line equals the single charge run on the EBT terminal "
+            "for that order, even when the order spanned several "
+            "vendors.  Pick the day in the <b>Market Day</b> filter, "
+            "then tick <b>Verified</b> as you match each paper "
+            "EBT-device receipt — ticks are saved on this laptop "
+            "and survive restarts.  The Vendor and Payment Type "
+            "filters are deliberately ignored here — a vendor "
+            "sub-total would never match the paper receipt.</i>"
+        )
+        settle_banner.setWordWrap(True)
+        settle_banner.setStyleSheet(
+            "padding: 8px; background-color: #E3F2FD; "
+            "border: 1px solid #1565C0; border-radius: 6px; "
+            "font-size: 12px; color: #0D47A1;")
+        settle_outer.addWidget(settle_banner)
+        self.settlement_table = QTableWidget()
+        # Column 7 is a headerless FILLER: it absorbs the leftover
+        # viewport width so every data column (incl. Market) stays
+        # content-sized and Verified stays compact (field feedback
+        # 2026-06-12 — stretching Market made it absurdly wide).
+        self.settlement_table.setColumnCount(8)
+        # Verified FIRST (consistency with Vendor Reimbursement —
+        # Sean, 2026-06-12); trailing unlabeled column is the
+        # width filler.
+        self.settlement_table.setHorizontalHeaderLabels([
+            "Verified", "Timestamp", "Customer", "Zip Code",
+            "Market", "Receipts", "SNAP Total", "",
+        ])
+        configure_table(self.settlement_table, resizable=True)
+        # Header sorting stays OFF for this table: rows are
+        # chronological by contract (the paper stack), and the
+        # Verified cell widgets would not follow a re-sort.
+        _settle_hdr = self.settlement_table.horizontalHeader()
+        _settle_hdr.setStretchLastSection(False)
+        _settle_hdr.setSectionResizeMode(7, QHeaderView.Stretch)
+        _settle_hdr.setSortIndicatorShown(False)
+        _settle_hdr.setSectionsClickable(False)
+        self.settlement_table.setSortingEnabled(False)
+        # Rows must clear the 22px Verified checkbox widget plus
+        # breathing room (field report 2026-06-12; enforced per-row
+        # in the loader too — the header default alone proved
+        # unreliable in the field).
+        _settle_vh = self.settlement_table.verticalHeader()
+        _settle_vh.setMinimumSectionSize(34)
+        _settle_vh.setDefaultSectionSize(34)
+        settle_outer.addWidget(self.settlement_table)
+        settle_btn_row = QHBoxLayout()
+        export_settle_btn = QPushButton("Export SNAP Settlement CSV")
+        export_settle_btn.setObjectName("secondary_btn")
+        export_settle_btn.clicked.connect(
+            lambda: self._export("snap_settlement"))
+        settle_btn_row.addWidget(export_settle_btn)
+        settle_btn_row.addStretch()
+        settle_outer.addLayout(settle_btn_row)
+        # Second tab (Sean, 2026-06-12): the post-market settlement
+        # working page earns front placement, right after Vendor
+        # Reimbursement.  Built here (next to the Detailed Ledger it
+        # derives from) but inserted at index 1.
+        self.tabs.insertTab(1, settlement_tab, "SNAP Settlement")
 
         # Transaction Log tab (human-friendly view of audit data)
         self.tabs.addTab(self._build_transaction_log_tab(), "Transaction Log")
@@ -455,7 +630,7 @@ class ReportsScreen(QWidget):
         self._generate_reports()
 
     def _populate_filters(self):
-        """Load all four filter dropdowns from DB. Suppresses auto-regeneration."""
+        """Load all filter dropdowns from DB. Suppresses auto-regeneration."""
         self._populating = True
 
         # Date range — set calendar bounds from market_days min/max dates
@@ -463,6 +638,23 @@ class ReportsScreen(QWidget):
         if days:
             all_dates = [d['date'] for d in days]
             self.date_range.set_date_bounds(min(all_dates), max(all_dates))
+
+        # Market Day shortcut — most recent first (get_all_market_days
+        # already sorts DESC); label carries the market name so two
+        # markets on the same date are unambiguous.  Preserve the
+        # current selection across repopulation.
+        prev_md_id = self.market_day_combo.currentData()
+        self.market_day_combo.blockSignals(True)
+        self.market_day_combo.clear()
+        self.market_day_combo.addItem("All Market Days", None)
+        for d in days:
+            self.market_day_combo.addItem(
+                f"{d['date']} — {d['market_name']}", d['id'])
+        if prev_md_id is not None:
+            idx = self.market_day_combo.findData(prev_md_id)
+            if idx >= 0:
+                self.market_day_combo.setCurrentIndex(idx)
+        self.market_day_combo.blockSignals(False)
 
         # Market
         markets = get_all_markets()
@@ -483,6 +675,37 @@ class ReportsScreen(QWidget):
         if not self._populating:
             self._generate_reports()
 
+    def _on_market_day_changed(self):
+        """Market Day shortcut selected/cleared (ENH-005).
+
+        Last-touched-wins (Sean field feedback, 2026-06-12 — the
+        earlier greyed-out-range design left both filters showing
+        values at once): picking a specific day CLEARS the date
+        range back to "All Dates", and applying a date range resets
+        this dropdown to "All Market Days" (see
+        ``_on_date_range_changed``).  The where-builders' md-wins
+        clause remains as a safety net, but the two filters can no
+        longer appear set simultaneously."""
+        if self.market_day_combo.currentData() is not None:
+            self.date_range.blockSignals(True)
+            self.date_range.clear_range()
+            self.date_range.blockSignals(False)
+        self._on_filter_changed()
+
+    def _on_date_range_changed(self):
+        """Date range applied/cleared — exits Market Day mode
+        (last-touched-wins, see ``_on_market_day_changed``)."""
+        if self.market_day_combo.currentData() is not None:
+            self.market_day_combo.blockSignals(True)
+            self.market_day_combo.setCurrentIndex(0)
+            self.market_day_combo.blockSignals(False)
+        self._on_filter_changed()
+
+    def _selected_market_day_id(self):
+        """Return the Market Day shortcut's md id, or None for
+        "All Market Days"."""
+        return self.market_day_combo.currentData()
+
     # ------------------------------------------------------------------
     # Build dynamic WHERE clause from all 4 multi-select filters
     # ------------------------------------------------------------------
@@ -502,11 +725,17 @@ class ReportsScreen(QWidget):
         clauses = ["t.status IN ('Confirmed', 'Adjusted')"]
         params = []
 
-        # Date range filter
-        from_date, to_date = self.date_range.get_date_range()
-        if from_date and to_date:
-            clauses.append("md.date BETWEEN ? AND ?")
-            params.extend([from_date, to_date])
+        # Market Day shortcut overrides the date range (ENH-005)
+        md_id = self._selected_market_day_id()
+        if md_id is not None:
+            clauses.append("md.id = ?")
+            params.append(md_id)
+        else:
+            # Date range filter
+            from_date, to_date = self.date_range.get_date_range()
+            if from_date and to_date:
+                clauses.append("md.date BETWEEN ? AND ?")
+                params.extend([from_date, to_date])
 
         # Market filter (multi)
         market_ids = self.market_combo.checked_data()
@@ -540,10 +769,15 @@ class ReportsScreen(QWidget):
         clauses = ["fe.status = 'Active'"]
         params = []
 
-        from_date, to_date = self.date_range.get_date_range()
-        if from_date and to_date:
-            clauses.append("md.date BETWEEN ? AND ?")
-            params.extend([from_date, to_date])
+        md_id = self._selected_market_day_id()
+        if md_id is not None:
+            clauses.append("md.id = ?")
+            params.append(md_id)
+        else:
+            from_date, to_date = self.date_range.get_date_range()
+            if from_date and to_date:
+                clauses.append("md.date BETWEEN ? AND ?")
+                params.extend([from_date, to_date])
 
         market_ids = self.market_combo.checked_data()
         if market_ids:
@@ -566,6 +800,47 @@ class ReportsScreen(QWidget):
             return "WHERE " + " AND ".join(clauses), params
         return "", params
 
+    def _build_external_where(self):
+        """(where_sql, params) for NON-FMNP external entry queries
+        (v2.1.0/ENH-002).  Same filter set as ``_build_fmnp_where``
+        but the payment-type filter matches the entry's method NAME
+        SNAPSHOT (so filtering on "Food RX" includes its external
+        entries).  Callers append their own method-id routing
+        clause."""
+        clauses = ["fe.status = 'Active'"]
+        params = []
+
+        md_id = self._selected_market_day_id()
+        if md_id is not None:
+            clauses.append("md.id = ?")
+            params.append(md_id)
+        else:
+            from_date, to_date = self.date_range.get_date_range()
+            if from_date and to_date:
+                clauses.append("md.date BETWEEN ? AND ?")
+                params.extend([from_date, to_date])
+
+        market_ids = self.market_combo.checked_data()
+        if market_ids:
+            sql, p = self._in_clause("md.market_id", market_ids)
+            clauses.append(sql)
+            params.extend(p)
+
+        vendor_ids = self.vendor_combo.checked_data()
+        if vendor_ids:
+            sql, p = self._in_clause("fe.vendor_id", vendor_ids)
+            clauses.append(sql)
+            params.extend(p)
+
+        pay_types = self.pay_type_combo.checked_data()
+        if pay_types:
+            ph = ", ".join("?" for _ in pay_types)
+            clauses.append(
+                f"fe.method_name_snapshot IN ({ph})")
+            params.extend(pay_types)
+
+        return "WHERE " + " AND ".join(clauses), params
+
     # ------------------------------------------------------------------
     # Generate all three reports
     # ------------------------------------------------------------------
@@ -573,6 +848,16 @@ class ReportsScreen(QWidget):
         conn = get_connection()
         where, params = self._build_where()
         fmnp_where, fmnp_params = self._build_fmnp_where()
+        ext_where, ext_params = self._build_external_where()
+
+        # v2.1.0 (ENH-002): fmnp_entries holds ALL external methods.
+        # Every FMNP-specific query below routes by the FMNP method
+        # id (frozen feeds stay identical); non-FMNP external
+        # entries get their own queries/columns.
+        from fam.models.payment_method import (
+            get_payment_method_by_name)
+        _fmnp_pm = get_payment_method_by_name('FMNP')
+        fmnp_pm_id = _fmnp_pm['id'] if _fmnp_pm else -1
 
         # v2.0.1: open a single read transaction so every SELECT
         # below sees the SAME WAL snapshot.  Without this, a
@@ -712,6 +997,7 @@ class ReportsScreen(QWidget):
                     customer_forfeit_by_vendor.get(key, 0),
                 '_method_cents': dict(method_by_vendor.get(key, {})),
                 '_fmnp_external_cents': 0,
+                '_external_method_cents': {},
             }
 
         # Merge external FMNP entries (from fmnp_entries table)
@@ -726,9 +1012,9 @@ class ReportsScreen(QWidget):
             JOIN vendors v ON fe.vendor_id = v.id
             JOIN market_days md ON fe.market_day_id = md.id
             JOIN markets m ON md.market_id = m.id
-            {fmnp_where}
+            {fmnp_where} AND fe.payment_method_id = ?
             GROUP BY m.id, v.id, v.name
-        """, fmnp_params).fetchall()
+        """, fmnp_params + [fmnp_pm_id]).fetchall()
 
         for r in fmnp_vendor_rows:
             key = (r['market_name'], r['vendor'])
@@ -758,7 +1044,75 @@ class ReportsScreen(QWidget):
                     '_customer_forfeit_cents': 0,
                     '_method_cents': {},
                     '_fmnp_external_cents': fmnp_cents,
+                    '_external_method_cents': {},
                 }
+
+        # ── Merge non-FMNP external entries (v2.1.0 / ENH-002) ──
+        # Mirrors _collect_vendor_reimbursement: payout derived
+        # PER ENTRY from the row's own config snapshots (EP1),
+        # accumulated per (market, vendor, method) into
+        # ``<Method> (External)`` columns that add into Total Due.
+        ext_entry_rows = conn.execute(f"""
+            SELECT v.name AS vendor,
+                   m.name AS market_name,
+                   md.date AS md_date,
+                   {cpt_expr} AS check_payable_to,
+                   fe.amount, fe.method_name_snapshot,
+                   fe.match_percent_snapshot,
+                   fe.vendor_cashes_original_snapshot
+                   {addr_cols}
+            FROM fmnp_entries fe
+            JOIN vendors v ON fe.vendor_id = v.id
+            JOIN market_days md ON fe.market_day_id = md.id
+            JOIN markets m ON md.market_id = m.id
+            {ext_where} AND fe.payment_method_id != ?
+        """, ext_params + [fmnp_pm_id]).fetchall()
+
+        from fam.utils.external_payout import (
+            compute_external_payout_cents)
+        all_external_cols: set = set()
+        for r in ext_entry_rows:
+            key = (r['market_name'], r['vendor'])
+            match_pct = (r['match_percent_snapshot']
+                         if r['match_percent_snapshot'] is not None
+                         else 100.0)
+            cashes = bool(
+                r['vendor_cashes_original_snapshot']
+                if r['vendor_cashes_original_snapshot'] is not None
+                else 1)
+            payout_cents = compute_external_payout_cents(
+                r['amount'], match_pct, cashes)
+            col = (f"{r['method_name_snapshot'] or 'Unknown'} "
+                   f"(External)")
+            all_external_cols.add(col)
+            if key not in vendor_dict:
+                month_str = ''
+                if r['md_date']:
+                    from datetime import datetime
+                    month_str = datetime.strptime(
+                        r['md_date'][:7], '%Y-%m').strftime('%B')
+                vendor_dict[key] = {
+                    'market_name': r['market_name'] or '',
+                    'vendor': r['vendor'],
+                    'check_payable_to': r['check_payable_to'],
+                    'address': _build_addr(r),
+                    'month': month_str,
+                    'dates': '',
+                    '_total_due_cents': 0,
+                    '_fam_match_cents': 0,
+                    '_customer_forfeit_cents': 0,
+                    '_method_cents': {},
+                    '_fmnp_external_cents': 0,
+                    '_external_method_cents': {},
+                }
+            row = vendor_dict[key]
+            ext = row['_external_method_cents']
+            ext[col] = ext.get(col, 0) + payout_cents
+            row['_total_due_cents'] += payout_cents
+            existing = (set(row['dates'].split(','))
+                        if row['dates'] else set())
+            all_dates = (existing | {r['md_date'] or ''}) - {''}
+            row['dates'] = ','.join(sorted(all_dates))
 
         # Final emission: cents → dollars, exactly once per field.
         vendor_list = []
@@ -779,6 +1133,9 @@ class ReportsScreen(QWidget):
                              for m, c in rc['_method_cents'].items()},
                 'fmnp_external': cents_to_dollars(
                     rc['_fmnp_external_cents']),
+                'externals': {c: cents_to_dollars(v)
+                              for c, v in
+                              rc['_external_method_cents'].items()},
             })
 
         # Build dynamic table columns.
@@ -798,11 +1155,81 @@ class ReportsScreen(QWidget):
                       'Month', 'Date(s)', 'Total Due to Vendor',
                       'FAM Match']
         method_cols = list(all_methods)
-        tail_cols = ['FMNP (External)', 'Customer Forfeit',
-                     'Check Payable To', 'Address']
-        all_cols = fixed_cols + method_cols + tail_cols
+        # v2.1.0 (ENH-002): per-method external columns (FAM-owed
+        # payouts) after FMNP (External), before Customer Forfeit —
+        # mirrors the sheet collector.
+        external_cols = sorted(all_external_cols)
+        tail_cols = (['FMNP (External)'] + external_cols
+                     + ['Customer Forfeit',
+                        'Check Payable To', 'Address'])
+        # v2.1.0 (ENH-006): end-of-market vendor verification marks.
+        # The mark is the per-day FACT "(vendor, market day)
+        # confirmed with the vendor in person", persisted in
+        # vendor_day_verifications.  The row's checkbox is a
+        # DERIVED ROLLUP of those facts (revised 2026-06-12 — Sean
+        # wanted range/month views tickable too, e.g. month-end
+        # check-cutting): checked ⇔ EVERY market day this row's
+        # vendor was active on (within the current filters) is
+        # verified; ticking verifies them all, unticking clears
+        # them all; partial progress shows in the tooltip.  No
+        # per-window state is ever stored — store the atom, derive
+        # the rollup.  Helps the market manager reconcile; has ZERO
+        # effect on FAM reimbursement (never synced, never audited,
+        # never read by money math).
+        # FIRST column (Sean, 2026-06-12): the wide money table
+        # scrolls horizontally — a trailing checkbox would sit
+        # off-screen during the vendor walk.
+        all_cols = ['Verified'] + fixed_cols + method_cols + tail_cols
+        self._vendor_verified_col = 0
+        # Scope model (Sean, 2026-06-12, rev 2): EVERY time scope
+        # is its OWN independent checkbox.  A Market Day selection
+        # reads/writes the (vendor, day) mark in
+        # vendor_day_verifications; a date range or whole-month
+        # pick reads/writes the (vendor, market, from, to) mark in
+        # vendor_range_verifications.  Toggling one scope NEVER
+        # cascades into another — unchecking a month does not
+        # uncheck that month's market days.  With no time scope at
+        # all (All Dates + All Market Days) the column is an inert
+        # dash: there is no scope to attach a mark to.
+        _vr_from, _vr_to = self.date_range.get_date_range()
+        verify_md_id = self._selected_market_day_id()
+        verify_scope = None          # 'day' | 'range' | None
+        day_marks: dict = {}
+        range_marks: dict = {}
+        if verify_md_id is not None:
+            verify_scope = 'day'
+            day_marks = {
+                r['vendor_id']: r['verified_at']
+                for r in conn.execute(
+                    "SELECT vendor_id, verified_at "
+                    "FROM vendor_day_verifications "
+                    "WHERE market_day_id = ?", (verify_md_id,))}
+        elif _vr_from and _vr_to:
+            verify_scope = 'range'
+            range_marks = {
+                (r['vendor_id'], r['market_id']): r['verified_at']
+                for r in conn.execute(
+                    "SELECT vendor_id, market_id, verified_at "
+                    "FROM vendor_range_verifications "
+                    "WHERE from_date = ? AND to_date = ?",
+                    (_vr_from, _vr_to))}
+        # Names are unique (vendors pinned by test_vendor_unique;
+        # markets rename-protected) so name → id maps avoid
+        # threading ids through the aggregation bucket paths above.
+        vendor_name_to_id = {
+            v['name']: v['id']
+            for v in get_all_vendors(active_only=False)}
+        market_name_to_id = {
+            m['name']: m['id'] for m in get_all_markets()}
 
         self.vendor_table.setSortingEnabled(False)
+        # clearContents drops the previous run's ITEMS AND CELL
+        # WIDGETS.  Without it, Verified checkboxes from a prior
+        # verification-mode render survive the rebuild (setItem
+        # does not remove cell widgets) — stale widgets wired to
+        # stale (vendor, market-day) closures, possibly at the
+        # wrong column once the dynamic method columns shift.
+        self.vendor_table.clearContents()
         self.vendor_table.setColumnCount(len(all_cols))
         self.vendor_table.setHorizontalHeaderLabels(all_cols)
         configure_table(self.vendor_table, resizable=True)
@@ -811,11 +1238,62 @@ class ReportsScreen(QWidget):
         self._vendor_data = []
         total_gross = 0
         total_fmnp = 0
+        total_external = 0
         for i, v in enumerate(vendor_list):
-            total_gross += v['total_due'] - v['fmnp_external']
+            v_external = sum(v['externals'].values())
+            total_gross += (v['total_due'] - v['fmnp_external']
+                            - v_external)
             total_fmnp += v['fmnp_external']
+            total_external += v_external
 
+            # Verified column first (ENH-006) — one independent
+            # mark per time scope; see the comment at the
+            # column-list build above.
             col = 0
+            vendor_id = vendor_name_to_id.get(v['vendor'])
+            market_id = market_name_to_id.get(v['market_name'])
+            checked = None               # None → inert dash
+            scope = None
+            if verify_scope == 'day' and vendor_id is not None:
+                checked = vendor_id in day_marks
+                scope = ('day', verify_md_id)
+                tip = (
+                    "Verified mark for this vendor on THIS market "
+                    "day.  Each day / month / range keeps its own "
+                    "independent mark.  Reconciliation aid only — "
+                    "does NOT affect FAM reimbursement.")
+            elif (verify_scope == 'range' and vendor_id is not None
+                    and market_id is not None):
+                checked = (vendor_id, market_id) in range_marks
+                scope = ('range', (market_id, _vr_from, _vr_to))
+                tip = (
+                    f"Verified mark for this vendor for "
+                    f"{_vr_from} – {_vr_to} only.  Each day / "
+                    "month / range keeps its own independent mark "
+                    "(unticking this does NOT touch the per-day "
+                    "marks inside it).  Reconciliation aid only — "
+                    "does NOT affect FAM reimbursement.")
+            if checked is not None:
+                self.vendor_table.setItem(i, col, make_item(''))
+                vbox = _VerifiedBox(checked=checked)
+                vbox.setToolTip(tip)
+                vbox.toggled.connect(
+                    lambda is_on, vid=vendor_id, sc=scope, r=i:
+                        self._on_vendor_verified_toggled(
+                            vid, sc, is_on, r))
+                self.vendor_table.setCellWidget(i, col, vbox)
+            else:
+                dash = make_item('–')
+                dash.setToolTip(
+                    "Pick a Market Day, a month, or a date range "
+                    "to verify vendors — each scope keeps its own "
+                    "independent mark.  Marks do NOT affect FAM "
+                    "reimbursement."
+                    if verify_scope is None else
+                    "No id resolvable for this row.")
+                self.vendor_table.setItem(i, col, dash)
+            col += 1
+
             self.vendor_table.setItem(i, col, make_item(v['market_name'])); col += 1
             self.vendor_table.setItem(i, col, make_item(v['vendor'])); col += 1
             self.vendor_table.setItem(i, col, make_item(v['month'])); col += 1
@@ -832,11 +1310,18 @@ class ReportsScreen(QWidget):
 
             self.vendor_table.setItem(i, col, make_item(
                 f"${v['fmnp_external']:.2f}", v['fmnp_external'])); col += 1
+            for ext_col in external_cols:
+                amt = v['externals'].get(ext_col, 0)
+                self.vendor_table.setItem(i, col, make_item(
+                    f"${amt:.2f}", amt)); col += 1
             self.vendor_table.setItem(i, col, make_item(
                 f"${v['customer_forfeit']:.2f}",
                 v['customer_forfeit'])); col += 1
             self.vendor_table.setItem(i, col, make_item(v['check_payable_to'])); col += 1
             self.vendor_table.setItem(i, col, make_item(v['address']))
+
+            if checked:
+                self._tint_vendor_row(i, True)
 
             row_data = {
                 'Market Name': v['market_name'],
@@ -849,12 +1334,23 @@ class ReportsScreen(QWidget):
             for m in method_cols:
                 row_data[m] = v['methods'].get(m, 0)
             row_data['FMNP (External)'] = v['fmnp_external']
+            for ext_col in external_cols:
+                row_data[ext_col] = v['externals'].get(ext_col, 0)
             row_data['Customer Forfeit'] = v['customer_forfeit']
             row_data['Check Payable To'] = v['check_payable_to']
             row_data['Address'] = v['address']
+            if checked is not None:
+                row_data['Verified'] = 'Yes' if checked else ''
             self._vendor_data.append(row_data)
         self.vendor_table.resizeColumnsToContents()
-        self.vendor_table.setSortingEnabled(True)
+        # Header sorting stays OFF for this table (v2.1.0 ENH-006):
+        # the Verified cell widgets would not follow a re-sort.
+        # Rows hold market/vendor-name order — the natural walking
+        # order for the end-of-market verification pass.
+        _vh_hdr = self.vendor_table.horizontalHeader()
+        self.vendor_table.setSortingEnabled(False)
+        _vh_hdr.setSortIndicatorShown(False)
+        _vh_hdr.setSectionsClickable(False)
 
         # ── FAM Match by payment method ──────────────────────────
         # The shared WHERE filters at the transaction level.  For the
@@ -951,8 +1447,8 @@ class ReportsScreen(QWidget):
             SELECT COALESCE(SUM(fe.amount), 0) as total
             FROM fmnp_entries fe
             JOIN market_days md ON fe.market_day_id = md.id
-            {fmnp_where}
-        """, fmnp_params).fetchone()['total']
+            {fmnp_where} AND fe.payment_method_id = ?
+        """, fmnp_params + [fmnp_pm_id]).fetchone()['total']
 
         fmnp_ext_dollars = cents_to_dollars(fmnp_ext_total)
         if fmnp_ext_dollars > 0:
@@ -973,6 +1469,62 @@ class ReportsScreen(QWidget):
                 'Total FAM Match': 0,
                 'FAM Absorbed': 0,
             })
+
+        # v2.1.0 (ENH-002): one <Method> (External) row per non-FMNP
+        # external method — Total Allocated = Σ derived payouts,
+        # Total FAM Match = Σ match components.  Mirrors
+        # _collect_fam_match in fam/sync/data_collector.py.
+        from fam.utils.external_payout import match_component_cents
+        ext_match_rows = conn.execute(f"""
+            SELECT fe.amount, fe.method_name_snapshot,
+                   fe.match_percent_snapshot,
+                   fe.vendor_cashes_original_snapshot
+            FROM fmnp_entries fe
+            JOIN market_days md ON fe.market_day_id = md.id
+            {ext_where} AND fe.payment_method_id != ?
+        """, ext_params + [fmnp_pm_id]).fetchall()
+
+        ext_match_totals: dict = {}
+        total_external_payout = 0.0
+        for r in ext_match_rows:
+            match_pct = (r['match_percent_snapshot']
+                         if r['match_percent_snapshot'] is not None
+                         else 100.0)
+            cashes = bool(
+                r['vendor_cashes_original_snapshot']
+                if r['vendor_cashes_original_snapshot'] is not None
+                else 1)
+            payout_cents = compute_external_payout_cents(
+                r['amount'], match_pct, cashes)
+            mc = match_component_cents(r['amount'], match_pct)
+            name = r['method_name_snapshot'] or 'Unknown'
+            bucket = ext_match_totals.setdefault(
+                name, {'payout': 0, 'match': 0})
+            bucket['payout'] += payout_cents
+            bucket['match'] += mc
+
+        for name in sorted(ext_match_totals):
+            payout_d = cents_to_dollars(
+                ext_match_totals[name]['payout'])
+            match_d = cents_to_dollars(
+                ext_match_totals[name]['match'])
+            total_external_payout += payout_d
+            row_idx = self.match_table.rowCount()
+            self.match_table.setRowCount(row_idx + 1)
+            self.match_table.setItem(
+                row_idx, 0, make_item(f"{name} (External)"))
+            self.match_table.setItem(row_idx, 1, make_item(
+                f"${payout_d:.2f}", payout_d))
+            self.match_table.setItem(row_idx, 2, make_item(
+                f"${match_d:.2f}", match_d))
+            self.match_table.setItem(row_idx, 3, make_item(
+                "$0.00", 0))
+            self._match_data.append({
+                'Payment Method': f"{name} (External)",
+                'Total Allocated': payout_d,
+                'Total FAM Match': match_d,
+                'FAM Absorbed': 0,
+            })
         self.match_table.resizeColumnsToContents()
         self.match_table.setSortingEnabled(True)
 
@@ -986,6 +1538,10 @@ class ReportsScreen(QWidget):
         self.summary_row.update_card("fam_match", f"${total_fam_match:.2f}")
         self.summary_row.update_card(
             "fmnp_total", f"${total_fmnp + total_fmnp_path1:.2f}")
+        # v2.1.0 (ENH-002): FAM-owed total for non-FMNP external
+        # payouts (the new <Method> (External) money).
+        self.summary_row.update_card(
+            "external_total", f"${total_external_payout:.2f}")
         self.summary_row.update_card("fam_absorbed",
                                      f"${total_fam_absorbed:.2f}")
         self.summary_row.update_card(
@@ -1085,9 +1641,9 @@ class ReportsScreen(QWidget):
             FROM fmnp_entries fe
             JOIN vendors v ON fe.vendor_id = v.id
             JOIN market_days md ON fe.market_day_id = md.id
-            {fmnp_where}
+            {fmnp_where} AND fe.payment_method_id = ?
             ORDER BY md.date, fe.id
-        """, fmnp_params).fetchall()
+        """, fmnp_params + [fmnp_pm_id]).fetchall()
 
         if fmnp_ledger_rows:
             self.ledger_table.setSortingEnabled(False)
@@ -1129,6 +1685,83 @@ class ReportsScreen(QWidget):
                     'Customer Forfeit': 0,
                     'Status': 'FMNP Entry',
                     'Payment Methods': check_info
+                })
+            self.ledger_table.resizeColumnsToContents()
+            self.ledger_table.setSortingEnabled(True)
+
+        # v2.1.0 (ENH-002): append non-FMNP external entries as
+        # EXT- rows.  Receipt Total = derived payout (FAM owes),
+        # FAM Match = match component, Customer Paid = 0 — mirrors
+        # _collect_detailed_ledger in fam/sync/data_collector.py.
+        ext_ledger_rows = conn.execute(f"""
+            SELECT fe.id, v.name as vendor, fe.amount, md.date,
+                   fe.check_count, fe.created_at,
+                   fe.method_name_snapshot,
+                   fe.match_percent_snapshot,
+                   fe.vendor_cashes_original_snapshot
+            FROM fmnp_entries fe
+            JOIN vendors v ON fe.vendor_id = v.id
+            JOIN market_days md ON fe.market_day_id = md.id
+            {ext_where} AND fe.payment_method_id != ?
+            ORDER BY md.date, fe.id
+        """, ext_params + [fmnp_pm_id]).fetchall()
+
+        if ext_ledger_rows:
+            self.ledger_table.setSortingEnabled(False)
+            offset = self.ledger_table.rowCount()
+            self.ledger_table.setRowCount(
+                offset + len(ext_ledger_rows))
+            for i, r in enumerate(ext_ledger_rows):
+                row_idx = offset + i
+                match_pct = (r['match_percent_snapshot']
+                             if r['match_percent_snapshot'] is not None
+                             else 100.0)
+                cashes = bool(
+                    r['vendor_cashes_original_snapshot']
+                    if r['vendor_cashes_original_snapshot'] is not None
+                    else 1)
+                payout = cents_to_dollars(
+                    compute_external_payout_cents(
+                        r['amount'], match_pct, cashes))
+                mc = cents_to_dollars(
+                    match_component_cents(r['amount'], match_pct))
+                name = r['method_name_snapshot'] or 'Unknown'
+                info = (f"{name} (External) - {r['check_count']} items"
+                        if r['check_count']
+                        else f"{name} (External)")
+                self.ledger_table.setItem(
+                    row_idx, 0, make_item(f"EXT-{r['id']}"))
+                self.ledger_table.setItem(
+                    row_idx, 1, make_item(r['created_at'] or ''))
+                self.ledger_table.setItem(row_idx, 2, make_item(''))
+                self.ledger_table.setItem(row_idx, 3, make_item(''))
+                self.ledger_table.setItem(
+                    row_idx, 4, make_item(r['vendor']))
+                self.ledger_table.setItem(row_idx, 5, make_item(
+                    f"${payout:.2f}", payout))
+                self.ledger_table.setItem(
+                    row_idx, 6, make_item("$0.00", 0))
+                self.ledger_table.setItem(row_idx, 7, make_item(
+                    f"${mc:.2f}", mc))
+                self.ledger_table.setItem(
+                    row_idx, 8, make_item("$0.00", 0))
+                self.ledger_table.setItem(
+                    row_idx, 9, make_item("External Entry"))
+                self.ledger_table.setItem(
+                    row_idx, 10, make_item(info))
+
+                self._ledger_data.append({
+                    'Transaction ID': f"EXT-{r['id']}",
+                    'Timestamp': r['created_at'] or '',
+                    'Customer': '',
+                    'Zip Code': '',
+                    'Vendor': r['vendor'],
+                    'Receipt Total': payout,
+                    'Customer Paid': 0,
+                    'FAM Match': mc,
+                    'Customer Forfeit': 0,
+                    'Status': 'External Entry',
+                    'Payment Methods': info
                 })
             self.ledger_table.resizeColumnsToContents()
             self.ledger_table.setSortingEnabled(True)
@@ -1176,16 +1809,18 @@ class ReportsScreen(QWidget):
 
         fmnp_inapp_map = {r['date']: cents_to_dollars(r['fmnp_match']) for r in fmnp_trend}
 
-        # External FMNP entries trend
+        # External FMNP entries trend (FMNP-method only — the chart
+        # is FMNP-specific; non-FMNP external methods don't belong
+        # in it).
         fmnp_entry_trend = conn.execute(f"""
             SELECT md.date,
                    COALESCE(SUM(fe.amount), 0) AS fmnp_entry_total
             FROM fmnp_entries fe
             JOIN market_days md ON fe.market_day_id = md.id
-            {fmnp_where}
+            {fmnp_where} AND fe.payment_method_id = ?
             GROUP BY md.date
             ORDER BY md.date
-        """, fmnp_params).fetchall()
+        """, fmnp_params + [fmnp_pm_id]).fetchall()
 
         fmnp_entry_map = {r['date']: cents_to_dollars(r['fmnp_entry_total']) for r in fmnp_entry_trend}
         all_fmnp_dates = sorted(set(fmnp_inapp_map.keys()) | set(fmnp_entry_map.keys()))
@@ -1254,11 +1889,14 @@ class ReportsScreen(QWidget):
         # ── Activity log (full extract — no filters) ──────────────
         self._load_activity_log(conn)
 
-        # ── Generated Rewards (full extract — no filters in v1) ─
-        # Recomputed on every refresh from current state — no
-        # per-filter reflow yet (deliberate v1 simplicity per the
-        # 2026-04-30 spec: "supplemental info, doesn't need to be
-        # complicated").
+        # ── SNAP Settlement (v2.1.0, ENH-003 — local-only) ────────
+        self._load_snap_settlement(conn)
+
+        # ── Generated Rewards ─────────────────────────────────────
+        # v2.1.0 (ENH-003 bundle): respects the Date + Market
+        # filters (was a full extract in v1).  Vendor / Payment
+        # Type still don't apply — rewards rows are order-level,
+        # not vendor-level.
         self._load_generated_rewards(conn)
 
         # ── Transaction log (human-friendly audit view) ───────────
@@ -1345,12 +1983,39 @@ class ReportsScreen(QWidget):
         recomputation against current data.  Disabling the
         rewards feature does NOT remove rows here, and rule edits
         do NOT retro-apply.
+
+        v2.1.0 (ENH-003 bundle): the report-level Date + Market
+        filters now constrain which market days are iterated
+        (Bryan/Bellevue confusion report — the full extract made
+        the tab useless for per-market reconciliation).  Vendor /
+        Payment Type filters deliberately don't apply: rewards
+        rows belong to a customer order, not a vendor.
         """
         from fam.sync.data_collector import _collect_generated_rewards
         all_rows: list[dict] = []
+
+        md_clauses = []
+        md_params: list = []
+        md_id = self._selected_market_day_id()
+        if md_id is not None:
+            md_clauses.append("md.id = ?")
+            md_params.append(md_id)
+        else:
+            from_date, to_date = self.date_range.get_date_range()
+            if from_date and to_date:
+                md_clauses.append("md.date BETWEEN ? AND ?")
+                md_params.extend([from_date, to_date])
+        market_ids = self.market_combo.checked_data()
+        if market_ids:
+            sql, p = self._in_clause("md.market_id", market_ids)
+            md_clauses.append(sql)
+            md_params.extend(p)
+        md_where = ("WHERE " + " AND ".join(md_clauses)) if md_clauses else ""
+
         try:
             md_rows = conn.execute(
-                "SELECT id FROM market_days ORDER BY date"
+                f"SELECT id FROM market_days md {md_where} "
+                f"ORDER BY md.date", md_params
             ).fetchall()
             for md in md_rows:
                 try:
@@ -1399,6 +2064,302 @@ class ReportsScreen(QWidget):
                 r.get('Reward Total', 0)))
         self.rewards_table.resizeColumnsToContents()
         self.rewards_table.setSortingEnabled(True)
+
+    # ------------------------------------------------------------------
+    # SNAP Settlement (v2.1.0, ENH-003)
+    # ------------------------------------------------------------------
+    def _load_snap_settlement(self, conn):
+        """One row per customer order — one row per EBT terminal swipe.
+
+        Bryan's reconciliation workflow (ENH-003): the paper EBT
+        terminal receipt shows ONE charge per customer order, but
+        the order may span several vendors, so the Detailed Ledger
+        scatters that charge across N per-vendor transaction rows.
+        This view folds the order back together so the SNAP Total
+        equals the paper receipt figure exactly — if customer 1 ran
+        $21.23 of SNAP, a $21.23 line appears here regardless of
+        how many vendors split it.
+
+        Parity contract: the figure reproduces the order-level
+        ``customer_charged`` total the payment confirmation dialog
+        shows for the EBT-swipe acknowledgement (the engine's penny
+        reconciliation guarantees the per-vendor split sums back to
+        the order-level row value).  SNAP detection reuses
+        ``is_external_device_method`` — the SAME keyword test the
+        dialog uses — so the two surfaces cannot disagree on what
+        counts as an EBT-terminal method.
+
+        Filters: Date + Market apply.  Vendor and Payment Type are
+        deliberately ignored — a vendor sub-total would change the
+        line value and never match the paper receipt (the
+        receipt-format-integrity requirement in ENH-003).
+
+        Local-only by confirmed requirement: no sync collector
+        mirrors this tab; every cent shown here already syncs via
+        the Detailed Ledger rows it derives from.
+        """
+        from fam.ui.widgets.payment_confirmation_dialog import (
+            is_external_device_method)
+
+        clauses = [active_tx_status_clause('t'),
+                   "t.customer_order_id IS NOT NULL"]
+        params: list = []
+        md_id = self._selected_market_day_id()
+        if md_id is not None:
+            clauses.append("md.id = ?")
+            params.append(md_id)
+        else:
+            from_date, to_date = self.date_range.get_date_range()
+            if from_date and to_date:
+                clauses.append("md.date BETWEEN ? AND ?")
+                params.extend([from_date, to_date])
+        market_ids = self.market_combo.checked_data()
+        if market_ids:
+            sql, p = self._in_clause("md.market_id", market_ids)
+            clauses.append(sql)
+            params.extend(p)
+        where = "WHERE " + " AND ".join(clauses)
+
+        rows = conn.execute(f"""
+            SELECT co.id AS order_id,
+                   co.customer_label AS customer,
+                   co.zip_code AS zip_code,
+                   co.settlement_verified_at AS verified_at,
+                   m.name AS market_name,
+                   t.id AS txn_id,
+                   COALESCE(t.confirmed_at, t.created_at) AS ts,
+                   pli.method_name_snapshot AS method,
+                   pli.method_amount AS method_amount,
+                   pli.customer_charged AS customer_charged
+            FROM customer_orders co
+            JOIN transactions t ON t.customer_order_id = co.id
+            JOIN market_days md ON t.market_day_id = md.id
+            JOIN markets m ON md.market_id = m.id
+            JOIN payment_line_items pli ON pli.transaction_id = t.id
+            {where}
+        """, params).fetchall()
+
+        orders: dict[int, dict] = {}
+        for r in rows:
+            o = orders.setdefault(r['order_id'], {
+                'order_id': r['order_id'],
+                'customer': r['customer'],
+                'zip_code': r['zip_code'] or '',
+                'verified_at': r['verified_at'],
+                'market': r['market_name'],
+                'ts': None,
+                'txn_ids': set(),
+                'snap_cents': 0,
+            })
+            o['txn_ids'].add(r['txn_id'])
+            # Swipe moment = earliest confirm across the order.
+            if r['ts'] and (o['ts'] is None or r['ts'] < o['ts']):
+                o['ts'] = r['ts']
+            # Mirror the dialog's action-row rule: zero-amount rows
+            # are not part of the acknowledgement.
+            if (r['method_amount'] > 0
+                    and is_external_device_method(r['method'])):
+                o['snap_cents'] += r['customer_charged']
+
+        # Only orders with an actual terminal charge appear — a
+        # cash-only order produced no EBT paper receipt to match.
+        settled = sorted(
+            (o for o in orders.values() if o['snap_cents'] > 0),
+            key=lambda o: (o['ts'] or '', o['customer']))
+
+        self._settlement_data = []
+        self._settlement_loading = True
+        try:
+            self.settlement_table.setRowCount(len(settled))
+            for i, o in enumerate(settled):
+                snap_dollars = cents_to_dollars(o['snap_cents'])
+                receipts = len(o['txn_ids'])
+                verified = bool(o['verified_at'])
+                # Verified working-page checkbox FIRST (column 0,
+                # consistent with Vendor Reimbursement): the
+                # coordinator ticks rows off as the paper EBT
+                # receipts are matched.  Persisted to
+                # customer_orders.settlement_verified_at (schema
+                # v39) so the working state survives filter
+                # changes, tab switches, and app restarts.
+                # A custom-painted cell widget, NOT a checkable
+                # item: configure_table sets NoEditTriggers, which
+                # makes item check-toggling dead on click.
+                blank = make_item('')   # paints the row background
+                self.settlement_table.setItem(i, 0, blank)
+                self.settlement_table.setCellWidget(
+                    i, 0, self._make_settlement_checkbox(
+                        o['order_id'], verified, i))
+                self.settlement_table.setItem(
+                    i, 1, make_item(o['ts'] or ''))
+                self.settlement_table.setItem(
+                    i, 2, make_item(o['customer']))
+                self.settlement_table.setItem(
+                    i, 3, make_item(o['zip_code']))
+                self.settlement_table.setItem(
+                    i, 4, make_item(o['market']))
+                self.settlement_table.setItem(
+                    i, 5, make_item(str(receipts), receipts))
+                self.settlement_table.setItem(i, 6, make_item(
+                    f"${snap_dollars:.2f}", snap_dollars))
+                # Filler column needs an item so the row tint and
+                # alternating colors cover it.
+                self.settlement_table.setItem(i, 7, make_item(''))
+                # Explicit per-row height — the header default
+                # alone failed to apply in the field and the 22px
+                # checkbox got clipped.
+                self.settlement_table.setRowHeight(i, 34)
+                self._tint_settlement_row(i, verified)
+                self._settlement_data.append({
+                    'Timestamp': o['ts'] or '',
+                    'Customer': o['customer'],
+                    'Zip Code': o['zip_code'],
+                    'Market': o['market'],
+                    'Receipts': receipts,
+                    'SNAP Total': f"{snap_dollars:.2f}",
+                    'Verified': 'Yes' if verified else '',
+                    'Verified At': o['verified_at'] or '',
+                })
+            self.settlement_table.resizeColumnsToContents()
+        finally:
+            self._settlement_loading = False
+
+    def _make_settlement_checkbox(self, order_id, verified, row):
+        """Verified checkbox cell widget — a custom-painted
+        ``_SettlementVerifiedBox`` set DIRECTLY as the cell widget.
+        The table gives it the full cell rect and it paints its box
+        centered in that rect, so there is no layout or stylesheet
+        geometry left that can clip it (see the class docstring for
+        the QCheckBox war story)."""
+        box = _VerifiedBox(checked=verified)
+        # Constructor sets the initial state without emitting, so
+        # connecting here never fires a write during load.
+        box.toggled.connect(
+            lambda checked, oid=order_id, r=row:
+                self._on_settlement_verified_toggled(oid, checked, r))
+        return box
+
+    def _settlement_checkbox(self, row):
+        """Return the Verified checkbox widget for a settlement row
+        (or None) — used by tests and the toggle plumbing."""
+        w = self.settlement_table.cellWidget(row, 0)
+        return w if isinstance(w, _VerifiedBox) else None
+
+    def _tint_settlement_row(self, row, verified):
+        """Light-green tint on verified rows so the remaining work
+        stands out while ticking through the paper stack.  Unticked
+        rows get a null brush so the table's alternating row colors
+        show through."""
+        brush = QBrush(QColor('#E8F5E9')) if verified else QBrush()
+        for col in range(self.settlement_table.columnCount()):
+            item = self.settlement_table.item(row, col)
+            if item is not None:
+                item.setBackground(brush)
+
+    def _on_settlement_verified_toggled(self, order_id, verified, row):
+        """Persist a Verified checkbox toggle.
+
+        Operational reconciliation state, NOT financial data: no
+        audit row, no sync — see the schema v39 column comment.
+        ``row`` is stable between rebuilds because the table never
+        re-sorts (chronological by contract)."""
+        if self._settlement_loading:
+            return
+        from fam.utils.timezone import eastern_timestamp
+        try:
+            conn = get_connection()
+            conn.execute(
+                "UPDATE customer_orders "
+                "SET settlement_verified_at = ? WHERE id = ?",
+                (eastern_timestamp() if verified else None, order_id))
+            conn.commit()
+        except Exception:
+            logger.exception(
+                "Failed to persist settlement verification for "
+                "order %s", order_id)
+            return
+        self._tint_settlement_row(row, verified)
+        if 0 <= row < len(self._settlement_data):
+            self._settlement_data[row]['Verified'] = (
+                'Yes' if verified else '')
+            self._settlement_data[row]['Verified At'] = (
+                eastern_timestamp() if verified else '')
+
+    # ------------------------------------------------------------------
+    # Vendor Reimbursement — end-of-market verification (ENH-006)
+    # ------------------------------------------------------------------
+    def _vendor_checkbox(self, row):
+        """Return the Verified checkbox widget for a Vendor
+        Reimbursement row (or None — e.g. outside verification
+        mode) — used by tests and the toggle plumbing."""
+        w = self.vendor_table.cellWidget(
+            row, getattr(self, '_vendor_verified_col', -1))
+        return w if isinstance(w, _VerifiedBox) else None
+
+    def _tint_vendor_row(self, row, verified):
+        """Light-green tint on verified vendor rows, mirroring the
+        SNAP Settlement working page."""
+        brush = QBrush(QColor('#E8F5E9')) if verified else QBrush()
+        for col in range(self.vendor_table.columnCount()):
+            item = self.vendor_table.item(row, col)
+            if item is not None:
+                item.setBackground(brush)
+
+    def _on_vendor_verified_toggled(self, vendor_id, scope,
+                                    verified, row):
+        """Persist a vendor verification toggle for ONE scope.
+
+        *scope* is ``('day', market_day_id)`` or
+        ``('range', (market_id, from_date, to_date))`` — each time
+        scope keeps its own independent mark (a month is just its
+        first..last range); toggling one never cascades into
+        another.  Operational reconciliation state, NOT financial
+        data: no audit row, no sync, zero effect on FAM
+        reimbursement (schema v40/v41 table comments)."""
+        from fam.utils.timezone import eastern_timestamp
+        kind, payload = scope
+        try:
+            conn = get_connection()
+            if kind == 'day':
+                if verified:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO "
+                        "vendor_day_verifications "
+                        "(market_day_id, vendor_id, verified_at) "
+                        "VALUES (?, ?, ?)",
+                        (payload, vendor_id, eastern_timestamp()))
+                else:
+                    conn.execute(
+                        "DELETE FROM vendor_day_verifications "
+                        "WHERE market_day_id = ? AND vendor_id = ?",
+                        (payload, vendor_id))
+            else:
+                market_id, from_date, to_date = payload
+                if verified:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO "
+                        "vendor_range_verifications "
+                        "(vendor_id, market_id, from_date, "
+                        " to_date, verified_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (vendor_id, market_id, from_date, to_date,
+                         eastern_timestamp()))
+                else:
+                    conn.execute(
+                        "DELETE FROM vendor_range_verifications "
+                        "WHERE vendor_id = ? AND market_id = ? "
+                        "AND from_date = ? AND to_date = ?",
+                        (vendor_id, market_id, from_date, to_date))
+            conn.commit()
+        except Exception:
+            logger.exception(
+                "Failed to persist vendor verification for "
+                "vendor %s scope %s", vendor_id, scope)
+            return
+        self._tint_vendor_row(row, verified)
+        if 0 <= row < len(self._vendor_data):
+            self._vendor_data[row]['Verified'] = (
+                'Yes' if verified else '')
 
     # ------------------------------------------------------------------
     # Geolocation
@@ -1862,6 +2823,9 @@ class ReportsScreen(QWidget):
             elif report_type == "generated_rewards":
                 export_generated_rewards(
                     self._rewards_data or [], filepath)
+            elif report_type == "snap_settlement":
+                export_snap_settlement(
+                    self._settlement_data or [], filepath)
             QMessageBox.information(self, "Export Complete", f"Report saved to:\n{filepath}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")

@@ -677,8 +677,10 @@ class TestLedgerBackup:
         conn = get_connection()
         # Add FMNP entry: 1500 cents, 2 checks, from Farm Stand
         conn.execute(
-            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, check_count, entered_by)"
-            " VALUES (1, 1, 1500, 2, 'Alice')"
+            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, check_count, entered_by,"
+            " payment_method_id, method_name_snapshot, match_percent_snapshot,"
+            " vendor_cashes_original_snapshot)"
+            " VALUES (1, 1, 1500, 2, 'Alice', 4, 'FMNP', 100.0, 1)"
         )
         conn.commit()
 
@@ -695,8 +697,10 @@ class TestLedgerBackup:
 
         conn = get_connection()
         conn.execute(
-            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, check_count, entered_by)"
-            " VALUES (1, 1, 2000, 3, 'Alice')"
+            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, check_count, entered_by,"
+            " payment_method_id, method_name_snapshot, match_percent_snapshot,"
+            " vendor_cashes_original_snapshot)"
+            " VALUES (1, 1, 2000, 3, 'Alice', 4, 'FMNP', 100.0, 1)"
         )
         conn.commit()
 
@@ -759,8 +763,10 @@ class TestLedgerBackup:
         """FMNP entries in the ledger include timestamps."""
         conn = get_connection()
         conn.execute(
-            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, check_count, entered_by)"
-            " VALUES (1, 1, 1000, 1, 'Alice')"
+            "INSERT INTO fmnp_entries (market_day_id, vendor_id, amount, check_count, entered_by,"
+            " payment_method_id, method_name_snapshot, match_percent_snapshot,"
+            " vendor_cashes_original_snapshot)"
+            " VALUES (1, 1, 1000, 1, 'Alice', 4, 'FMNP', 100.0, 1)"
         )
         conn.commit()
 

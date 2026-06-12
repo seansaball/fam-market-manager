@@ -56,13 +56,14 @@
 | FAM Match card | SUM `payment_line_items.match_amount` | same |
 | FMNP Checks card | SUM `fmnp_entries.amount` | same |
 | FAM Absorbed card | SUM `payment_line_items.method_amount` where method='Unallocated Funds' | `test_unallocated_funds`, `test_uf_in_vendor_reimbursement` |
-| Vendor Reimbursement tab | per-vendor query joining receipts + per-method customer/match + UF method_amount + FMNP-external | `test_uf_in_vendor_reimbursement`, `test_v1_9_10_audit_fixes::TestVendorReimbursementCentsAccumulation`, `test_multi_receipt_same_vendor` |
+| Vendor Reimbursement tab | per-vendor query joining receipts + per-method customer/match + UF method_amount + FMNP-external; Verified checkbox (Market Day mode only, v2.1.0 ENH-006) reads/writes `vendor_day_verifications` (v40 — operational state, not money, never synced) | `test_uf_in_vendor_reimbursement`, `test_v1_9_10_audit_fixes::TestVendorReimbursementCentsAccumulation`, `test_multi_receipt_same_vendor`, `test_vendor_day_verification` |
 | FAM Match Report tab | per-method SUM | `test_unallocated_funds::TestFAMMatchReportSurfacesAbsorbed` |
 | Detailed Ledger tab | per-txn full breakdown (incl. Voided) | `test_data_flow_inventory::TestDetailedLedger` (new) |
+| SNAP Settlement tab (v2.1.0, ENH-003) | payment_line_items folded per customer order — order-level SNAP `customer_charged` (SNAP/EBT methods via `is_external_device_method`); Verified checkbox reads/writes `customer_orders.settlement_verified_at` (v39 — operational state, not money). LOCAL-ONLY: deliberately no sync mirror (every cent already syncs via Detailed Ledger) | `test_snap_settlement_report` |
 | Transaction Log tab | each transaction row | `test_data_flow_inventory::TestTransactionLog` (new) |
 | Activity Log tab | audit_log rows scoped to market day date | `test_v1_9_10_audit_fixes::TestActivityLogDeviceIdPreserved` |
 | Geolocation tab | per-zip aggregation | `test_data_flow_inventory::TestGeolocation` (new) |
-| FMNP Entries tab | fmnp_entries rows + payment_line_items FMNP-method rows | `test_data_flow_inventory::TestFMNPEntries` (new) |
+| External Payment Entries tab | fmnp_entries rows (all methods incl. FMNP, one row per entry — v2.1.0 R1; the deprecated FMNP Entries tab drains) | `test_data_flow_inventory::TestFMNPDataFlow` |
 | Generated Rewards tab | generated_rewards rows | `test_generated_rewards_report` |
 | Charts tab | aggregations of the above | (covered indirectly) |
 | Error Log tab | log file tail | `test_error_log_versioning` |
@@ -79,7 +80,8 @@ Each in-app tab has a sync-side mirror collector in `fam/sync/data_collector.py`
 | Transaction Log | `_collect_transaction_log` | `test_data_flow_inventory::TestSyncTransactionLog` (new) |
 | Activity Log | `_collect_activity_log` | `test_v1_9_10_audit_fixes::TestActivityLogDeviceIdPreserved` |
 | Geolocation | `_collect_geolocation` | `test_data_flow_inventory::TestSyncGeolocation` (new) |
-| FMNP Entries | `_collect_fmnp_entries` | `test_data_flow_inventory::TestSyncFMNPEntries` (new) |
+| FMNP Entries (deprecated, drains) | `_collect_fmnp_entries` → `[]` | `test_external_golden_regression::TestFmnpEntriesTabGolden` |
+| External Payment Entries | `_collect_external_payment_entries` | `test_external_sync`, `test_external_golden_regression` |
 | Market Day Summary | `_collect_market_day_summary` | `test_data_flow_inventory::TestSyncMarketDaySummary` (new) |
 | Generated Rewards | `_collect_generated_rewards` | `test_generated_rewards_persistence` |
 | Error Log | `_collect_error_log` | (covered) |

@@ -751,3 +751,69 @@ The toggle does **NOT** remove or hide history:
 Re-enabling the feature simply resumes generation for the next
 confirmation; no backfill happens for the orders that were
 confirmed while the feature was off.
+
+---
+
+## 12. External payouts (v2.1.0 / ENH-002)
+
+`fam/utils/external_payout.py` — THE single home for the external
+payout formula and the Reimbursement Basis wording.  Every surface
+derives from it; payout is **never stored** (invariant EP1,
+SYSTEM_INVARIANTS.md Layer 10).
+
+### 12.1 The formula
+
+```
+vendor_owed_cents = round_half_away(face_cents × match% / 100)   # match component
+                  + (0 if vendor_cashes_original else face_cents)
+```
+
+* One rounding step, in the match component, ROUND HALF AWAY FROM
+  ZERO — implemented in pure integer arithmetic (basis points:
+  `(face_cents × round(match% × 100) + 5000) // 10000`).  Python's
+  `round()` is banker's rounding and floats drift; neither is used.
+* Inputs come from the ENTRY's snapshots (`match_percent_snapshot`,
+  `vendor_cashes_original_snapshot`), captured at save time by
+  `create_fmnp_entry` — a later settings change never re-values
+  history.  Corrections are void + re-enter (the
+  `chk_fmnp_entry_snapshot_immutable` trigger enforces this at
+  write time).
+
+### 12.2 The three-method table (validated onsite 2026-06-11)
+
+| Method | match% | Vendor cashes original? | FAM owes ($10 face) | Basis label |
+|---|---|---|---|---|
+| FMNP | 100% | **YES** | $10 — **the MATCH** (vendor recovered face by cashing the check with the program) | "Match only ($10.00 × 100%)" |
+| Food RX | 100% | no | $20 — face + match (FAM collects the paper, mails it to the Food Trust for face-value reimbursement) | "Face + match ($10.00 × 2.0)" |
+| Food Bucks | 0% | no | $10 — face only (reward-type scrip is never matched again; the match was applied when it was earned) | "Face only" |
+
+Semantics matter at non-100% configs: the FMNP payment IS the
+match, not "face value" — they coincide only because match is
+100%.  At a hypothetical 50% FMNP match, FAM owes $5 on a $10
+check, and the basis label says so.
+
+Identity (golden-pinned): at 100% match with cashes-original the
+payout equals `face_cents` exactly — today's FMNP (External)
+behavior, preserved byte-for-byte through the v38 migration
+(backfill snapshots: literal `100.0` + cashes-original=1, NOT the
+live setting).
+
+### 12.3 What external payouts do NOT touch
+
+* The booth engine (`calculate_payment_breakdown`), cap math,
+  forfeit passes — unchanged.
+* The customer daily match cap — external entries have no customer
+  (EP4); they never consume cap and never generate rewards.
+* Existing report columns: `FMNP (External)` keeps its exact feed
+  (FMNP-method entries only, routed by payment_method_id) and its
+  meaning forever.
+
+### 12.4 Where payouts surface
+
+Entry screen preview + save confirmation (G1, with the
+large-receipt threshold emphasis G5), External Payment Entries
+sheet tab (per-entry audit layer with snapshots + basis),
+`<Method> (External)` Vendor Reimbursement columns (row identity
+v2 = EP3), FAM Match Report `<Method> (External)` rows, Detailed
+Ledger `EXT-` rows, ledger backup external section, and the
+Reports screen mirrors of all of the above.

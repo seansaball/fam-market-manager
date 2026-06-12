@@ -1,7 +1,7 @@
 # FAM Market Manager — User Guide
 
 > **For volunteers, coordinators, and market day staff**
-> Version 2.0.7
+> Version 2.1.0
 
 ---
 
@@ -54,7 +54,7 @@ The sidebar sections are listed in the same order as in the app:
 | **Receipt Intake** | Record customer purchases |
 | **Payment** | Process payments and calculate FAM match |
 | **Adjustments** | Fix mistakes in past transactions |
-| **FMNP Entry** | Record FMNP checks at the vendor side |
+| **External Payments** | Record physical scrip (FMNP checks, Food RX, Food Bucks) collected from vendors |
 | **Reports** | View summaries, charts, and export data |
 | **Settings** | Manage markets, vendors, payment methods, **rewards**, cloud sync, and updates |
 | **Help** | Articles, troubleshooting, and a live diagnostic snapshot |
@@ -229,45 +229,129 @@ Some markets set a maximum FAM match per customer per day. If a customer reaches
 
 ---
 
-## 4. FMNP Check Tracking
+## 4. External Payments Entry
 
-**Where:** FMNP Entry screen
+**Where:** External Payments screen (called **FMNP Entry** before v2.1.0)
 
-Use this screen to record FMNP (Farmers Market Nutrition Program) checks
-that vendors took at the booth.  These are recorded separately from
-regular transactions because the **vendor applied the match themselves**
-at their booth (treating a $5 FMNP check as $10 worth of food).
+Use this screen to record physical scrip — FMNP checks, Food RX
+vouchers, Food Bucks tokens — that **vendors accepted directly at
+their own booths** and turned in to the market manager at the end of
+the market day.  These are recorded separately from regular
+transactions because the **vendor applied the match themselves** at
+their booth (treating a $5 FMNP check as $10 worth of food).
+
+Any payment method with **"Accept external matching"** turned ON
+(Settings → Payment Methods → Edit) appears in this screen's Payment
+Method dropdown.  **FMNP is enabled by default and is the dropdown
+default** — if your market only ever handles FMNP here, nothing
+changes from previous versions.
 
 **How the reimbursement works:**
 
-- The vendor cashes the original FMNP check directly with the FMNP
-  program — they get the face value back ($5).
-- **FAM reimburses the same face value** ($5) at end-of-month so the
-  vendor is made whole on the match they gave away at the booth.
-- The amount logged here appears as **FMNP (External)** in the Vendor
-  Reimbursement report and **is included in the Total Due to Vendor**.
-- FAM does **not** add a match percentage on top — the vendor already
-  did at the booth.
+The amount FAM owes the vendor is computed from two settings the
+method already has, plus one question:
 
-1. Select the **market day** from the dropdown
-2. Select the **vendor**
-3. Enter the **dollar amount** (must be a multiple of $5 — the FMNP
-   denomination)
-4. Optionally enter the **check count** and any **notes**
-5. Enter **your name** in the Entered By field
-6. Click **"Add FMNP Entry"**
+- The **match percentage** drives the match component (the match on
+  the face value).
+- **"Vendor cashes the original instrument"** (Settings → Payment
+  Methods → Edit) decides whether the face value is owed too.  ON
+  means the vendor keeps the paper and cashes it with the issuing
+  program (the FMNP model), so FAM owes **only the match**.  OFF
+  means FAM collects the paper, so FAM owes **face value plus the
+  match**.
 
-The entry appears in the table below. You can **Edit** or **Delete**
-entries using the buttons in the Actions column.  All edits and
-deletions are written to the audit log with old + new values.
+> **FAM owes vendor = match on the face value, plus the face value
+> itself unless the vendor cashes the original with the program.**
+
+There are **zero new money fields** — the match % and denomination
+are inherited from the method's existing settings.  The only new
+settings are the two toggles.
+
+### Worked examples ($10 of scrip handed in)
+
+| Method | Match % | Vendor cashes original? | FAM owes | Why |
+|---|---|---|---|---|
+| **FMNP** | 100% | Yes | **$10** | The $10 IS the match. The vendor recovers the face value by cashing the check with the FMNP program; FAM owes the match they gave at the booth. |
+| **Food RX** | 100% | No | **$20** | Face + match. FAM collects the paper and mails it to the Food Trust for face-value reimbursement; the vendor is owed both halves now. |
+| **Food Bucks** | 0% | No | **$10** | Face only. Reward-type scrip is never matched again — the match was applied when the scrip was earned. |
+
+Every entry, report row, and sheet row carries a plain-English
+**Reimbursement Basis** so the math is auditable at a glance:
+
+- `Match only ($10.00 × 100%)` — vendor cashes the original
+- `Face + match ($10.00 × 2.0)` — FAM collects the paper
+- `Face only` — no match (e.g. Food Bucks)
+
+### Recording external payments (walkthrough)
+
+1. Select the **market day** from the dropdown (closed market days
+   are fine — end-of-day and end-of-month batch entry is the normal
+   workflow)
+2. Select the **payment method** (defaults to FMNP)
+3. Select the **vendor**
+4. Enter the **dollar amount** — it must be a whole multiple of the
+   method's denomination (e.g. $5 FMNP checks → $5, $10, $15...).
+   The app blocks non-multiples
+5. Watch the **live payout preview** — it shows exactly what FAM
+   will owe the vendor for this entry before you save anything
+6. Optionally enter the **check count** and any **notes**
+7. Enter **your name** in the Entered By field
+8. Attach **check photos** if the method requires them
+9. Click **"Add Entry"**
+10. A confirmation popup names the exact **FAM-owed amount** ("FAM
+    will owe [vendor] $X.XX for this entry"), the face value, and
+    the Reimbursement Basis. Click **Yes** to record
+
+Two extra guards may appear before the entry saves:
+
+- **Large amount warning** — if the computed payout exceeds the
+  large-receipt threshold (Settings → Preferences), the confirmation
+  adds a "⚠ LARGE AMOUNT" line so a typo'd face value gets a second
+  look.
+- **Booth activity review** — if the same vendor already has booth
+  transactions for the same method on the same market day, the app
+  asks you to confirm.  A token paid at the booth AND turned in as
+  an external entry would be reimbursed twice; only continue if the
+  external batch is separate scrip the vendor accepted directly.
+
+### Settings changes never re-value history
+
+Each entry **snapshots the method's configuration at save time**
+(match %, the cashes-original toggle, the denomination).  Changing
+the method's settings later never changes what FAM owes for entries
+already recorded.  To correct an entry made under wrong settings:
+**delete (void) the wrong entry and re-enter it** — both rows stay
+visible in reports, so the audit trail is complete.
+
+The entry appears in the table below, including its method, the
+derived **FAM Owes** amount, and its status. You can **Edit** or
+**Delete** entries using the buttons in the Actions column (edits can
+change the face value but never the snapshot config — the method
+dropdown locks during an edit).  All edits and deletions are written
+to the audit log with old + new values.
+
+### Where external entries show up
+
+- **Vendor Reimbursement report** — FMNP entries feed the existing
+  **FMNP (External)** column (unchanged forever); every other method
+  gets its own **"<Method> (External)"** column. All of them add
+  into **Total Due to Vendor**.
+- **External Payment Entries** sheet tab — one audit row per
+  non-FMNP entry: face value, config snapshots, FAM Owes Vendor,
+  Reimbursement Basis, with voided rows flagged.
+- **FAM Match Report** — "<Method> (External)" rows.
+- **Detailed Ledger** — `EXT-` rows (FMNP entries keep their
+  `FMNP-` rows).
+- **Ledger backup** (`fam_ledger_backup.txt`) — an External Payment
+  Entries section per market day plus a grand total.
 
 ### "All Market Days" filter (v2.0.7+)
 
 The market-day dropdown defaults to **"All Market Days"**, which is a
-**browse-only filter** for searching existing FMNP entries across the
+**browse-only filter** for searching existing entries across the
 full history (paired with the date-range filter on the same screen).
 
-When "All Market Days" is selected, the **"Add FMNP Entry"** button
+When "All Market Days" is selected, the **"Add Entry"** button
 greys out and an inline hint label appears next to it:
 
 > ⚠ ← Pick a specific market day above to add a new entry
@@ -279,7 +363,7 @@ disappears.
 
 ### Attaching check photos
 
-You can attach photos of FMNP checks directly to each entry. The app provides **multi-photo support** — the number of available photo slots is automatically calculated based on the dollar amount divided by the check denomination. For example, if you enter $30 and the denomination is $5, six photo slots appear for you to attach one photo per check.
+You can attach photos of checks or scrip directly to each entry. The app provides **multi-photo support** — the number of available photo slots is automatically calculated based on the dollar amount divided by the method's denomination. For example, if you enter $30 and the denomination is $5, six photo slots appear for you to attach one photo per check.
 
 When the number of checks is large, the photo attachment area becomes **scrollable** so it does not crowd the rest of the form.
 
@@ -287,7 +371,7 @@ When the number of checks is large, the photo attachment area becomes **scrollab
 
 The app uses a 3-layer deduplication system to prevent the same check photo from being recorded twice:
 
-- **Within-entry block:** The same photo cannot be attached to two slots within the same FMNP entry.
+- **Within-entry block:** The same photo cannot be attached to two slots within the same entry.
 - **Cross-transaction warning:** If a photo matches one already used in a different transaction, the app warns you before allowing it.
 - **Drive upload reuse:** During cloud sync, if an identical photo already exists in Google Drive, the existing file is reused instead of uploading a duplicate.
 
@@ -381,7 +465,8 @@ The Reports screen provides several views of your data, each in its own tab.
 |-----|--------------|
 | **Summary** | Overview metrics and charts for the selected period |
 | **Detailed Ledger** | Every transaction with full payment breakdowns |
-| **Vendor Reimbursement** | How much each vendor is owed (receipt totals, FAM subsidy, customer paid). The shared Google Sheet version (v2.0.9+) emits one row per (market × vendor × month) so coordinators can reconcile month-over-month. |
+| **Vendor Reimbursement** | How much each vendor is owed (receipt totals, FAM subsidy, customer paid). The shared Google Sheet version (v2.0.9+) emits one row per (market × vendor × month) so coordinators can reconcile month-over-month. v2.1.0+: each row has a **Verified** checkbox for confirming totals with vendors — ticks are saved per vendor per day on this laptop and have zero effect on FAM reimbursement. Each time scope keeps its **own independent mark**: a day tick, a month tick, and a custom-range tick are separate facts — unchecking a month never unchecks the days inside it. With no time scope at all (All Dates + All Market Days) the column is an inert dash — pick a day, month, or range first. |
+| **SNAP Settlement** (v2.1.0+, second tab) | One row per customer order — the order-level SNAP total to match against the EBT terminal's paper receipts (a $21.23 swipe shows as one $21.23 line even when the order spanned several vendors). Tick the **Verified** checkbox as you match each paper receipt — ticks are saved on this laptop and survive restarts. Local-only: no Google Sheets tab; honors the Date/Market Day and Market filters only. |
 | **FAM Match Report** | FAM match amounts by customer |
 | **Geolocation** | Customer zip code analysis and heat map |
 | **Activity Log** | Detailed audit trail of all actions taken |
@@ -390,10 +475,13 @@ The Reports screen provides several views of your data, each in its own tab.
 ### Filtering
 
 Use the controls at the top of the screen to narrow your view:
-- **Date range:** Select specific dates or view all dates
+- **Date range:** Select a whole month (quick pick, v2.1.0+) or specific dates — the popup offers one or the other — or view all dates
+- **Market Day (v2.1.0+):** Shortcut dropdown — pick one market day ("date — market", most recent first) and every report narrows to exactly that day. The fastest way to run a post-market-closure exercise. Market Day and the date range are alternatives — whichever you touched last wins: picking a day resets the range to "All Dates", and applying a range switches Market Day back to "All Market Days".
 - **Market:** Check/uncheck specific markets
 - **Vendor:** Check/uncheck specific vendors
 - **Payment Method:** Check/uncheck specific payment types
+
+The order-level tabs (**SNAP Settlement**, **Generated Rewards**) honor the Date/Market Day and Market filters only — a vendor or payment-type sub-filter would break their one-row-per-order totals (v2.1.0+).
 
 ### Resizable columns
 
@@ -436,8 +524,9 @@ Use the Settings screen to manage the reference data used throughout the applica
 - **Edit:** Change the name or match percentage
 - **Reorder:** Use the up/down arrows to change the display order
 - **Activate/Deactivate:** Make a payment method available or unavailable
+- **External Matching (v2.1.0+):** The Edit dialog has two toggles — **"Accept external matching"** (the method appears in the External Payments Entry screen) and **"Vendor cashes the original instrument"** (FAM owes only the match component; OFF means FAM owes face + match). A live preview in the dialog shows exactly what FAM would owe for one instrument under the current settings. The match % and denomination above drive both the booth AND external math — there are no separate external money fields.
 
-> **About FMNP (v1.9.8+):** FMNP is now a togglable payment method like the others, **and it defaults to inactive on fresh installs / Load Defaults**.  When inactive, it does NOT appear in the Payment Screen's payment-method dropdown, but the dedicated **FMNP Entry** screen continues to work normally regardless.  Most markets leave FMNP inactive here because they handle FMNP exclusively through the FMNP Entry screen (vendor-matched at the booth).  Activate FMNP only if your market wants to record FMNP-as-a-payment-method on the customer's order at the FAM table.
+> **About FMNP (v1.9.8+):** FMNP is now a togglable payment method like the others, **and it defaults to inactive on fresh installs / Load Defaults**.  When inactive, it does NOT appear in the Payment Screen's payment-method dropdown, but the dedicated **External Payments Entry** screen continues to work normally regardless.  Most markets leave FMNP inactive here because they handle FMNP exclusively through the External Payments Entry screen (vendor-matched at the booth).  Activate FMNP only if your market wants to record FMNP-as-a-payment-method on the customer's order at the FAM table.
 
 ### Rewards tab
 
@@ -499,9 +588,9 @@ When cloud sync is configured, all receipt and FMNP check photos are automatical
 
 If a photo is deleted or trashed from Google Drive, the app detects this on the next sync cycle and automatically re-uploads the missing file. Stale URL references are cleaned up so re-uploads happen reliably.
 
-**FMNP Entries sync:**
+**External payment entries sync:**
 
-FMNP data is synced from both the FMNP Entry screen and the Payment flow. Each check produces one row in the spreadsheet, with individual photo links and Transaction IDs included for full traceability.
+Every external entry — FMNP, Food RX, Food Bucks, and any future method — feeds the **External Payment Entries** tab: one audit row per entry with face value, config snapshots, FAM Owes Vendor, the plain-English Reimbursement Basis, and all photo links in one cell. The old **FMNP Entries** tab is deprecated: once this market upgrades, its full FMNP history appears on the new tab automatically and its rows are removed from the old tab on the next full sync. Markets still on older app versions keep writing the old tab until they upgrade; once every market is upgraded, the coordinator deletes the empty tab. Booth-paid FMNP (rare) is no longer broken out per check on sheets — it remains fully visible in the Detailed Ledger as part of its transaction.
 
 **Agent tracker:**
 
@@ -769,7 +858,7 @@ The Generated Rewards row stays as a historical record by design — pretending 
 Three checks:
 
 1. The sync indicator chip — green means it pushed; anything else means try Sync to Cloud
-2. Right tab on the sheet (receipts → "Detailed Ledger", vendor totals → "Vendor Reimbursement", FMNP → "FMNP Entries", rewards → "Generated Rewards")
+2. Right tab on the sheet (receipts → "Detailed Ledger", vendor totals → "Vendor Reimbursement", external scrip incl. FMNP → "External Payment Entries", rewards → "Generated Rewards"; the old "FMNP Entries" tab only carries markets that haven't upgraded yet)
 3. Filter the sheet by your `market_code` and `device_id` (Help → System Status to find the device_id)
 
 In-app: Help → Browse → search "data not on sheet" for the full troubleshooting flow.
@@ -877,7 +966,7 @@ Source totals are summed **per customer order** (across all of the order's vendo
 
 1. **Payment confirmation dialog** — the new "🎁 GIVE TO CUSTOMER" zone appears below the regular collect zone, listing the scrip the rep should hand out.  Purple/violet styling so it can't be confused with a payment item.
 2. **Printed receipt** — a "Rewards Earned" section near the bottom (between the financial summary and the thank-you footer).
-3. **Reports → Generated Rewards** — a derived table that recomputes against current data on every refresh.  Voiding a payment automatically removes that order's contribution.
+3. **Reports → Generated Rewards** — the write-once historical record of what was handed out (see "When does a reward get recorded?" below — voids do NOT remove rows).  Respects the report-level Date and Market filters (v2.1.0+).
 4. **Cloud sync** — uploads to a "Generated Rewards" sheet by default.
 
 ### Configuring rewards (Settings → Rewards)

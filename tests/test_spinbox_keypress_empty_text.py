@@ -26,9 +26,16 @@ formatted state — the user perceived this as "random numbers in
 random spots" because mid-edit state got committed before the
 crash unwound.
 
-Fix: require ``len(text) == 1`` (a single character) AND the
-character to be a digit before entering the digit-handling
-branch.  Non-character keys fall through to Qt's native handling.
+Original fix (2026-05-07): require ``len(text) == 1`` AND a digit
+character before entering the custom digit-handling branch.
+
+📌 Re-pinned 2026-06-12 (ENH-007): the custom keyPressEvent
+overrides were removed WHOLESALE when the cents-builder ladder was
+replaced by standard native typing — there is no custom digit
+branch anymore, so the int('') crash class is structurally
+impossible.  The behavior pins below still stand (no key may
+raise); the source guard now pins the ABSENCE of keyPressEvent
+overrides instead of the in-branch length check.
 
 This file pins:
   1. Backspace doesn't raise.
@@ -38,6 +45,7 @@ This file pins:
   5. Page Up / Page Down don't raise (the user-reported trigger).
   6. Home / End / Delete don't raise.
   7. Digit keys still process correctly (no regression).
+  8. Neither NoScroll spin class defines keyPressEvent at all.
 """
 
 import pytest
@@ -207,24 +215,21 @@ class TestIntSpinBoxDigitKeysStillWork:
 
 
 class TestSourceGuard:
-    """Pin the fix in source so a future "simplification" doesn't
-    re-introduce the bug."""
+    """📌 Re-pinned (ENH-007): the strongest form of the 2026-05-07
+    fix is having NO custom keyPressEvent at all — native Qt typing
+    has no digit branch to crash.  Any future override must be
+    designed against tests/test_money_typing_standard.py and the
+    ENH-007 record in BUGS_BACKLOG.md."""
 
-    def test_double_spinbox_requires_single_char(self):
-        import inspect
+    def test_double_spinbox_has_no_keypress_override(self):
         from fam.ui.helpers import NoScrollDoubleSpinBox
-        src = inspect.getsource(NoScrollDoubleSpinBox.keyPressEvent)
-        assert "len(text) == 1 and text in '0123456789'" in src, (
-            "NoScrollDoubleSpinBox.keyPressEvent must guard the "
-            "digit-handling branch with `len(text) == 1` to avoid "
-            "the empty-string substring trap that crashes on "
-            "non-character keys.")
+        assert 'keyPressEvent' not in NoScrollDoubleSpinBox.__dict__, (
+            "NoScrollDoubleSpinBox must NOT override keyPressEvent "
+            "— custom digit branches are how both the cents-builder "
+            "ladder and the int('') crash class got in (ENH-007).")
 
-    def test_int_spinbox_requires_single_char(self):
-        import inspect
+    def test_int_spinbox_has_no_keypress_override(self):
         from fam.ui.helpers import NoScrollSpinBox
-        src = inspect.getsource(NoScrollSpinBox.keyPressEvent)
-        assert "len(text) == 1 and text in '0123456789'" in src, (
-            "NoScrollSpinBox.keyPressEvent must guard the digit-"
-            "handling branch with `len(text) == 1` to avoid the "
-            "empty-string substring trap.")
+        assert 'keyPressEvent' not in NoScrollSpinBox.__dict__, (
+            "NoScrollSpinBox must NOT override keyPressEvent — see "
+            "ENH-007.")

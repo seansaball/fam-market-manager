@@ -66,6 +66,29 @@ def get_all_payment_methods(active_only=False, include_system=True):
     return [dict(r) for r in rows]
 
 
+def get_external_payment_methods():
+    """List methods enabled for the External Payments Entry portal.
+
+    v2.1.0 (ENH-002): a method appears on the entry screen iff
+    ``external_matching_accepted`` is ON.  Deliberately does NOT
+    filter on ``is_active`` — that flag controls the Receipt
+    Intake / Payment screens only (booth channel), and FMNP has
+    shipped is_active=0 with a fully functional entry screen since
+    v1.9.8.  System methods are excluded (Unallocated Funds is not
+    collectable scrip).  Ordered by sort_order to drive the entry
+    screen's fallback default (first external-enabled method when
+    FMNP isn't external-enabled).
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM payment_methods"
+        " WHERE external_matching_accepted = 1"
+        "   AND COALESCE(is_system, 0) = 0"
+        " ORDER BY sort_order, name"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_unallocated_funds_method():
     """Return the system 'Unallocated Funds' payment method row.
 
@@ -437,22 +460,62 @@ def unassign_payment_method_from_vendor(vendor_id, payment_method_id,
 def update_payment_method(pm_id, name=None, match_percent=None,
                           is_active=None, sort_order=None,
                           denomination=None, photo_required=None,
+                          external_matching_accepted=None,
+                          vendor_cashes_original=None,
                           changed_by='System'):
     """Update a payment method.  Audited per-changed-field (v1.9.10+).
 
     The ``changed_by`` parameter defaults to ``'System'`` for
     backward compatibility with tests; pass the volunteer/admin
     name from UI call-sites.
+
+    v2.1.0 (ENH-002): ``external_matching_accepted`` /
+    ``vendor_cashes_original`` are the external-matching channel
+    toggles.  A G4-hard guard refuses to PRODUCE the state
+    "external-enabled with no denomination" — either by enabling
+    external matching on a denomination-less method or by clearing
+    the denomination of an external-enabled one.  The guard lives
+    here (not only in the Settings dialog) so EVERY writer that can
+    flip the toggles hits the same gate — same defense-in-depth
+    pattern as the universal-vendor-method guard above.  (The
+    ``.fam`` settings import is safe without it: its INSERT omits
+    the toggle columns entirely, settings_io.py — new methods land
+    external-disabled.)  Pre-existing violating rows (grandfathered
+    v38 backfills) are untouched by unrelated updates: the guard
+    only fires on the two state TRANSITIONS, never on the standing
+    state.
     """
     from fam.models.audit import log_action
     conn = get_connection()
     # Snapshot old values for the per-field diff log.
     old_row = conn.execute(
         "SELECT name, match_percent, is_active, sort_order, "
-        " denomination, photo_required FROM payment_methods "
+        " denomination, photo_required, external_matching_accepted, "
+        " vendor_cashes_original FROM payment_methods "
         "WHERE id=?", (pm_id,)
     ).fetchone()
     old = dict(old_row) if old_row else {}
+
+    # ── G4 hard guard (transition-scoped; see docstring) ───────
+    resulting_denom = old.get('denomination')
+    if denomination is not None:
+        resulting_denom = None if denomination == 0 else denomination
+    enabling_external = (
+        external_matching_accepted is not None
+        and int(bool(external_matching_accepted)) == 1
+        and not old.get('external_matching_accepted'))
+    clearing_denom_while_external = (
+        denomination == 0
+        and old.get('denomination')
+        and (old.get('external_matching_accepted')
+             if external_matching_accepted is None
+             else int(bool(external_matching_accepted))))
+    if ((enabling_external and not resulting_denom)
+            or clearing_denom_while_external):
+        raise ValueError(
+            f"\"{old.get('name', pm_id)}\" cannot accept external "
+            f"matching without a denomination. Paper scrip always "
+            f"has a face value — set the denomination first.")
 
     fields = []
     values = []
@@ -485,6 +548,16 @@ def update_payment_method(pm_id, name=None, match_percent=None,
         fields.append("photo_required=?")
         values.append(v)
         new_values['photo_required'] = v
+    if external_matching_accepted is not None:
+        fields.append("external_matching_accepted=?")
+        values.append(int(bool(external_matching_accepted)))
+        new_values['external_matching_accepted'] = int(
+            bool(external_matching_accepted))
+    if vendor_cashes_original is not None:
+        fields.append("vendor_cashes_original=?")
+        values.append(int(bool(vendor_cashes_original)))
+        new_values['vendor_cashes_original'] = int(
+            bool(vendor_cashes_original))
     if not fields:
         return
     try:

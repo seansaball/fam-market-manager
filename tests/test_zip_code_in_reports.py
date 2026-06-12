@@ -13,6 +13,11 @@ manual join via the Geolocation report.
 These tests pin the column presence and the join-source semantics
 so a future schema or query refactor can't silently drop the
 column.
+
+R1 (2026-06-11): the FMNP Entries sheet tab is deprecated (collector
+drains it by returning []) and its successor, External Payment
+Entries, has NO Customer/Zip columns by design — see
+TestSyncFmnpEntriesHasZipCode below, which now pins that retirement.
 """
 
 import pytest
@@ -100,13 +105,19 @@ class TestSyncDetailedLedgerHasZipCode:
         from fam.sync.data_collector import _collect_detailed_ledger
         conn = get_connection()
         _seed_market_with_zip_customer(conn)
+        # v38: fmnp_entries inserts require a method id + config snapshots
+        conn.execute(
+            "INSERT INTO payment_methods (id, name, match_percent, "
+            " is_active, sort_order) VALUES (90, 'FMNP', 100.0, 0, 90)")
         # Add an external FMNP entry
         conn.execute(
             "INSERT INTO fmnp_entries "
             " (id, market_day_id, vendor_id, amount, status, "
-            "  entered_by, created_at) "
+            "  entered_by, created_at, payment_method_id, "
+            "  method_name_snapshot, match_percent_snapshot, "
+            "  vendor_cashes_original_snapshot) "
             " VALUES (70, 40, 20, 500, 'Active', 'Tester', "
-            "  '2026-05-05 11:00:00')")
+            "  '2026-05-05 11:00:00', 90, 'FMNP', 100.0, 1)")
         conn.commit()
 
         rows = _collect_detailed_ledger(conn, md_id=40)
@@ -176,12 +187,27 @@ class TestSyncGeneratedRewardsHasZipCode:
         assert rows[0]['Customer'] == 'C-001-LB1'
 
 
-# ─── Sync — FMNP Entries (Source B = payment-flow) ───────────────
+# ─── Sync — entries tab carries no Customer/Zip by design (R1) ───
+#
+# R1 (2026-06-11): the 'FMNP Entries' tab is deprecated and the old
+# Source B booth-FMNP 'PAY-' rows (which carried Customer/Zip Code)
+# are retired.  Booth-paid FMNP stays in the Detailed Ledger as part
+# of its transaction — zip coverage for that path is pinned above in
+# TestSyncDetailedLedgerHasZipCode.  External entries (the entries
+# tab) are vendor-level instruments with no customer order, so the
+# replacement 'External Payment Entries' tab has NO Customer/Zip
+# columns at all.
 
 
 class TestSyncFmnpEntriesHasZipCode:
 
     def test_payment_flow_fmnp_entry_has_zip_code(self):
+        """R1 (2026-06-11): booth-FMNP 'PAY-' rows (the old Source B,
+        the only entries-tab rows that ever carried a zip) are
+        retired — the deprecated FMNP Entries collector returns []
+        even when an FMNP payment line item exists.  The booth
+        payment's zip remains covered via the Detailed Ledger
+        (see TestSyncDetailedLedgerHasZipCode)."""
         from fam.sync.data_collector import _collect_fmnp_entries
         conn = get_connection()
         _seed_market_with_zip_customer(conn)
@@ -202,20 +228,21 @@ class TestSyncFmnpEntriesHasZipCode:
         conn.commit()
 
         rows = _collect_fmnp_entries(conn, md_id=40)
-        # Source B rows (payment-flow) should carry zip code
-        pay_rows = [r for r in rows if r['Source'] == 'Payment']
-        assert len(pay_rows) >= 1, "Expected at least one payment-flow FMNP entry"
-        assert all('Zip Code' in r for r in pay_rows)
-        assert all(r['Zip Code'] == '15102' for r in pay_rows), (
-            f"Payment-flow FMNP entries must carry the customer's "
-            f"zip code.  Got: {[r['Zip Code'] for r in pay_rows]}")
-        assert all(r['Customer'] == 'C-001-LB1' for r in pay_rows)
+        assert rows == [], (
+            "Deprecated FMNP Entries collector must return [] — even "
+            "with an FMNP payment line item present — so the empty "
+            "upsert drains this device's rows from the shared sheet "
+            "(R1, 2026-06-11).")
 
     def test_source_a_fmnp_entry_has_empty_zip(self):
-        """Source A (manual FMNP Entry tab) isn't tied to a
-        customer order — the column is present for schema parity
-        but empty."""
-        from fam.sync.data_collector import _collect_fmnp_entries
+        """R1 (2026-06-11): external entries aren't tied to a
+        customer order, and the old 'present for schema parity but
+        empty' Customer/Zip columns are retired with the FMNP
+        Entries tab.  The replacement External Payment Entries rows
+        carry NO Customer/Zip Code keys at all."""
+        from fam.sync.data_collector import (
+            _collect_external_payment_entries,
+        )
         conn = get_connection()
         _seed_market_with_zip_customer(conn)
         conn.execute(
@@ -223,20 +250,25 @@ class TestSyncFmnpEntriesHasZipCode:
             " (id, name, match_percent, is_active, sort_order, "
             "  denomination) "
             " VALUES (35, 'FMNP', 100.0, 1, 2, 500)")
+        # v38: fmnp_entries inserts require a method id + config
+        # snapshots — reuse the FMNP method (id 35) seeded above.
         conn.execute(
             "INSERT INTO fmnp_entries "
             " (id, market_day_id, vendor_id, amount, status, "
-            "  entered_by, created_at) "
+            "  entered_by, created_at, payment_method_id, "
+            "  method_name_snapshot, match_percent_snapshot, "
+            "  vendor_cashes_original_snapshot) "
             " VALUES (80, 40, 20, 500, 'Active', 'Tester', "
-            "  '2026-05-05 11:00:00')")
+            "  '2026-05-05 11:00:00', 35, 'FMNP', 100.0, 1)")
         conn.commit()
 
-        rows = _collect_fmnp_entries(conn, md_id=40)
-        entry_rows = [r for r in rows if r['Source'] == 'FMNP Entry']
-        assert len(entry_rows) >= 1
-        assert all('Zip Code' in r for r in entry_rows)
-        assert all(r['Zip Code'] == '' for r in entry_rows)
-        assert all(r['Customer'] == '' for r in entry_rows)
+        rows = _collect_external_payment_entries(conn, md_id=40)
+        assert len(rows) >= 1
+        assert all('Zip Code' not in r for r in rows), (
+            "External Payment Entries rows must NOT carry a Zip Code "
+            "column — entries are vendor-level instruments with no "
+            "customer order (R1, 2026-06-11).")
+        assert all('Customer' not in r for r in rows)
 
 
 # ─── audit.get_transaction_log surfaces customer + zip ────────────

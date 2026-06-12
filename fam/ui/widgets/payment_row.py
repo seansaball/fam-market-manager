@@ -308,8 +308,22 @@ class PaymentRow(QFrame):
         # that the user has explicitly typed a charge.  Mark the
         # row as user-capped FIRST (so _on_changed sees the flag
         # when it dispatches the engine recalc), then delegate.
+        # v2.1.0 (ENH-007): keyboard tracking is OFF on the spin
+        # boxes, so valueChanged now fires on COMMIT (Tab / Enter /
+        # focus-out / arrows) — that's when the recompute chain
+        # runs.  The ⚡ lock must still flip on the FIRST keystroke
+        # (smart-field timing — e.g. typing then immediately
+        # clicking Auto-Distribute must skip this row), so the
+        # lock alone also hooks lineEdit().textEdited, which fires
+        # only for user edits, never for programmatic setText/
+        # setValue.  The textEdited hook deliberately does NOT run
+        # _on_changed: reading .value() mid-edit makes Qt re-render
+        # the editor and breaks decimal typing (the traced "8.5 →
+        # $85" bug).
         self.amount_spin.valueChanged.connect(
             self._on_amount_user_changed)
+        self.amount_spin.lineEdit().textEdited.connect(
+            self._on_amount_text_edited)
         layout.addWidget(self.amount_spin)
 
         # v2.0.7+ auto-distribute toggle (user-reported 2026-05-07).
@@ -536,6 +550,21 @@ class PaymentRow(QFrame):
         self.changed.emit()
 
     # ── User-cap on charge (v2.0.7+) ────────────────────────────────
+
+    def _on_amount_text_edited(self, _text):
+        """FIRST-KEYSTROKE ⚡ lock (v2.1.0 ENH-007).
+
+        Fires on every user edit of the amount text — including the
+        very first keystroke, before the value commits.  Sets the
+        user-cap flag and refreshes the ⚡ style ONLY; the engine
+        recompute waits for the value to commit
+        (``_on_amount_user_changed``) because touching ``.value()``
+        mid-edit re-renders the editor under the volunteer's cursor.
+        Never fires for programmatic writes (Qt emits textEdited
+        for user edits only)."""
+        if not self._user_capped:
+            self._user_capped = True
+            self._refresh_auto_distribute_btn_style()
 
     def _on_amount_user_changed(self, _val):
         """User typed a value into amount_spin → mark the row as

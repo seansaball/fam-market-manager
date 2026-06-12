@@ -629,7 +629,12 @@ class TestFMNPScreen:
         assert active[0]['id'] == e2
 
     def test_fmnp_in_sync_data(self, qtbot, market_db):
-        """FMNP entries appear in sync data output."""
+        """FMNP entries appear in sync data output.
+
+        R1 (2026-06-11): FMNP entries now sync on the 'External
+        Payment Entries' tab (one row per entry, dollars in 'Face
+        Value'); the deprecated 'FMNP Entries' tab is always [].
+        """
         from fam.models.fmnp import create_fmnp_entry
         from fam.sync.data_collector import collect_sync_data
 
@@ -638,11 +643,14 @@ class TestFMNPScreen:
             entered_by='Alice', check_count=2)
 
         data = collect_sync_data(1)
-        fmnp_rows = data.get('FMNP Entries', [])
-        assert len(fmnp_rows) >= 1
+        assert data.get('FMNP Entries') == []  # deprecated tab drains
 
-        # Total amount across FMNP rows should be $50
-        total = sum(float(r.get('Check Amount', 0)) for r in fmnp_rows)
+        ext_rows = [r for r in data.get('External Payment Entries', [])
+                    if r.get('Status') == 'Active']
+        assert len(ext_rows) >= 1
+
+        # Total face value across Active rows should be $50
+        total = sum(float(r.get('Face Value', 0)) for r in ext_rows)
         assert abs(total - 50.00) < 0.01
 
 
@@ -723,13 +731,15 @@ class TestReportsScreenTotals:
               AND t.status IN ('Confirmed', 'Adjusted')
         """).fetchone()[0]
 
-        # Find Farm Stand in vendor table (col 1 = Vendor, col 4 = Total Due)
+        # Find Farm Stand in vendor table.  v2.1.0 (ENH-006): the
+        # Verified checkbox is column 0, shifting the data columns
+        # right by one (col 2 = Vendor, col 5 = Total Due).
         found = False
         for row_idx in range(screen.vendor_table.rowCount()):
-            vendor_item = screen.vendor_table.item(row_idx, 1)
+            vendor_item = screen.vendor_table.item(row_idx, 2)
             if vendor_item and 'Farm Stand' in vendor_item.text():
                 found = True
-                total_item = screen.vendor_table.item(row_idx, 4)
+                total_item = screen.vendor_table.item(row_idx, 5)
                 total_text = total_item.text()
                 total_cents = int(round(
                     float(total_text.replace('$', '').replace(',', '')) * 100))
@@ -1072,10 +1082,16 @@ class TestSimulatedMarketDay:
         assert adjusted['status'] == 'Adjusted'
 
         # ── FMNP in sync ──
+        # R1 (2026-06-11): read from the 'External Payment Entries'
+        # tab (Active rows, 'Face Value'); the deprecated 'FMNP
+        # Entries' tab is always [].
         from fam.sync.data_collector import collect_sync_data
         data = collect_sync_data(1)
-        fmnp_rows = data.get('FMNP Entries', [])
-        fmnp_total = sum(float(r.get('Check Amount', 0)) for r in fmnp_rows)
+        assert data.get('FMNP Entries') == []
+        fmnp_total = sum(
+            float(r.get('Face Value', 0))
+            for r in data.get('External Payment Entries', [])
+            if r.get('Status') == 'Active')
         assert abs(fmnp_total - 25.00) < 0.01
 
         # ── Audit trail exists for void and adjustment ──
