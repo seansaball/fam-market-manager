@@ -1,7 +1,7 @@
 # FAM Market Manager v2.1.0 — "External Payments Entry"
 
 **Previous public release:** v2.0.9 (May 2026)
-**Release date:** TBD — release held open while further enhancements land (June 2026)
+**Release date:** June 12, 2026
 **Schema version:** 41 (upgraded from 37 via four additive migrations — automatic pre-migration backup)
 
 ---
