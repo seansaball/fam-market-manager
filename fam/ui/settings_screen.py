@@ -206,7 +206,15 @@ class EditPaymentMethodDialog(QDialog):
         self.denom_check.toggled.connect(self._toggle_denom)
         denom_row.addWidget(self.denom_check)
         self.denom_spin = NoScrollDoubleSpinBox()
-        self.denom_spin.setRange(1, 999)
+        # Minimum is 1 cent, not $1.00 (fixed 2026-06): sub-dollar
+        # scrip is real — JH Tokens ship in $0.50 increments, and
+        # $0.25 program coupons exist.  The old $1.00 floor silently
+        # snapped a typed $0.50 back to $1.00.  All downstream
+        # denomination math is exact integer cents (stepper
+        # count×denom, charge %% denom validation, int(charge/denom)
+        # counts) so any value >= 1 cent flows cleanly; the photo-slot
+        # cap (MAX_PHOTO_SLOTS) is independent of denomination.
+        self.denom_spin.setRange(0.01, 999)
         self.denom_spin.setDecimals(2)
         self.denom_spin.setPrefix("$ ")
         self.denom_spin.setValue(25.0)
