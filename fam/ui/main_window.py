@@ -662,11 +662,25 @@ class MainWindow(QMainWindow):
         self._update_sync_timer()
 
     def _update_sync_timer(self):
-        """Start or stop the periodic sync timer."""
+        """Start or stop the periodic sync timer.
+
+        v2.1.2: the timer runs whenever periodic sync is enabled —
+        NO LONGER gated on an open market day.  The reported case
+        (BPFM): a market runs on-site with no internet, closes, and
+        the coordinator enters/reconciles data the NEXT day on a
+        connected laptop.  Previously the periodic timer stopped the
+        moment the day closed, so nothing auto-synced until a manual
+        "Sync to Cloud" click — pending data silently sat local.
+        Now the probe keeps running when closed; ``_trigger_sync``
+        already collects ALL market days when no day is open (see its
+        ``scope_md_id = None`` branch), so the closed day's data
+        flushes automatically once the network returns.  Offline
+        probes are quiet — third-party retry chatter is suppressed
+        (v2.1.2 logging fix) and FAM's own offline log is coalesced
+        to one line per cycle.
+        """
         from fam.utils.app_settings import get_setting
-        from fam.models.market_day import get_open_market_day
-        if (get_open_market_day() and
-                get_setting('sync_periodic') == '1'):
+        if get_setting('sync_periodic') == '1':
             if not self._sync_timer.isActive():
                 self._sync_timer.start()
         else:

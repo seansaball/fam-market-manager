@@ -322,6 +322,22 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         cpt_expr = "v.name"
         addr_cols = ", NULL AS street, NULL AS city, NULL AS state, NULL AS zip_code"
 
+    # ACH Enabled is a per-vendor attribute (not month/market
+    # dependent), so a single name→flag lookup covers every row-
+    # creation path (transaction, FMNP-only, external-only) applied
+    # at final emission — cleaner than threading it through all
+    # three queries.  vendors.name is UNIQUE so the map is 1:1.
+    # Guarded for pre-ach_enabled databases.
+    try:
+        ach_by_vendor = {
+            r['name']: bool(r['ach_enabled'])
+            for r in conn.execute(
+                "SELECT name, COALESCE(ach_enabled, 0) AS ach_enabled "
+                "FROM vendors").fetchall()
+        }
+    except Exception:
+        ach_by_vendor = {}
+
     vendor_rows = conn.execute(f"""
         SELECT v.name AS vendor,
                {cpt_expr} AS check_payable_to,
@@ -628,6 +644,12 @@ def _collect_vendor_reimbursement(conn, md_ids: list[int]) -> list[dict]:
         out_row['Customer Forfeit'] = cents_to_dollars(
             rc.get('_customer_forfeit_cents', 0))
         out_row['Check Payable To'] = rc['Check Payable To']
+        # ACH Enabled (Yes/No) — per-vendor payment preference,
+        # sits with the other "how do we pay this vendor" fields.
+        # Additive column: on an existing sheet it auto-widens to
+        # the end; not part of SHEET_KEYS (display only).
+        out_row['ACH Enabled'] = (
+            'Yes' if ach_by_vendor.get(rc['Vendor']) else 'No')
         out_row['Address'] = rc['Address']
         output.append(out_row)
     return output

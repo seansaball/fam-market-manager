@@ -166,7 +166,7 @@ At the top of the screen you will see:
 
 You can add multiple payment methods if the customer is splitting their payment.
 
-**Denomination validation:** For payment methods that use fixed denominations (such as FMNP checks), the app validates that the amount you enter is a valid multiple of the denomination. If you enter an amount that does not divide evenly, a warning appears and the entry is blocked until corrected.
+**Denomination validation:** For payment methods that use fixed denominations (such as FMNP checks), the app validates that the amount you enter is a valid multiple of the denomination. If you enter an amount that does not divide evenly, a warning appears and the entry is blocked until corrected. *(v2.1.2+: denominations can be set below $1.00 — e.g. JH Tokens in $0.50 increments — in Settings → Payment Methods → Denomination.)*
 
 **Automatic balance clamping:** As you enter payment amounts, the app automatically limits each payment method's maximum to the remaining order balance. The stepper's + button disables when one more unit would exceed the remaining amount, and free-text entry fields cap at the remaining balance. This prevents over-allocation before it happens.
 
@@ -403,7 +403,8 @@ The results table shows three dates per row, each with a different meaning:
 
 1. Find the transaction in the results table
 2. Click **"Adjust"** in the Actions column
-3. In the dialog, you can change:
+3. *(v2.1.2+)* You're first asked what kind of change: **Adjust Payment** (the normal adjustment, below) or **Correct Amount Collected** (see the next section). Choose **Adjust Payment**.
+4. In the dialog, you can change:
    - **Receipt Total** — correct the dollar amount
    - **Vendor** — change which vendor the receipt belongs to
    - **Reason** — select why you are making the change
@@ -433,6 +434,20 @@ Three scenarios trigger it:
 - **Audit Log** — every absorption gets a dedicated `UNALLOCATED_FUNDS` action with the dollar amount
 - **FAM Match Report** — new "FAM Absorbed" column + summary card alongside "FAM Match"
 - **Vendor Reimbursement** and **Detailed Ledger** — Unallocated Funds appears as its own per-method column
+
+### Correct Amount Collected (v2.1.2+)
+
+Use this when the amount **actually charged** differed from what was logged — most often an **EBT terminal keying error** (logged $12.75, the card was charged $12.50). The vendor is still owed the full receipt, but the SNAP total in the app no longer matches what SNAP will deposit.
+
+1. Click **Adjust** on the transaction → choose **Correct Amount Collected**
+2. Pick the method (SNAP, Cash) and enter the amount **actually collected**
+3. The preview shows exactly what will happen; click **Record Correction**
+
+What it does: lowers the recorded amount to the real charge (so SNAP totals match the bank deposit), **keeps the FAM match unchanged**, and books the difference as **Unallocated Funds**. The vendor total never changes.
+
+- Non-denominated methods only (SNAP/Cash) — a physical token/check has a fixed face value.
+- **Under-collection only.** If you charged *more* than logged (a refund is owed), that's a different correction not handled here.
+- Because SNAP is doubled, a $0.25 short-charge shows as **$0.50** in Unallocated Funds — expected; the SNAP line is what matters for the bank.
 
 ### Denomination forfeit (Adjustments)
 
@@ -514,7 +529,8 @@ Use the Settings screen to manage the reference data used throughout the applica
 ### Vendors tab
 
 - **Add a vendor:** Enter the name and optional contact info, then click "Add Vendor"
-- **Edit:** Change the vendor name or contact info
+- **Edit:** Change the vendor name, contact info, check-payable name, or address
+- **ACH Enabled (v2.1.2+):** Tick this in the Edit dialog to mark a vendor as paid by ACH rather than a paper check. It shows as a **Yes/No "ACH Enabled" column** on the Vendor Reimbursement report (in-app and on the Google Sheet) so you can see each vendor's payment method at a glance. It does not affect any total.
 - **Markets:** Choose which markets this vendor serves
 - **Activate/Deactivate:** Make a vendor available or unavailable for new receipts
 
@@ -522,6 +538,7 @@ Use the Settings screen to manage the reference data used throughout the applica
 
 - **Add a payment method:** Enter the name and match percentage, then click "Add Payment Method"
 - **Edit:** Change the name or match percentage
+- **Denomination (v2.1.2+ supports sub-dollar):** For token/check methods, set the fixed face value — including values **below $1.00** (e.g. $0.50 JH Tokens, $0.25 coupons; minimum $0.01).
 - **Reorder:** Use the up/down arrows to change the display order
 - **Activate/Deactivate:** Make a payment method available or unavailable
 - **External Matching (v2.1.0+):** The Edit dialog has two toggles — **"Accept external matching"** (the method appears in the External Payments Entry screen) and **"Vendor cashes the original instrument"** (FAM owes only the match component; OFF means FAM owes face + match). A live preview in the dialog shows exactly what FAM would owe for one instrument under the current settings. The match % and denomination above drive both the booth AND external math — there are no separate external money fields.
@@ -581,6 +598,15 @@ it reports what the app knows for certain.
 If you see "No network", your data is still safe — it is stored locally on
 this laptop and will sync automatically the next time the laptop reconnects
 and a sync is run.
+
+**Auto-sync every 5 minutes (and after the market day closes — v2.1.2+):**
+Enable "sync every 5 minutes" in this tab to have the app sync on a timer.
+As of v2.1.2 this timer **keeps running after the market day closes**, so if
+your market runs on-site without internet and you enter or reconcile data
+later — often the next day on a connected laptop — it flushes to the cloud
+automatically without anyone clicking Sync. While offline, the app records
+that it's disconnected **once** (not repeatedly) and resumes on its own when
+the connection returns.
 
 **Google Drive photo sync:**
 

@@ -883,6 +883,19 @@ class ReportsScreen(QWidget):
             cpt_expr = "v.name"
             addr_cols = ", NULL AS street, NULL AS city, NULL AS state, NULL AS zip_code"
 
+        # Per-vendor ACH flag (1:1 by unique vendor name) — mirrors
+        # the sheet collector; applied at emission so it covers every
+        # row path (transaction / FMNP-only / external-only).
+        try:
+            ach_by_vendor = {
+                r['name']: bool(r['ach_enabled'])
+                for r in conn.execute(
+                    "SELECT name, COALESCE(ach_enabled, 0) AS ach_enabled "
+                    "FROM vendors").fetchall()
+            }
+        except Exception:
+            ach_by_vendor = {}
+
         vendor_rows = conn.execute(f"""
             SELECT v.name AS vendor,
                    {cpt_expr} AS check_payable_to,
@@ -1136,6 +1149,8 @@ class ReportsScreen(QWidget):
                 'externals': {c: cents_to_dollars(v)
                               for c, v in
                               rc['_external_method_cents'].items()},
+                'ach_enabled': (
+                    'Yes' if ach_by_vendor.get(rc['vendor']) else 'No'),
             })
 
         # Build dynamic table columns.
@@ -1161,7 +1176,7 @@ class ReportsScreen(QWidget):
         external_cols = sorted(all_external_cols)
         tail_cols = (['FMNP (External)'] + external_cols
                      + ['Customer Forfeit',
-                        'Check Payable To', 'Address'])
+                        'Check Payable To', 'ACH Enabled', 'Address'])
         # v2.1.0 (ENH-006): end-of-market vendor verification marks.
         # The mark is the per-day FACT "(vendor, market day)
         # confirmed with the vendor in person", persisted in
@@ -1318,6 +1333,7 @@ class ReportsScreen(QWidget):
                 f"${v['customer_forfeit']:.2f}",
                 v['customer_forfeit'])); col += 1
             self.vendor_table.setItem(i, col, make_item(v['check_payable_to'])); col += 1
+            self.vendor_table.setItem(i, col, make_item(v['ach_enabled'])); col += 1
             self.vendor_table.setItem(i, col, make_item(v['address']))
 
             if checked:
@@ -1338,6 +1354,7 @@ class ReportsScreen(QWidget):
                 row_data[ext_col] = v['externals'].get(ext_col, 0)
             row_data['Customer Forfeit'] = v['customer_forfeit']
             row_data['Check Payable To'] = v['check_payable_to']
+            row_data['ACH Enabled'] = v['ach_enabled']
             row_data['Address'] = v['address']
             if checked is not None:
                 row_data['Verified'] = 'Yes' if checked else ''

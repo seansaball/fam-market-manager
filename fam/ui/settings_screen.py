@@ -1894,7 +1894,8 @@ class SettingsScreen(QWidget):
         sync_fl.addWidget(self._sync_on_close_cb)
 
         self._sync_periodic_cb = QCheckBox(
-            "Also sync every 5 minutes while market day is open")
+            "Also sync every 5 minutes (keeps trying after the market "
+            "day closes, so data entered later still reaches the cloud)")
         self._sync_periodic_cb.setChecked(
             get_setting('sync_periodic') == '1')
         self._sync_periodic_cb.setStyleSheet(_sync_cb_style)

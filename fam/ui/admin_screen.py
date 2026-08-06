@@ -13,10 +13,14 @@ from PySide6.QtCore import Qt, Signal
 from fam.database.connection import get_connection
 from fam.models.market_day import get_all_market_days, get_open_market_day
 from fam.models.vendor import get_all_vendors
-from fam.models.payment_method import get_all_payment_methods, get_payment_methods_for_market
+from fam.models.payment_method import (
+    get_all_payment_methods, get_payment_methods_for_market,
+    get_payment_method_by_id, UNALLOCATED_FUNDS_NAME,
+)
 from fam.models.transaction import (
     search_transactions, get_transaction_by_id, update_transaction,
-    get_payment_line_items, save_payment_line_items
+    get_payment_line_items, save_payment_line_items,
+    apply_collection_variance,
 )
 from fam.models.audit import log_action, get_audit_log
 from fam.utils.export import write_ledger_backup
@@ -222,6 +226,125 @@ def _append_unallocated_funds_row(new_items, method_amount_cents):
         'photo_source_paths': [],
     })
     return uf_method
+
+
+class CollectionVarianceDialog(QDialog):
+    """ENH-008: correct the ACTUAL amount collected for a
+    non-denominated method when it differed from what was logged
+    (e.g. an EBT terminal keying error — logged $12.75, charged
+    $12.50).  Reduces the recorded collected amount, keeps the FAM
+    match, and books the difference as Unallocated Funds; the vendor
+    total is unchanged.
+
+    Deliberately minimal and separate from the full AdjustmentDialog
+    so it can't be confused with a re-charge or a receipt edit.
+    """
+
+    def __init__(self, txn, eligible_items, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(
+            f"Correct Amount Collected — {txn['fam_transaction_id']}")
+        self.setMinimumWidth(460)
+        self._items = eligible_items
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {BACKGROUND}; }}
+            QLabel {{ background-color: transparent; color: {TEXT_COLOR}; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Record the amount that was <b>actually collected</b> when it "
+            "differs from what was logged (e.g. a terminal keying error). "
+            "The vendor total and the FAM match stay the same — the "
+            "shortfall is booked as Unallocated Funds.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form = QFormLayout()
+        self.method_combo = NoScrollComboBox()
+        for it in eligible_items:
+            self.method_combo.addItem(
+                f"{it['method_name_snapshot']} "
+                f"(logged {format_dollars(it['customer_charged'])})",
+                it['payment_method_id'])
+        form.addRow("Payment method:", self.method_combo)
+
+        self.amount_spin = NoScrollDoubleSpinBox()
+        self.amount_spin.setRange(0, 99999.99)
+        self.amount_spin.setDecimals(2)
+        self.amount_spin.setPrefix("$ ")
+        form.addRow("Actually collected:", self.amount_spin)
+
+        self.notes_input = QLineEdit()
+        self.notes_input.setPlaceholderText("e.g. EBT terminal under-charge")
+        form.addRow("Note (optional):", self.notes_input)
+        layout.addLayout(form)
+
+        self.preview = QLabel("")
+        self.preview.setWordWrap(True)
+        self.preview.setStyleSheet(
+            f"color: {PRIMARY_GREEN}; font-weight: bold; "
+            f"font-size: 12px; padding: 6px 2px;")
+        layout.addWidget(self.preview)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._buttons.button(QDialogButtonBox.Ok).setText("Record Correction")
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        layout.addWidget(self._buttons)
+
+        self.method_combo.currentIndexChanged.connect(self._sync_to_method)
+        self.amount_spin.valueChanged.connect(self._update_preview)
+        self._sync_to_method()
+
+    def _current_item(self):
+        pm_id = self.method_combo.currentData()
+        return next(it for it in self._items
+                    if it['payment_method_id'] == pm_id)
+
+    def _sync_to_method(self):
+        # Pre-fill the amount with the currently-logged value so the
+        # manager edits down from it.
+        it = self._current_item()
+        self.amount_spin.blockSignals(True)
+        self.amount_spin.setValue(it['customer_charged'] / 100.0)
+        self.amount_spin.blockSignals(False)
+        self._update_preview()
+
+    def _update_preview(self):
+        it = self._current_item()
+        logged = it['customer_charged']
+        actual = dollars_to_cents(self.amount_spin.value())
+        ok = self._buttons.button(QDialogButtonBox.Ok)
+        if actual > logged:
+            self.preview.setText(
+                "⚠ Actually collected is more than logged — that is an "
+                "over-collection (customer owed a refund) and is not "
+                "handled here.")
+            ok.setEnabled(False)
+            return
+        if actual == logged:
+            self.preview.setText(
+                "No change — the collected amount matches what was logged.")
+            ok.setEnabled(False)
+            return
+        variance = logged - actual
+        name = it['method_name_snapshot']
+        self.preview.setText(
+            f"{name} collected: {format_dollars(logged)} → "
+            f"{format_dollars(actual)}  ·  FAM match unchanged  ·  "
+            f"{format_dollars(variance)} → Unallocated Funds  ·  "
+            f"vendor total unchanged.")
+        ok.setEnabled(True)
+
+    def result_values(self):
+        """Return (payment_method_id, actual_collected_cents)."""
+        return (self.method_combo.currentData(),
+                dollars_to_cents(self.amount_spin.value()))
+
+    def notes_text(self):
+        return self.notes_input.text().strip()
 
 
 class AdjustmentDialog(QDialog):
@@ -1486,8 +1609,13 @@ class AdminScreen(QWidget):
 
             txn_id = t['id']
             if t['status'] != 'Voided':
+                # "Adjust" opens a small chooser (ENH-008): a normal
+                # payment/receipt adjustment, or a Collection Variance
+                # correction (actual-collected differed from logged).
+                # Both are adjustments — one button keeps the row
+                # uncrowded and routes to the right (separate) flow.
                 adj_btn = make_action_btn("Adjust", 50)
-                adj_btn.clicked.connect(lambda checked, tid=txn_id: self._adjust_transaction(tid))
+                adj_btn.clicked.connect(lambda checked, tid=txn_id: self._choose_adjust_type(tid))
                 action_layout.addWidget(adj_btn)
 
                 void_btn = make_action_btn("Void", 40, danger=True)
@@ -1503,6 +1631,42 @@ class AdminScreen(QWidget):
             self.table.setRowHeight(i, 42)
 
         self.table.setSortingEnabled(True)
+
+    def _choose_adjust_type(self, txn_id):
+        """ENH-008: clicking Adjust asks which kind of adjustment —
+        a normal payment/receipt/vendor change, or a Collection
+        Variance correction (the actual amount collected differed
+        from what was logged).  Routes to the appropriate (separate)
+        flow.  Keeping the two dialogs separate means neither the
+        tested adjust path nor the collection-variance path changes.
+        """
+        txn = get_transaction_by_id(txn_id)
+        if not txn:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Adjust Transaction")
+        box.setIcon(QMessageBox.Question)
+        box.setText(
+            f"What would you like to do with transaction "
+            f"{txn['fam_transaction_id']}?")
+        box.setInformativeText(
+            "• Adjust payment — change the receipt total, vendor, or "
+            "payment method breakdown.\n\n"
+            "• Correct amount collected — the amount actually charged "
+            "(e.g. on the EBT terminal) differed from what was logged. "
+            "Keeps the FAM match and vendor total; books the difference "
+            "as Unallocated Funds.")
+        adjust_btn = box.addButton("Adjust Payment", QMessageBox.AcceptRole)
+        collected_btn = box.addButton(
+            "Correct Amount Collected", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(adjust_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is adjust_btn:
+            self._adjust_transaction(txn_id)
+        elif clicked is collected_btn:
+            self._correct_collected(txn_id)
 
     def _adjust_transaction(self, txn_id):
         txn = get_transaction_by_id(txn_id)
@@ -2588,6 +2752,73 @@ class AdminScreen(QWidget):
             # scopes to THAT day (which may be CLOSED) rather than
             # only the currently-open day.
             self.data_changed.emit(int(txn.get('market_day_id') or 0))
+
+    def _correct_collected(self, txn_id):
+        """ENH-008: correct the actual-collected amount for a
+        non-denominated method (e.g. an EBT terminal under-charge).
+
+        Surgical, engine-free correction: reduces the recorded
+        collected amount, PRESERVES the FAM match, and books the
+        difference as Unallocated Funds so the vendor total is
+        unchanged.  See ``transaction.apply_collection_variance``.
+        """
+        txn = get_transaction_by_id(txn_id)
+        if not txn:
+            return
+        if txn['status'] == 'Voided':
+            QMessageBox.warning(
+                self, "Voided",
+                "This transaction is voided and cannot be corrected.")
+            return
+
+        # Only non-denominated methods with a positive collected amount
+        # are eligible (a physical token/check can't be under-charged).
+        items = get_payment_line_items(txn_id)
+        eligible = []
+        for it in items:
+            if it['method_name_snapshot'] == UNALLOCATED_FUNDS_NAME:
+                continue
+            if it.get('customer_charged', 0) <= 0:
+                continue
+            pm = get_payment_method_by_id(it['payment_method_id'])
+            if pm and (pm.get('denomination') or 0) > 0:
+                continue  # denominated — face value is fixed
+            eligible.append(it)
+        if not eligible:
+            QMessageBox.information(
+                self, "Nothing to correct",
+                "This transaction has no non-denominated payment "
+                "(SNAP, Cash) with a collected amount to correct.")
+            return
+
+        dialog = CollectionVarianceDialog(txn, eligible, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        pm_id, actual_cents = dialog.result_values()
+        open_md = get_open_market_day()
+        changed_by = (open_md.get('opened_by') if open_md else None) or 'Admin'
+        try:
+            variance = apply_collection_variance(
+                txn_id, pm_id, actual_cents, changed_by=changed_by,
+                reason='collection_variance',
+                notes=dialog.notes_text() or None)
+        except ValueError as e:
+            QMessageBox.warning(self, "Cannot Correct", str(e))
+            return
+        except Exception as e:
+            logger.exception("Collection variance failed for txn %s", txn_id)
+            QMessageBox.critical(self, "Error", f"Correction failed: {e}")
+            return
+
+        write_ledger_backup()
+        self._search()
+        self._load_audit_log()
+        QMessageBox.information(
+            self, "Correction Recorded",
+            f"Recorded {format_dollars(variance)} as Unallocated Funds. "
+            f"The FAM match and vendor total are unchanged.")
+        # Data mutation — scope the sync to the affected market day.
+        self.data_changed.emit(int(txn.get('market_day_id') or 0))
 
     def _load_audit_log(self):
         entries = get_audit_log(limit=20)

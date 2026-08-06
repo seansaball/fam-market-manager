@@ -218,7 +218,7 @@ class TestVendorReimbursementDenominationIntegrity:
                     'Market Name', 'Vendor', 'Month', 'Year-Month',
                     'Date(s)', 'Total Due to Vendor', 'FAM Match',
                     'FMNP (External)', 'Customer Forfeit',
-                    'Check Payable To', 'Address',
+                    'Check Payable To', 'ACH Enabled', 'Address',
                 })
             recon = (method_sum + r['FAM Match']
                      - r['Customer Forfeit']

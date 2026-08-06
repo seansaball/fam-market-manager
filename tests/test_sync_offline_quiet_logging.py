@@ -45,6 +45,23 @@ from fam.sync.gsheets import (
 from fam.sync.manager import SyncManager
 
 
+@pytest.fixture(autouse=True)
+def _fresh_db_for_offline_state(tmp_path):
+    """v2.1.2: ``SyncManager.sync_all`` now reads/writes the
+    ``sync_offline_notified`` setting for transition-based offline
+    logging (one warning per offline episode, not per cycle — the
+    periodic probe runs on closed days now).  Give every test a fresh
+    DB so that state starts clean ("online") and never leaks between
+    tests, which would otherwise suppress the first-offline warning."""
+    from fam.database.connection import set_db_path, close_connection
+    from fam.database.schema import initialize_database
+    close_connection()
+    set_db_path(str(tmp_path / "offline_log_state.db"))
+    initialize_database()
+    yield
+    close_connection()
+
+
 # ════════════════════════════════════════════════════════════════════
 # 1. _is_offline_error — classifier coverage
 # ════════════════════════════════════════════════════════════════════
@@ -200,16 +217,22 @@ def _make_offline_chain():
 
 
 class TestUpsertRowsQuietOffline:
-    """``upsert_rows`` must log exactly ONE warning per cycle when
-    the failure is offline-class — not a full traceback per tab."""
+    """v2.1.2: ``upsert_rows`` no longer logs offline failures at
+    WARNING (the periodic probe now runs on closed days, so a WARNING
+    per cycle would flood the Error Log).  The per-tab offline note is
+    now DEBUG — never reaching the WARNING+ Error Log — and the
+    canonical offline signal is SyncManager's transition-based warning
+    (one per offline episode).  The per-cycle short-circuit still
+    works: only the FIRST offline tab logs (at DEBUG), the rest are
+    silent."""
 
-    def test_first_offline_emits_one_warning(self, caplog):
+    def test_first_offline_no_warning_debug_only(self, caplog):
         backend = GoogleSheetsBackend()
         # Force the offline error during _authorize.
         with patch.object(
                 backend, '_authorize',
                 side_effect=_make_offline_chain()):
-            with caplog.at_level(logging.WARNING, logger='fam.sync.gsheets'):
+            with caplog.at_level(logging.DEBUG, logger='fam.sync.gsheets'):
                 result = backend.upsert_rows(
                     "Vendor Reimbursement", [{'a': 1}], ['a'])
 
@@ -217,70 +240,72 @@ class TestUpsertRowsQuietOffline:
         assert result.offline is True
         assert result.error == "Network unavailable"
 
-        # Exactly ONE warning record (not a traceback).
+        # NO WARNING reaches the Error Log — the offline note is DEBUG.
         warnings = [r for r in caplog.records
                     if r.levelno == logging.WARNING]
-        assert len(warnings) == 1
-        assert "network unavailable" in warnings[0].getMessage().lower()
-        # Critical: no exc_info attached → no traceback rendered.
-        assert warnings[0].exc_info is None
+        assert len(warnings) == 0
+        debugs = [r for r in caplog.records
+                  if r.levelno == logging.DEBUG
+                  and 'network unavailable' in r.getMessage().lower()]
+        assert len(debugs) == 1
+        assert debugs[0].exc_info is None  # never a traceback
 
     def test_subsequent_offline_calls_silent_in_same_cycle(self, caplog):
-        """The first offline failure logs.  The next 5 don't —
+        """The first offline failure logs (DEBUG).  The next 5 don't —
         they short-circuit silently."""
         backend = GoogleSheetsBackend()
         with patch.object(
                 backend, '_authorize',
                 side_effect=_make_offline_chain()):
-            with caplog.at_level(logging.WARNING, logger='fam.sync.gsheets'):
-                # First call — logs.
+            with caplog.at_level(logging.DEBUG, logger='fam.sync.gsheets'):
                 r1 = backend.upsert_rows("Tab1", [{'a': 1}], ['a'])
-                # Subsequent calls in the same cycle — silent.
                 r2 = backend.upsert_rows("Tab2", [{'a': 1}], ['a'])
                 r3 = backend.upsert_rows("Tab3", [{'a': 1}], ['a'])
                 r4 = backend.upsert_rows("Tab4", [{'a': 1}], ['a'])
                 r5 = backend.upsert_rows("Tab5", [{'a': 1}], ['a'])
                 r6 = backend.upsert_rows("Tab6", [{'a': 1}], ['a'])
 
-        # All 6 results are offline failures.
         for r in (r1, r2, r3, r4, r5, r6):
             assert r.offline is True
             assert r.success is False
 
-        # But only ONE warning was logged.
-        offline_warnings = [
+        # Zero WARNINGs; exactly one DEBUG note (the short-circuit holds).
+        assert not [r for r in caplog.records
+                    if r.levelno == logging.WARNING]
+        offline_debugs = [
             r for r in caplog.records
-            if r.levelno == logging.WARNING
+            if r.levelno == logging.DEBUG
             and 'network unavailable' in r.getMessage().lower()
         ]
-        assert len(offline_warnings) == 1, (
-            f"expected 1 offline warning, got {len(offline_warnings)}: "
-            f"{[w.getMessage() for w in offline_warnings]}")
+        assert len(offline_debugs) == 1, (
+            f"expected 1 offline DEBUG note, got {len(offline_debugs)}")
 
     def test_reset_state_re_arms_logging(self, caplog):
         """After ``reset_offline_state``, the next offline event
-        logs again (it's a NEW cycle)."""
+        logs again (DEBUG) — the per-cycle short-circuit re-arms."""
         backend = GoogleSheetsBackend()
         with patch.object(
                 backend, '_authorize',
                 side_effect=_make_offline_chain()):
-            with caplog.at_level(logging.WARNING, logger='fam.sync.gsheets'):
+            with caplog.at_level(logging.DEBUG, logger='fam.sync.gsheets'):
                 backend.upsert_rows("Tab1", [{'a': 1}], ['a'])
                 backend.upsert_rows("Tab2", [{'a': 1}], ['a'])  # silent
 
-                # Simulate next sync cycle.
-                backend.reset_offline_state()
+                backend.reset_offline_state()  # next cycle
 
                 backend.upsert_rows("Tab3", [{'a': 1}], ['a'])  # logs again
                 backend.upsert_rows("Tab4", [{'a': 1}], ['a'])  # silent
 
-        offline_warnings = [
+        offline_debugs = [
             r for r in caplog.records
-            if r.levelno == logging.WARNING
+            if r.levelno == logging.DEBUG
             and 'network unavailable' in r.getMessage().lower()
         ]
-        # ONE per cycle: cycle 1 + cycle 2 = 2 warnings total.
-        assert len(offline_warnings) == 2
+        # ONE per cycle: cycle 1 + cycle 2 = 2 DEBUG notes.
+        assert len(offline_debugs) == 2
+        # And still zero WARNINGs from the backend.
+        assert not [r for r in caplog.records
+                    if r.levelno == logging.WARNING]
 
     # ── Real-bug regression: traceback MUST still appear ──
 
@@ -539,13 +564,17 @@ class TestSyncResultOfflineFlag:
 
 class TestBethelParkReproducer:
     """End-to-end: feed the manager the EXACT exception chain that
-    appeared in the Bethel Park 2026-05-01 log and verify the new
-    behavior — ONE warning per cycle, not 6+ tracebacks."""
+    appeared in the Bethel Park 2026-05-01 log and verify the behavior.
 
-    def test_six_tabs_offline_produces_two_warnings_total(self, caplog):
-        """One backend-level warning (first tab) + one
-        manager-level summary = 2 total log records.
-        (Was: 6 ERROR tracebacks + 1 misleading INFO before the fix.)"""
+    v2.1.2 update: an all-offline cycle now produces exactly ONE
+    WARNING (the manager's transition summary — logged once per offline
+    EPISODE, since the periodic probe runs on closed days).  The
+    backend's per-tab offline note is now DEBUG, so it no longer adds a
+    WARNING.  Still ZERO ERROR tracebacks."""
+
+    def test_six_tabs_offline_produces_one_warning_total(self, caplog):
+        """One manager-level transition summary = 1 WARNING record.
+        (Was: 6 ERROR tracebacks pre-fix; then 2 warnings; now 1.)"""
         backend = GoogleSheetsBackend()
 
         # Make _authorize fail with the exact Bethel Park chain
@@ -587,15 +616,20 @@ class TestBethelParkReproducer:
             f"got {len(errors_with_tb)}.  This is the noisy "
             f"behavior the fix is supposed to eliminate.")
 
-        # Exactly the expected concise warnings:
-        #   - one from gsheets backend (first tab to fail)
-        #   - one from manager (cycle summary)
+        # Exactly ONE concise WARNING — the manager's transition
+        # summary.  The backend's per-tab offline note is DEBUG now.
         offline_warnings = [
             r for r in caplog.records
             if r.levelno == logging.WARNING
             and 'network unavailable' in r.getMessage().lower()
         ]
-        assert len(offline_warnings) == 2, (
-            f"expected 2 offline warnings (1 backend + 1 manager "
-            f"summary), got {len(offline_warnings)}: "
+        assert len(offline_warnings) == 1, (
+            f"expected 1 offline warning (manager transition summary), "
+            f"got {len(offline_warnings)}: "
             f"{[w.getMessage() for w in offline_warnings]}")
+        # (The backend's per-tab DEBUG note is asserted robustly in
+        # TestUpsertRowsQuietOffline.test_first_offline_no_warning_debug_only,
+        # which sets the gsheets logger level explicitly.  Re-checking
+        # it here is fragile in the full suite because a prior test's
+        # setup_logging raises the ``fam`` logger to INFO, filtering
+        # the DEBUG record before caplog sees it.)

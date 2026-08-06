@@ -769,7 +769,7 @@ def audit_post_confirm(conn, market_day_id):
                 'Market Name', 'Vendor', 'Month', 'Year-Month',
                 'Date(s)', 'Total Due to Vendor', 'FAM Match',
                 'FMNP (External)', 'Customer Forfeit',
-                'Check Payable To', 'Address',
+                'Check Payable To', 'ACH Enabled', 'Address',
                 'market_code', 'device_id')
             and not k.endswith(' (External)')
             and isinstance(v, (int, float))

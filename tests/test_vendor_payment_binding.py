@@ -1339,7 +1339,7 @@ class TestVendorReimbursementReport:
                          'Year-Month', 'Date(s)',
                          'Total Due to Vendor', 'FAM Match',
                          'FMNP (External)', 'Customer Forfeit',
-                         'Check Payable To', 'Address',
+                         'Check Payable To', 'ACH Enabled', 'Address',
                          'market_code', 'device_id')
             and isinstance(v, (int, float)))
         assert round(

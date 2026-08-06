@@ -372,7 +372,7 @@ class TestVendorReimbursementColumn:
                           'Year-Month', 'Date(s)',
                           'Total Due to Vendor', 'FAM Match',
                           'FMNP (External)', 'Customer Forfeit',
-                          'Check Payable To', 'Address'})
+                          'Check Payable To', 'ACH Enabled', 'Address'})
         assert abs(
             method_sum + r['FAM Match'] - r['Customer Forfeit']
             + r['FMNP (External)'] - r['Total Due to Vendor']

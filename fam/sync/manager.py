@@ -165,14 +165,38 @@ class SyncManager:
             n for n, r in results.items()
             if not r.success and getattr(r, 'offline', False)
         ]
-        if offline_failures and len(offline_failures) == len(failed):
-            logger.warning(
-                "Sync skipped — network unavailable (%d tab(s) "
-                "deferred; will retry on next sync)",
-                len(offline_failures))
+        # v2.1.2: log offline state on the TRANSITION, not every cycle.
+        # The periodic probe now runs even when the market day is closed,
+        # so a laptop left on without internet would otherwise emit a
+        # "network unavailable" WARNING every 5 minutes indefinitely,
+        # inflating the Error Log.  Instead: log ONE warning when sync
+        # first goes offline, stay silent for the whole offline episode,
+        # and log ONE info line when it recovers.  ``sync_offline_notified``
+        # persists the state across cycles (each cycle builds a fresh
+        # SyncManager, so instance state won't survive).
+        was_offline = get_setting('sync_offline_notified') == '1'
+        fully_offline = (offline_failures
+                         and len(offline_failures) == len(failed))
+        if fully_offline:
+            if not was_offline:
+                logger.warning(
+                    "Sync paused — network unavailable (%d tab(s) "
+                    "deferred). Will keep retrying quietly and resume "
+                    "automatically when the connection returns.",
+                    len(offline_failures))
+                set_setting('sync_offline_notified', '1')
+            # Already-offline cycles are intentionally silent.
         else:
-            logger.info("Sync complete: %d tabs, %d rows, %d failures",
-                        len(results), total_rows, len(failed))
+            if was_offline:
+                logger.info("Sync resumed — network available again.")
+                set_setting('sync_offline_notified', '0')
+            # Only log completion when something actually happened —
+            # a clean no-op probe (0 rows, 0 failures) stays silent so
+            # the every-5-minute cadence doesn't grow the file either.
+            if failed or total_rows > 0:
+                logger.info(
+                    "Sync complete: %d tabs, %d rows, %d failures",
+                    len(results), total_rows, len(failed))
 
         # Sync agent tracker as the final step — reports this sync's outcome
         try:

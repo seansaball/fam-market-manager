@@ -486,16 +486,22 @@ class GoogleSheetsBackend(SyncBackend):
 
         except Exception as e:
             if _is_offline_error(e):
-                # First offline failure of this sync cycle.  Log
-                # ONE concise warning (no traceback) and arm the
-                # short-circuit so subsequent tabs don't log
-                # again.  The summary line in SyncManager.sync_all
-                # rolls everything up.
+                # First offline failure of this sync cycle.  Arm the
+                # short-circuit so subsequent tabs skip instantly.
+                #
+                # v2.1.2: log at DEBUG, not WARNING.  The periodic sync
+                # probe now runs even when the market day is closed, so
+                # a laptop left on without internet would emit a WARNING
+                # here every cycle — inflating the Error Log.  The
+                # canonical offline signal is SyncManager.sync_all's
+                # transition-based warning (logged ONCE per offline
+                # episode, not per cycle).  This line stays available
+                # for deep file-level troubleshooting but no longer
+                # reaches the WARNING+ Error Log report.
                 if not self._offline_this_cycle:
-                    logger.warning(
+                    logger.debug(
                         "upsert_rows for %s skipped: network "
-                        "unavailable (%s — will retry next sync)",
-                        sheet_name, type(e).__name__)
+                        "unavailable (%s)", sheet_name, type(e).__name__)
                     self._offline_this_cycle = True
                 return SyncResult(
                     success=False,

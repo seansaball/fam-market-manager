@@ -159,6 +159,53 @@ def _set_identity(market_code='TST', device_id='dev-01'):
 
 
 # ──────────────────────────────────────────────────────────────────
+# 0. ACH Enabled column (per-vendor Yes/No, all row paths)
+# ──────────────────────────────────────────────────────────────────
+class TestAchEnabledColumn:
+    """The Vendor Reimbursement report carries an 'ACH Enabled' Yes/No
+    column reflecting the per-vendor ach_enabled flag.  It is a display
+    attribute (not part of the upsert key) applied at final emission so
+    it covers transaction, FMNP-only, and external-only vendor rows."""
+
+    def test_ach_yes_and_no(self):
+        _set_identity()
+        conn = get_connection()
+        market, vendor, pm = _ids()
+        # Default seed vendor: ach_enabled defaults to 0 → "No".
+        # Flip a second vendor to ach_enabled=1 → "Yes".
+        cur = conn.execute(
+            "INSERT INTO vendors (name, check_payable_to, ach_enabled) "
+            "VALUES ('ACH Vendor LLC', 'ACH Vendor LLC', 1)")
+        ach_vendor_id = cur.lastrowid
+        conn.commit()
+
+        md = _open_md(market['id'], '2026-04-15')
+        _add_txn(md, vendor['id'], pm['id'], pm['name'],
+                 pm['match_percent'],
+                 receipt_cents=1000, customer_cents=500, match_cents=500,
+                 fam_tid='FAM-TST-20260415-0001')
+        _add_txn(md, ach_vendor_id, pm['id'], pm['name'],
+                 pm['match_percent'],
+                 receipt_cents=2000, customer_cents=1000, match_cents=1000,
+                 fam_tid='FAM-TST-20260415-0002')
+
+        from fam.sync.data_collector import collect_sync_data
+        rows = collect_sync_data()['Vendor Reimbursement']
+        by_vendor = {r['Vendor']: r for r in rows}
+        assert 'ACH Enabled' in by_vendor[vendor['name']]
+        assert by_vendor[vendor['name']]['ACH Enabled'] == 'No'
+        assert by_vendor['ACH Vendor LLC']['ACH Enabled'] == 'Yes'
+
+    def test_ach_not_part_of_upsert_key(self):
+        """ACH Enabled is display-only — must never enter SHEET_KEYS
+        (a per-vendor attribute flipping must not fragment monthly
+        rows)."""
+        from fam.sync.manager import SyncManager
+        assert 'ACH Enabled' not in SyncManager.SHEET_KEYS[
+            'Vendor Reimbursement']
+
+
+# ──────────────────────────────────────────────────────────────────
 # 1. Two months → two rows
 # ──────────────────────────────────────────────────────────────────
 class TestMonthlySplit:

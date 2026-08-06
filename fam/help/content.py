@@ -893,8 +893,14 @@ the wrong vendor, a payment-method total was off.
 1. **Adjustments** screen
 2. Filter / search to find the transaction
 3. Click **Adjust** on the row
-4. The Adjustment dialog opens with the current values pre-loaded
-5. Change what needs to change:
+4. Choose what you're doing (v2.1.2):
+   - **Adjust Payment** — change the receipt total, vendor, or
+     payment-method breakdown (the normal adjustment, below).
+   - **Correct Amount Collected** — the amount actually charged (e.g.
+     on the EBT terminal) differed from what was logged. See
+     *"Correcting the amount actually collected."*
+5. For a normal adjustment, the Adjustment dialog opens with the
+   current values pre-loaded.  Change what needs to change:
    - Receipt total (other rows rescale proportionally; click ⚡
      Auto-Distribute for a fresh redistribution)
    - Vendor
@@ -918,7 +924,63 @@ the wrong vendor, a payment-method total was off.
 """,
         keywords=('adjust', 'edit', 'correct', 'fix', 'modify', 'change'),
         related_articles=('void-transaction', 'auto-distribute-button',
-                          'audit-log'),
+                          'audit-log', 'correct-amount-collected'),
+        screen='admin',
+    ),
+
+    Article(
+        id='correct-amount-collected',
+        category_id='corrections',
+        title='Correcting the amount actually collected',
+        body="""\
+Sometimes the amount **actually charged** differs from what was logged
+— most often an EBT terminal keying error (logged $12.75, but the card
+was charged $12.50).  The vendor is still owed the full receipt, but the
+SNAP total in the app no longer matches what SNAP will deposit in the
+bank.  "Correct Amount Collected" fixes exactly this, without disturbing
+anything else.
+
+## When to use it
+
+- Use this when the **collection was short** — you charged less than
+  what the app recorded — and you want the report to match the real
+  deposit.
+- Only works on **non-denominated** methods (SNAP, Cash).  A physical
+  token or check has a fixed face value and can't be under-charged.
+
+## To correct
+
+1. **Adjustments** screen → find the transaction → **Adjust**
+2. Choose **Correct Amount Collected**
+3. Pick the method (e.g. SNAP) and enter the amount that was **actually
+   collected**
+4. The preview spells out the effect; click **Record Correction**
+
+## What it does
+
+- Lowers the recorded amount to the real charge, so the **SNAP total
+  matches your bank deposit**
+- **Keeps the FAM match unchanged** — the match was correct; only the
+  collection fell short
+- Books the difference as **Unallocated Funds** (FAM absorbs it)
+- The **vendor total never changes**
+
+## A note on the numbers
+
+Because SNAP is doubled, a $0.25 short-charge on a 100%-match
+transaction shows as **$0.50** in Unallocated Funds ($0.25 the customer
+didn't pay + $0.25 of match on it).  That's expected — the SNAP line is
+the one that matters for the bank, and it will read the real amount.
+
+For an **over-collection** (you charged more than logged — the customer
+is owed a refund), this tool does not apply; handle that as a separate
+correction.
+""",
+        keywords=('collection', 'variance', 'ebt', 'terminal', 'snap',
+                  'short', 'undercharge', 'actually charged', 'deposit',
+                  'unallocated', 'correct'),
+        related_articles=('adjust-transaction', 'unallocated-funds',
+                          'snap-settlement'),
         screen='admin',
     ),
 
@@ -1849,7 +1911,14 @@ vendor.
 | FMNP (External) | What FAM owes for FMNP checks the vendor matched at the booth — the match component, which at FMNP's 100% match equals the face value (the vendor recovered the face by cashing the check with the program).  This column is unchanged in v2.1.0. |
 | {Method} (External) | v2.1.0+: one column per other external-enabled method (e.g. "Food RX (External)", "JH Food Bucks (External)") carrying the FAM-owed amounts for entries recorded on the External Payments Entry screen.  These add into Total Due to Vendor. |
 | Check Payable To | The vendor's check-payable name |
+| ACH Enabled | v2.1.2+: **Yes/No** per vendor, from the vendor's ACH setting in Settings → Vendors.  Lets you see at a glance which vendors are set up for ACH vs. a paper check.  It does not affect any total. |
 | Address | Mailing address |
+
+## Setting a vendor's ACH status
+
+Open **Settings → Vendors → (edit vendor)** and tick **ACH Enabled**.
+The report's ACH column fills in on the next sync — including for the
+vendor's past months (it reflects the vendor's current setting).
 
 ## How FMNP (External) folds into Total Due
 
@@ -2422,6 +2491,10 @@ Optional:
 
 - **Denomination** — for token/check methods sold in fixed amounts
   (e.g. FMNP at $5).  Uses a stepper UI instead of free-form entry.
+  v2.1.2+: **sub-dollar denominations are supported** — you can set
+  $0.50 (e.g. JH Tokens sold in 50-cent increments), $0.25, etc.  The
+  smallest allowed is $0.01.  (Before v2.1.2 the minimum was $1.00,
+  which silently snapped a typed $0.50 back to $1.00.)
 - **Photo Required** — Off / Optional / Mandatory (currently used by
   FMNP only)
 
@@ -2610,12 +2683,24 @@ Sync is triggered automatically by:
 - Voiding a transaction
 - Voiding a customer order
 - Closing a market day
-- Every 5 minutes during an open market day (periodic timer)
+- Every 5 minutes while the periodic timer is on — v2.1.2+: this now
+  **keeps running after the market day closes**, so data entered later
+  (e.g. reconciling the next day on a connected laptop) reaches the
+  cloud automatically without a manual sync.  Turn it on in
+  **Settings → Cloud Sync** ("sync every 5 minutes").
 
 Multiple triggers within 60 seconds are debounced into a single sync
 to avoid flooding the Google Sheets API.
 
 You can also click **Sync to Cloud** in the header bar to force sync.
+
+## Working offline (on-site with no internet)
+
+If a market runs without internet, syncs are deferred and retried
+automatically.  v2.1.2+: the app notes it's offline **once** when the
+connection drops and **once** when it returns — no more repeated
+network-error noise in the logs — and resumes syncing on its own when
+the laptop is back online.
 
 ## What's synced
 

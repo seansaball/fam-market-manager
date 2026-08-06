@@ -99,6 +99,25 @@ def setup_logging(data_dir: str | None = None):
     # above, so they pass independently.
     if root_logger.level == logging.NOTSET or root_logger.level > logging.WARNING:
         root_logger.setLevel(logging.WARNING)
+
+    # v2.1.2: silence third-party connection-retry chatter.  When the
+    # laptop is offline (on-site market with no internet, or a closed
+    # day before the coordinator reconnects), every deferred sync makes
+    # urllib3 and google-auth log their internal retries at WARNING —
+    # 3+ lines per failed request, e.g.
+    #   "Retrying (Retry(total=0/1/2...)) ... NameResolutionError ...".
+    # Those propagate to root (WARNING) and flood the file + Error Log
+    # report.  FAM's OWN offline handling is already coalesced to one
+    # line per cycle (see gsheets._is_offline_error + manager.sync_all's
+    # offline summary), so the operator still gets the useful signal.
+    # Raise these noisy libraries to ERROR so their retry WARNINGs are
+    # dropped at the originating level while genuine ERROR+ still
+    # surfaces.  This is the prerequisite for keeping periodic sync
+    # probes running during closed market days without log inflation.
+    for _noisy in ('urllib3', 'urllib3.connectionpool',
+                   'google.auth', 'google.auth.transport',
+                   'google_auth_httplib2', 'requests'):
+        logging.getLogger(_noisy).setLevel(logging.ERROR)
     # Idempotent: only attach our handler once.  Identity check by
     # baseFilename so re-running setup_logging() doesn't pile up
     # rotating-file handlers (which would lock the file under each

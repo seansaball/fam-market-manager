@@ -38,7 +38,7 @@
 | **Per-row ⚡ toggle** | Click the small ⚡ icon on each non-denom payment row to toggle Active (green, gets filled) ↔ Locked (grey, value pinned). Typing into the amount field auto-locks the row |
 | **Confirm** | Saves the transaction. From here on, use Adjustments to change it |
 | **Void** | Cancels the entire transaction. There is no un-void |
-| **Adjust** | Edit a confirmed transaction (changes payment lines, not the receipt total) |
+| **Adjust** | Edit a confirmed transaction. v2.1.2+ asks: **Adjust Payment** (receipt / vendor / breakdown) or **Correct Amount Collected** (the amount actually charged, e.g. on the EBT terminal, differed from what was logged — keeps the FAM match, books the difference as Unallocated Funds, vendor total unchanged) |
 | **Discard** | Throw away an in-progress order before confirming |
 
 ---

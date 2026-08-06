@@ -154,15 +154,19 @@ class TestLoggingConfigCapturesEverything:
 
 
 class TestThirdPartyLoggersReachLog:
-    """gspread / urllib3 / requests / google.auth records must reach
-    the rotating log so a coordinator triaging "sync failed" can see
-    the full picture in the Error Log report."""
+    """Meaningful third-party records (gspread API errors, oauth2
+    response problems) must reach the rotating log so a coordinator
+    triaging "sync failed" sees the full picture.
+
+    v2.1.2 split: the NOISY connection-retry loggers (urllib3,
+    requests, google.auth.transport) are deliberately raised to ERROR
+    so their per-retry WARNING chatter (3+ lines per failed request
+    while offline) no longer floods the Error Log.  Their ERROR+ still
+    reaches.  See ``TestNoisyRetryLoggersSuppressed`` and the comment
+    block in ``logging_config.setup_logging``."""
 
     @pytest.mark.parametrize('logger_name', [
         'gspread.client',
-        'urllib3.connectionpool',
-        'requests.adapters',
-        'google.auth.transport.requests',
         'google.oauth2._client',
     ])
     def test_thirdparty_warning_reaches_log(
@@ -185,10 +189,66 @@ class TestThirdPartyLoggersReachLog:
             if e['module'] == logger_name
         ]
         assert matching, (
-            f"WARNING from third-party logger {logger_name!r} must "
-            f"reach the rotating log.  All entries: "
+            f"WARNING from meaningful third-party logger {logger_name!r} "
+            f"must reach the rotating log.  All entries: "
             f"{[(e['level'], e['module']) for e in entries]}")
         assert matching[0]['level'] == 'WARNING'
+
+
+class TestNoisyRetryLoggersSuppressed:
+    """v2.1.2: connection-retry loggers are raised to ERROR so their
+    WARNING-level retry chatter is dropped (offline at an on-site
+    market produced 3+ ``Retrying (Retry(total=...))`` lines per
+    deferred sync, flooding the Error Log).  FAM's own offline
+    handling stays coalesced to one line per cycle.  ERROR+ from these
+    libraries still reaches the log so genuine failures aren't hidden."""
+
+    NOISY = [
+        'urllib3',
+        'urllib3.connectionpool',
+        'requests.adapters',
+        'google.auth.transport.requests',
+    ]
+
+    @pytest.mark.parametrize('logger_name', NOISY)
+    def test_retry_warning_is_suppressed(self, tmp_path, logger_name):
+        from fam.utils.logging_config import setup_logging
+        from fam.utils.log_reader import parse_log_file
+
+        log_path = setup_logging(str(tmp_path))
+        logging.getLogger(logger_name).warning(
+            "Retrying (Retry(total=0...)) NameResolutionError")
+        for h in logging.getLogger().handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+
+        entries = parse_log_file(log_path) if os.path.exists(log_path) else []
+        assert not [e for e in entries if e['module'] == logger_name], (
+            f"Retry WARNING from noisy logger {logger_name!r} should be "
+            f"suppressed (raised to ERROR in v2.1.2).")
+
+    @pytest.mark.parametrize('logger_name', NOISY)
+    def test_real_error_still_reaches_log(self, tmp_path, logger_name):
+        from fam.utils.logging_config import setup_logging
+        from fam.utils.log_reader import parse_log_file
+
+        log_path = setup_logging(str(tmp_path))
+        logging.getLogger(logger_name).error(
+            "genuine failure from %s", logger_name)
+        for h in logging.getLogger().handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+
+        entries = parse_log_file(log_path)
+        matching = [e for e in entries if e['module'] == logger_name]
+        assert matching, (
+            f"ERROR from {logger_name!r} must still reach the log — "
+            f"only WARNING-level retry chatter is suppressed.")
+        assert matching[0]['level'] == 'ERROR'
 
     def test_thirdparty_error_reaches_log(self, tmp_path):
         from fam.utils.logging_config import setup_logging

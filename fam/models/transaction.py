@@ -713,6 +713,137 @@ def get_payment_line_items(transaction_id):
     return [dict(r) for r in rows]
 
 
+def apply_collection_variance(transaction_id, payment_method_id,
+                              actual_collected_cents, *,
+                              changed_by='System', reason=None,
+                              notes=None, commit=True):
+    """Record that the amount ACTUALLY collected for a non-denominated
+    method was LESS than what was logged (ENH-008).
+
+    Field case: an EBT terminal keying error logs SNAP $12.75 but the
+    card was charged $12.50.  The vendor is owed the full receipt
+    (unchanged); FAM's SNAP deposit is $0.25 short; the SNAP report
+    should read the $12.50 actually collected, with FAM's match left
+    intact and the $0.25 booked as absorbed.
+
+    This is a SURGICAL correction that deliberately does NOT run the
+    payment engine (``resolve_payment_state`` re-derives match from
+    charge, which would drop the match — the exact thing we must
+    avoid).  It:
+
+      * reduces the target line's ``customer_charged`` to the actual
+        collected amount,
+      * reduces its ``method_amount`` by the same variance,
+      * leaves ``match_amount`` UNCHANGED (the transaction and FAM's
+        contribution were correct — only collection fell short), and
+      * books the variance as Unallocated Funds so the vendor total
+        (receipt) is unchanged.
+
+    Because ``match_amount`` is frozen, the customer's daily match cap
+    is unaffected — no cap recomputation is required.  Reconciliation
+    still holds: ``customer_charged + match + absorbed == receipt``.
+
+    Restricted to UNDER-collection of NON-DENOMINATED methods.  Raises
+    ``ValueError`` on: transaction not found / voided, no matching
+    non-zero target line, a denominated target method, over-collection
+    (actual > logged — a refund-owed event, out of scope), or zero
+    variance.
+
+    Returns the variance in integer cents.
+    """
+    from fam.models.payment_method import (
+        get_payment_method_by_id, get_unallocated_funds_method,
+        UNALLOCATED_FUNDS_NAME,
+    )
+    # NOTE: log_action is imported at module level — do NOT re-import
+    # it locally (that shadows the module binding; see
+    # test_codebase_hygiene.TestNoUnboundLocalShadows).
+
+    conn = get_connection()
+    txn = conn.execute(
+        "SELECT status FROM transactions WHERE id=?",
+        (transaction_id,)).fetchone()
+    if txn is None:
+        raise ValueError("Transaction not found.")
+    if txn['status'] == 'Voided':
+        raise ValueError("Cannot correct a voided transaction.")
+
+    items = get_payment_line_items(transaction_id)
+    target = next(
+        (it for it in items
+         if it['payment_method_id'] == payment_method_id
+         and it['method_amount'] > 0), None)
+    if target is None:
+        raise ValueError("No matching payment line to correct.")
+
+    pm = get_payment_method_by_id(payment_method_id)
+    if pm and (pm.get('denomination') or 0) > 0:
+        raise ValueError(
+            "Collection variance applies only to non-denominated "
+            "methods (e.g. SNAP, Cash) — a denominated instrument's "
+            "face value is fixed and cannot be under-charged.")
+
+    logged = target['customer_charged']
+    if actual_collected_cents < 0:
+        raise ValueError("Actual collected amount cannot be negative.")
+    if actual_collected_cents > logged:
+        raise ValueError(
+            "Actual collected is MORE than logged — that is an "
+            "over-collection (the customer is owed a refund), a "
+            "different correction not supported here.")
+    variance = logged - actual_collected_cents
+    if variance <= 0:
+        raise ValueError("No variance to record (amounts already match).")
+
+    # Surgical mutation — match_amount is deliberately untouched.
+    target['customer_charged'] = actual_collected_cents
+    target['method_amount'] = target['method_amount'] - variance
+
+    # Book the variance as Unallocated Funds (FAM absorbs it so the
+    # vendor total is unchanged).  Increment an existing UF line if
+    # the transaction already carries one, else append a new one.
+    uf = get_unallocated_funds_method()
+    if uf is None:
+        raise ValueError(
+            "Unallocated Funds system method is missing (schema v25 "
+            "migration incomplete).")
+    uf_line = next(
+        (it for it in items
+         if it['method_name_snapshot'] == UNALLOCATED_FUNDS_NAME), None)
+    if uf_line is not None:
+        uf_line['method_amount'] = uf_line['method_amount'] + variance
+    else:
+        items.append({
+            'payment_method_id': uf['id'],
+            'method_name_snapshot': uf['name'],
+            'match_percent_snapshot': uf['match_percent'],
+            'match_percent': uf['match_percent'],
+            'method_amount': variance,
+            'match_amount': 0,
+            'customer_charged': 0,
+            'photo_path': None,
+        })
+
+    save_payment_line_items(transaction_id, items, commit=False)
+    log_action(
+        'payment_line_items', transaction_id, 'COLLECTION_VARIANCE',
+        changed_by,
+        field_name=target['method_name_snapshot'],
+        old_value=f"collected {logged}c",
+        new_value=(f"collected {actual_collected_cents}c "
+                   f"(variance {variance}c -> Unallocated Funds; "
+                   f"match unchanged)"),
+        reason_code=reason, notes=notes, commit=False)
+    if commit:
+        conn.commit()
+    logger.info(
+        "Collection variance applied: txn=%s method=%s logged=%dc "
+        "actual=%dc variance=%dc", transaction_id,
+        target['method_name_snapshot'], logged,
+        actual_collected_cents, variance)
+    return variance
+
+
 def get_pending_payment_photo_uploads():
     """Return payment line items that have local photo(s) with incomplete Drive uploads.
 

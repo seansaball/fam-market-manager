@@ -193,7 +193,7 @@ class TestVendorReimbursementExternalColumns:
         meta = {'Market Name', 'Vendor', 'Month', 'Year-Month',
                 'Date(s)', 'Total Due to Vendor', 'FAM Match',
                 'FMNP (External)', 'Customer Forfeit',
-                'Check Payable To', 'Address'}
+                'Check Payable To', 'ACH Enabled', 'Address'}
         ext_cols = [k for k in row if k.endswith(' (External)')
                     and k != 'FMNP (External)']
         method_cols = [k for k in row

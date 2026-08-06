@@ -12,8 +12,9 @@
 > change-impact protocol. This file is the encyclopedia CLAUDE.md points into;
 > read the sections relevant to your task rather than the whole file.
 >
-> **Last updated:** 2026-06-09 — v2.0.9 shipped (Vendor Reimbursement monthly
-> split). CLAUDE.md added as the auto-loaded session-rules entry point.
+> **Last updated:** 2026-07 — v2.1.2 in preparation (Collection Variance,
+> ACH column, closed-day auto-sync, quiet offline logging; v2.1.0 and
+> v2.1.1 shipped). CLAUDE.md is the auto-loaded session-rules entry point.
 
 ---
 
@@ -21,13 +22,18 @@
 
 If you are a fresh AI session opening this repo, read this first:
 
-- **v2.1.0 is BUILT but UNRELEASED and HELD OPEN** (Sean,
-  2026-06-11): more enhancements are being added to this release
-  before it ships — do not tag/release; fold new work into v2.1.0
-  and its existing release-notes files. The whole build is
-  uncommitted working-tree state until Sean approves a commit. See
-  the "v2.1.0 RELEASE STATUS" block in BUGS_BACKLOG.md (local) for
-  the standing instructions.
+- **v2.1.0 and v2.1.1 SHIPPED; v2.1.2 is in preparation** (uncommitted
+  working tree). v2.1.2 adds: **ENH-008 Collection Variance** ("Correct
+  Amount Collected" via the Adjust chooser — engine-free surgical
+  correction that keeps the FAM match and books the difference as
+  Unallocated Funds), the **ACH Enabled** column on Vendor
+  Reimbursement (in-app + Sheets), **closed-day auto-sync** (the
+  periodic timer keeps running after the market day closes so pending
+  data flushes on reconnect), and **quiet offline logging** (urllib3/
+  google-auth retry chatter suppressed; FAM offline state logged once
+  per episode, not per cycle). No schema migration (still v41). See the
+  RELEASE STATUS block in BUGS_BACKLOG.md (local) for the current
+  standing instructions. v2.1.1 shipped sub-dollar denominations.
 - **v2.1.0 (2026-06-11, ENH-002): External Payments Entry.** The
   FMNP Entry screen is generalized to ALL payment methods with
   `external_matching_accepted` ON (nav: "External Payments"; FMNP
